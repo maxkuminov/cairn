@@ -1,0 +1,11 @@
+{% import "_macros.html" as m %}
+{# Shared rail-header controls: the "N need action" pill + bulk Acknowledge-all button. Shown only
+   while open events remain. Rendered inside #open-events-pill so a single-ack or ack-all OOB swap
+   keeps the pill and the button in sync (both vanish once open_events hits 0). #}
+{%- if open_events and open_events > 0 -%}
+<span class="pill pill--soft pill--danger pill--sm">{{ open_events }} need action</span>
+<button class="btn btn--sm btn--subtle" style="margin-left:6px"
+        hx-post="/events/ack-all" hx-target="#events-feed" hx-swap="innerHTML">
+  {{ m.icon("check", size=14, stroke=2) }} Acknowledge all
+</button>
+{%- endif -%}

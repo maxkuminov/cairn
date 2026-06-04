@@ -1,0 +1,8 @@
+{% include "partials/_event_row.html" %}
+{# OOB swaps: update the rail controls (pill + Acknowledge-all) and the sidebar Dashboard badge. #}
+<span id="open-events-pill" hx-swap-oob="innerHTML">
+  {% include "partials/_events_controls.html" %}
+</span>
+<span id="sidebar-alert-badge" hx-swap-oob="innerHTML">
+  {% if alert_count and alert_count > 0 %}<span class="nav-badge">{{ alert_count }}</span>{% endif %}
+</span>

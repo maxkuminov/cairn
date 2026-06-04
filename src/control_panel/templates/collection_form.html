@@ -1,0 +1,199 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}{% if existing %}Edit {{ existing.name }}{% else %}Add a collection{% endif %} · Cairn{% endblock %}
+{% block content %}
+{%- set ed = existing -%}
+{%- set sel_mode = ed.mode if ed else "worm" -%}
+{%- set sel_ots = ed.ots if ed else "perfile" -%}
+{%- set sel_cadence = ed.cadence_seconds if ed else "86400" -%}
+{%- set sel_verify = ed.verify_cadence_seconds if ed else "604800" -%}
+<div style="max-width:760px">
+  <div class="page-header">
+    <div>
+      <a class="back-link" href="{% if ed %}/collection/{{ ed.id }}{% else %}/{% endif %}">{{ m.icon("arrowLeft", size=15) }} {% if ed %}Back to collection{% else %}Dashboard{% endif %}</a>
+      <h1>{% if ed %}Edit {{ ed.name }}{% else %}Add a collection{% endif %}</h1>
+      <div class="page-header__sub">A collection is a folder Cairn watches under its own policy. Roots are limited to your admin-provisioned, read-only mount.</div>
+    </div>
+  </div>
+
+  <form id="collection-form" class="form-stack"
+        method="post" action="{% if ed %}/collection/{{ ed.id }}{% else %}/collection{% endif %}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+
+    {# Identity & location #}
+    <div class="card" style="padding:22px">
+      <div class="section-label">Identity &amp; location</div>
+      <div class="form-grid-1">
+        <label class="field">
+          <div class="field__label-row"><span class="field__label">Collection name <span class="field__req">*</span></span></div>
+          <input class="input" id="collection-name" name="name" value="{{ ed.name if ed else '' }}" placeholder="e.g. Family photos" />
+        </label>
+        <label class="field">
+          <div class="field__label-row"><span class="field__label">Root path <span class="field__req">*</span></span></div>
+          <div class="input-wrap">
+            <input class="input mono" id="collection-root" name="root" value="{{ ed.root if ed else '' }}"
+                   placeholder="/srv/My Folder" style="padding-right:38px"
+                   hx-get="/collection/validate-root" hx-trigger="keyup changed delay:250ms, load"
+                   hx-target="#root-validation" hx-swap="outerHTML"
+                   hx-vals='js:{path: document.getElementById("collection-root").value}' />
+            <div id="root-validation" data-valid="0"></div>
+          </div>
+          <div class="field__hint">Must resolve to an existing directory. Mounted read-only — Cairn can never modify what it watches.</div>
+        </label>
+      </div>
+    </div>
+
+    {# Integrity policy #}
+    <div class="card" style="padding:22px">
+      <div class="section-label">Integrity policy</div>
+      <div class="form-grid-2">
+        <label class="field">
+          <div class="field__label-row"><span class="field__label">Change policy</span></div>
+          <div class="seg seg--equal">
+            {% for k, lbl in [("worm", "WORM"), ("churn", "Churn")] %}
+              <label class="seg__btn {% if sel_mode == k %}is-active{% endif %}" data-seg="mode" data-val="{{ k }}">
+                <input type="radio" name="mode" value="{{ k }}" {% if sel_mode == k %}checked{% endif %} style="display:none" /> {{ lbl }}
+              </label>
+            {% endfor %}
+          </div>
+          <div class="field__hint">WORM treats any change as suspicious. Churn expects edits and only flags missing files.</div>
+        </label>
+        <label class="field">
+          <div class="field__label-row"><span class="field__label">Scan cadence</span></div>
+          <select class="select" name="cadence">
+            {% for val, lbl in cadence_options %}
+              <option value="{{ val }}" {% if sel_cadence|string == val %}selected{% endif %}>{{ lbl }}</option>
+            {% endfor %}
+          </select>
+          <div class="field__hint">Stagger large collections — you can't full-rescan 186k files every 5 minutes.</div>
+        </label>
+      </div>
+      <div class="form-grid-2" style="margin-top:16px">
+        <label class="field">
+          <div class="field__label-row"><span class="field__label">Deep verify</span></div>
+          <select class="select" name="verify_cadence">
+            {% for val, lbl in verify_cadence_options %}
+              <option value="{{ val }}" {% if sel_verify|string == val %}selected{% endif %}>{{ lbl }}</option>
+            {% endfor %}
+          </select>
+          <div class="field__hint">Full re-hash of every file to catch silent corruption (bit-rot) the quick scan misses by trusting size + mtime. Heavier — weekly is plenty for archives. Run <code>cairn bench</code> to estimate the cost.</div>
+        </label>
+        <label class="field">
+          <div class="field__label-row"><span class="field__label">Auto-baseline new files</span></div>
+          <select class="select" name="auto_baseline">
+            <option value="off" {% if not (ed and ed.auto_baseline_new) %}selected{% endif %}>Off — baseline new files manually</option>
+            <option value="on" {% if ed and ed.auto_baseline_new %}selected{% endif %}>On — graduate intact new files on each deep verify</option>
+          </select>
+          <div class="field__hint">When on, the deep-verify pass promotes new files that re-hash intact to "verified OK", so additions don't pile up needing a manual baseline. Modified and missing files are never auto-accepted.</div>
+        </label>
+      </div>
+    </div>
+
+    {# Notarization #}
+    <div class="card" style="padding:22px">
+      <div class="section-label">Notarization (OpenTimestamps)</div>
+      <div style="margin-top:16px">
+        <div class="field__label" style="margin-bottom:7px">Anchoring mode</div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          {% for k, t, d, ic in [
+            ("perfile", "Per-file", "Each file independently anchored to Bitcoin — a portable proof you can hand off.", "bitcoin"),
+            ("none", "Tripwire only", "Detect changes, but don't notarize. Best for sets that never change, like ROMs.", "verify")] %}
+            <label class="radio-card {% if sel_ots == k %}is-selected{% endif %}" data-ots="{{ k }}">
+              <input type="radio" name="ots" value="{{ k }}" {% if sel_ots == k %}checked{% endif %} style="display:none" />
+              <span class="radio-card__icon">{{ m.icon(ic, size=18) }}</span>
+              <div>
+                <div class="radio-card__title">{{ t }}</div>
+                <div class="radio-card__desc">{{ d }}</div>
+              </div>
+              <span class="radio-card__check">{{ m.icon("checkCircle" if sel_ots == k else "minusCircle", size=18) }}</span>
+            </label>
+          {% endfor %}
+        </div>
+        <div class="field__hint" style="margin-top:8px">Per-file gives each file a standalone, portable proof. Tripwire skips notarization.</div>
+      </div>
+    </div>
+
+    {# Exclusions & alerts #}
+    <div class="card" style="padding:22px">
+      <div class="section-label">Exclusions &amp; alerts</div>
+      <div class="form-grid-2">
+        <label class="field">
+          <div class="field__label-row"><span class="field__label">Exclude globs</span></div>
+          <textarea class="textarea mono" name="excludes" rows="5" style="font-size:12px">{{ ed.excludes if ed else default_excludes }}</textarea>
+          <div class="field__hint">One pattern per line. Skip caches, temp files, and the Obsidian vault.</div>
+        </label>
+        {%- set email_on = ed.email_enabled if ed else true -%}
+        <label class="field">
+          <div class="field__label-row"><span class="field__label">Alert routing</span></div>
+          <div class="alert-rows">
+            <div class="alert-row">
+              {{ m.icon("mail", size=16, cls="text-3") }}
+              <span class="alert-row__label">Email</span>
+              {# Hidden checkbox carries the toggle state to the form; the button drives it. #}
+              <input type="checkbox" name="email_enabled" id="email-enabled" {% if email_on %}checked{% endif %} style="display:none" />
+              <button type="button" id="email-toggle" class="toggle {% if email_on %}is-on{% endif %}" aria-label="Email alerts" onclick="cairnToggleEmail()"><span class="toggle__knob"></span></button>
+            </div>
+            {% for ic, lbl in [("webhook", "Webhook"), ("signal", "Telegram"), ("signal", "Signal")] %}
+              <div class="alert-row alert-row--planned">
+                {{ m.icon(ic, size=16, cls="text-3") }}
+                <span class="alert-row__label">{{ lbl }}</span>
+                <span class="pill pill--soft pill--muted pill--sm">Planned</span>
+              </div>
+            {% endfor %}
+          </div>
+          <input class="input" name="email_to" id="email-to" type="text" style="margin-top:10px"
+                 value="{{ ed.email_to if ed else '' }}" placeholder="alerts@example.com, you@example.com" />
+          <div class="field__hint">Where to nag when this collection changes. Comma-separate multiple recipients.</div>
+        </label>
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <a class="btn btn--ghost" href="{% if ed %}/collection/{{ ed.id }}{% else %}/{% endif %}">Cancel</a>
+      <button class="btn btn--primary" type="submit" id="collection-submit">{{ m.icon("check", size=15) }} {% if ed %}Save changes{% else %}Create collection{% endif %}</button>
+    </div>
+  </form>
+</div>
+
+<script>
+  // Toggle the active classes for segmented controls + OTS radio cards.
+  document.addEventListener("change", function (e) {
+    var t = e.target;
+    if (!t || !t.name) return;
+    if (t.name === "mode") {
+      document.querySelectorAll("[data-seg='mode']").forEach(function (l) {
+        l.classList.toggle("is-active", l.getAttribute("data-val") === t.value);
+      });
+    }
+    if (t.name === "ots") {
+      document.querySelectorAll(".radio-card").forEach(function (l) {
+        l.classList.toggle("is-selected", l.getAttribute("data-ots") === t.value);
+      });
+      window.cairnSyncSubmit && window.cairnSyncSubmit();
+    }
+  });
+
+  // Submit stays disabled until a name + a server-validated root are present.
+  window.cairnSyncSubmit = function () {
+    var name = document.getElementById("collection-name");
+    var rv = document.getElementById("root-validation");
+    var btn = document.getElementById("collection-submit");
+    if (!btn) return;
+    var nameOk = name && name.value.trim().length > 0;
+    var rootOk = rv && rv.getAttribute("data-valid") === "1";
+    btn.disabled = !(nameOk && rootOk);
+  };
+  document.getElementById("collection-name").addEventListener("input", window.cairnSyncSubmit);
+  // Initial state (the load trigger fills #root-validation, which then calls cairnSyncSubmit).
+  window.cairnSyncSubmit();
+
+  // Email alert toggle: button flips the hidden checkbox the form actually submits.
+  window.cairnToggleEmail = function () {
+    var cb = document.getElementById("email-enabled");
+    var btn = document.getElementById("email-toggle");
+    if (!cb || !btn) return;
+    cb.checked = !cb.checked;
+    btn.classList.toggle("is-on", cb.checked);
+  };
+</script>
+{% endblock %}

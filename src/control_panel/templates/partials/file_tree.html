@@ -1,0 +1,53 @@
+{# One directory level of the folder tree: expandable subfolders + the files directly within this
+   level (paginated). Reused at every depth — an expanded folder swaps a fresh copy of this partial
+   into its `.tree-children`. `tree_*` keys are namespaced so this can render alongside the flat
+   list's context on the same page. #}
+{% import "_macros.html" as m %}
+<div class="tree-level">
+  {% for d in tree_folders %}
+    <div class="tree-folder">
+      {# Lazy expand: fetch this folder's level once (click once), then the caret/visibility is a
+         pure CSS toggle on the parent — no refetch, no client state machine. #}
+      <button type="button" class="tree-row tree-row--folder"
+              hx-get="/collection/{{ c.id }}/tree?prefix={{ d.prefix|urlencode }}"
+              hx-target="next .tree-children" hx-swap="innerHTML"
+              hx-trigger="click once"
+              onclick="this.parentElement.classList.toggle('is-open')">
+        <span class="tree-caret">{{ m.icon("chevronR", size=14) }}</span>
+        {{ m.icon("folder", size=15, cls="text-3") }}
+        <span class="tree-row__name mono">{{ d.name }}</span>
+        {% if d.issues > 0 %}
+          <span class="tree-issue" title="{{ d.issues }} file(s) modified or missing beneath this folder">{{ m.dot("var(--danger)", size=7) }}</span>
+        {% endif %}
+        <span class="tree-row__count">{{ d.file_count_h }}</span>
+      </button>
+      <div class="tree-children"></div>
+    </div>
+  {% endfor %}
+
+  {% for f in tree_files %}
+    {{ m.file_row(f, has_ots, label=f.name) }}
+  {% endfor %}
+
+  {% if not tree_folders and not tree_files %}
+    <div class="empty-state">This folder is empty.</div>
+  {% endif %}
+
+  {%- set total_pages = ((tree_total + page_size - 1) // page_size) if tree_total else 1 -%}
+  {% if total_pages > 1 %}
+    {# A single big folder still pages 50 files at a time: re-render this level at page N. #}
+    <div class="tree-pager">
+      <button type="button" class="pager__btn" {% if tree_page <= 0 %}disabled{% endif %}
+              hx-get="/collection/{{ c.id }}/tree?prefix={{ tree_prefix|urlencode }}&page={{ tree_page - 1 }}"
+              hx-target="closest .tree-level" hx-swap="outerHTML">
+        {{ m.icon("chevronR", size=13, cls="pager__caret is-prev") }} Prev
+      </button>
+      <span class="pager__label">Files {{ tree_page * page_size + 1 }}–{{ tree_page * page_size + tree_shown }} of {{ "{:,}".format(tree_total) }}</span>
+      <button type="button" class="pager__btn" {% if tree_page + 1 >= total_pages %}disabled{% endif %}
+              hx-get="/collection/{{ c.id }}/tree?prefix={{ tree_prefix|urlencode }}&page={{ tree_page + 1 }}"
+              hx-target="closest .tree-level" hx-swap="outerHTML">
+        Next {{ m.icon("chevronR", size=13, cls="pager__caret") }}
+      </button>
+    </div>
+  {% endif %}
+</div>

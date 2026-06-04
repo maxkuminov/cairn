@@ -1,0 +1,96 @@
+# Optional YAML configuration overlay for Cairn.
+#
+# Loaded only when CAIRN_CONFIG_FILE points at it, e.g.
+#   CAIRN_CONFIG_FILE=/app/config.yaml
+# Copy to config.yaml (gitignored) and edit. Anything here can also be set via
+# environment variables, and ENV VARS OVERRIDE YAML — so a value in `.env` wins
+# over the same key set here. Use this file for the settings that are awkward as
+# flat env vars (the per-corpus policy + alert-routing tables below).
+
+# ─── Core (same settings as .env, YAML form) ─────────────────────────────────
+auth_mode: single                                   # single | multi
+hostname: cairn.example.com
+# secret_key: ""                                    # prefer setting via env, never commit
+database_url: sqlite+aiosqlite:////app/data/cairn.db
+proof_store_path: /app/proofs
+auto_migrate: true
+
+# ─── Scheduler ───────────────────────────────────────────────────────────────
+scheduler_enabled: true                             # false = cron-only (no in-process loop)
+scan_interval_seconds: 30                           # scheduler tick / due-corpus poll
+upgrade_interval_seconds: 86400                     # daily OTS upgrade pass
+health_freshness_floor_seconds: 900                 # floor on the per-corpus freshness window
+
+# ─── OpenTimestamps notary ───────────────────────────────────────────────────
+verify_backend: explorer                            # explorer | node
+explorer_url: https://blockstream.info
+ots_calendars: []                                   # empty = public calendar pools
+incomplete_proof_alarm_days: 7
+
+# ─── Notifications (channel credentials; per-corpus routing in alert_json) ────
+# SMTP is the implemented email transport; resend/ses are recognized but stubbed.
+email_provider: local                               # local | resend | ses
+# smtp_host: smtp.example.com
+smtp_port: 587
+smtp_starttls: true                                 # STARTTLS (recommended on 587)
+# smtp_user: cairn@example.com                      # optional auth
+# smtp_password: ""                                 # SECRET — set via env, never commit
+# smtp_from: cairn@example.com                      # From address on alert mail
+
+# ─── Per-corpus / per-user policy (example — uncomment & adapt) ──────────────
+# Each corpus belongs to a user. `root` is the container-side path of a
+# READ-ONLY corpus mount (see docker-compose.yml volumes). `ots` policy:
+#   per_file  -- standalone portable proof per file (re-stamped on change)
+#   none      -- hash tripwire only (modify/delete is the signal; no provenance)
+#
+# corpora:
+#   - name: photos
+#     user: alice
+#     root: /corpora/photos
+#     ots: per_file                # but only on newly-added files (archive = tripwire)
+#     ots_new_files_only: true
+#     scan_interval_seconds: 21600 # 6h — large archive, scan less often
+#     exclude:
+#       - "*/.thumbnails/*"
+#       - "*/@eaDir/*"
+#     alerts: [alice-signal, alice-email]
+#
+#   - name: tax
+#     user: bob
+#     root: /corpora/tax
+#     ots: per_file
+#     scan_interval_seconds: 3600
+#     alerts: [bob-email]
+#
+#   - name: games
+#     user: carol
+#     root: /corpora/games
+#     ots: none                    # ROM set never changes → tripwire is enough
+#     scan_interval_seconds: 86400
+#     alerts: [carol-email, alice-email]   # cc admin by default
+
+# ─── Alert routing (example — referenced by `alerts:` above) ─────────────────
+# Channels are pluggable; configure only the ones you use. Secrets (tokens,
+# passwords) belong in env vars, NOT in this committed file — reference them as
+# ${ENV_VAR} where supported.
+#
+# alert_channels:
+#   alice-email:
+#     type: smtp
+#     to: alice@example.com
+#   alice-signal:
+#     type: signal_callmebot
+#     phone: "+10000000000"
+#     api_key: ${SIGNAL_CALLMEBOT_KEY}
+#   bob-email:
+#     type: smtp
+#     to: bob@example.com
+#   carol-email:
+#     type: smtp
+#     to: carol@example.com
+#
+# Heartbeat / dead-man's-switch (optional): ping an uptime monitor each scan so
+# you're alerted if Cairn itself goes silent.
+# heartbeat:
+#   type: kuma_push
+#   url: ${KUMA_PUSH_URL}

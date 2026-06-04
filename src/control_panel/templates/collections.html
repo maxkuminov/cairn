@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Collections · Cairn{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Collections</h1>
+    <div class="page-header__sub">Every folder Cairn is watching for you, with its current integrity status.</div>
+  </div>
+  <div class="page-header__actions">
+    <a class="btn btn--primary" href="/collection/new">{{ m.icon("plus", size=15) }} Add collection</a>
+  </div>
+</div>
+
+{% if collections %}
+  <div class="collections-grid">
+    {% for c in collections %}
+      {% include "partials/_collection_card.html" %}
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="card empty-state" style="padding:48px 24px">
+    <div style="margin-bottom:14px;color:var(--text-3)">{{ m.icon("stack", size=30) }}</div>
+    <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:6px">No collections yet</div>
+    <div style="margin-bottom:18px">Add a folder for Cairn to watch and notarize.</div>
+    <a class="btn btn--primary" href="/collection/new" style="display:inline-flex">{{ m.icon("plus", size=15) }} Add your first collection</a>
+  </div>
+{% endif %}
+{% endblock %}

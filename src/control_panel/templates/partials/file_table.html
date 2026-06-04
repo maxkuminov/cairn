@@ -1,0 +1,50 @@
+{% import "_macros.html" as m %}
+{%- set has_ots = c.ots != "none" -%}
+<div id="file-table">
+  {# Hidden mirrors of the active sort so the search box + filter radios (which live outside this
+     swapped fragment) carry the current sort/direction on every htmx re-query. #}
+  <input type="hidden" name="sort" value="{{ sort }}" />
+  <input type="hidden" name="dir" value="{{ dir }}" />
+  <div class="file-grid {% if not has_ots %}file-grid--no-ots{% endif %} file-head">
+    {{ m.sort_header(c.id, "path", "Path", sort, dir, "asc") }}
+    {{ m.sort_header(c.id, "size", "Size", sort, dir, "asc") }}
+    <span>Status</span>
+    {% if has_ots %}
+      {{ m.sort_header(c.id, "notarized", "Notarized", sort, dir, "desc") }}
+    {% else %}
+      {{ m.sort_header(c.id, "modified", "Modified", sort, dir, "desc") }}
+    {% endif %}
+    {{ m.sort_header(c.id, "checked", "Last checked", sort, dir, "desc", "ta-right") }}
+  </div>
+  <div>
+    {% for f in files %}
+      {{ m.file_row(f, has_ots) }}
+    {% endfor %}
+    {% if not files %}
+      <div class="empty-state">No files match this filter.</div>
+    {% endif %}
+  </div>
+  {%- set total_pages = ((files_total + page_size - 1) // page_size) if files_total else 1 -%}
+  <div class="table-footer">
+    <span>
+      {% if q or filter != "all" %}{{ files_total }} matching{% else %}Showing {{ files_shown }} of {{ "{:,}".format(files_total) }} files{% endif %}
+    </span>
+    <div class="pager">
+      <button type="button" class="pager__btn" {% if page <= 0 %}disabled{% endif %}
+              hx-get="/collection/{{ c.id }}/files"
+              hx-vals='{"page": {{ page - 1 }}, "sort": "{{ sort }}", "dir": "{{ dir }}"}'
+              hx-target="#file-table" hx-swap="outerHTML"
+              hx-include="[name='q'],[name='filter']">
+        {{ m.icon("chevronR", size=13, cls="pager__caret is-prev") }} Prev
+      </button>
+      <span class="pager__label">Page {{ page + 1 }} of {{ total_pages }}</span>
+      <button type="button" class="pager__btn" {% if page + 1 >= total_pages %}disabled{% endif %}
+              hx-get="/collection/{{ c.id }}/files"
+              hx-vals='{"page": {{ page + 1 }}, "sort": "{{ sort }}", "dir": "{{ dir }}"}'
+              hx-target="#file-table" hx-swap="outerHTML"
+              hx-include="[name='q'],[name='filter']">
+        Next {{ m.icon("chevronR", size=13, cls="pager__caret") }}
+      </button>
+    </div>
+  </div>
+</div>

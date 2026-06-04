@@ -1,0 +1,146 @@
+# Reference deployment for Cairn (file-integrity monitor + OpenTimestamps notary).
+#
+# Copy this to `docker-compose.yml` and edit the corpus mounts for your host:
+#     cp docker-compose.example.yml docker-compose.yml
+# Your real `docker-compose.yml` is gitignored so host paths never get committed.
+#
+# Shown fronted by Traefik on an external proxy network. A fully self-contained
+# Caddy alternative is shown, commented, at the bottom.
+#
+# To adapt to your environment, set in `.env`:
+#   CAIRN_HOSTNAME    -- public hostname the reverse proxy routes to
+#   REGISTRY          -- image registry (default localhost:5000)
+#   DATA_HOST_PATH    -- host path for the SQLite DB (writable)
+#   PROOFS_HOST_PATH  -- host path for the .ots proof store (writable)
+#   ...plus the corpus mounts below (edit the `volumes:` list directly).
+
+networks:
+  t2_proxy:
+    external: true
+
+services:
+  cairn:
+    image: ${REGISTRY:-localhost:5000}/cairn:latest
+    pull_policy: always
+    container_name: cairn
+    restart: unless-stopped
+    hostname: cairn
+    networks:
+      - t2_proxy
+    security_opt:
+      - no-new-privileges:true
+      - apparmor=docker-default
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          memory: 512M
+    env_file:
+      - .env
+    volumes:
+      # ───────────────────────────────────────────────────────────────────────
+      # WATCHED CORPORA — MOUNTED READ-ONLY (the key security invariant, DESIGN
+      # §4). Cairn is an integrity tool; it must NOT be able to become the threat
+      # it watches for. Every corpus root is mounted with the `:ro` suffix so the
+      # container physically cannot modify or delete the bytes it monitors.
+      #
+      # In multi-user mode each user's corpus roots live under an admin-
+      # provisioned, read-only base mount; the panel rejects any corpus path that
+      # falls outside that base (no traversal, no cross-user disclosure). Assign
+      # the container-side path on the user/corpus record in the panel after
+      # creating it.
+      #
+      # Host paths containing spaces MUST be quoted. Edit these for your host:
+      #
+      # Example — a photo archive (hash-tripwire + per-file OTS on new files):
+      - "/path/to/your/photos:/corpora/photos:ro"
+      # Example — documents you want notarized (per-file OTS):
+      - "/path/to/your/documents:/corpora/documents:ro"
+      # Example — a tripwire-only collection (no OTS):
+      # - "/path/to/your/archive:/corpora/archive:ro"
+      # ───────────────────────────────────────────────────────────────────────
+
+      # WRITABLE STATE — a SEPARATE writable volume. Cairn cannot modify/delete
+      # what it watches; the DB + proofs live here, never on the read-only corpus
+      # mounts. The SQLite index can be rebuilt from these bytes; the durable
+      # guarantee is the file bytes + their `.ots` proofs.
+      - ${DATA_HOST_PATH:-./data}:/app/data        # SQLite DB (WAL) lives here (rw)
+      - ${PROOFS_HOST_PATH:-./proofs}:/app/proofs  # .ots proof store (rw)
+
+      # Host timezone (read-only) so scan timestamps / cron cadence match the host.
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    labels:
+      - "traefik.enable=true"
+      # AUTH: in single-user mode the app has NO in-app login wall, so the panel
+      # is fronted by Traefik's chain-oauth@file middleware (defense in depth /
+      # interim protection). Once CAIRN_AUTH_MODE=multi (Phase 2) enforces in-app
+      # login + admin, this middleware becomes optional and can be dropped.
+      #
+      # /healthz is the dead-man's-switch poll target (Uptime Kuma) and MUST stay
+      # public — it gets its own higher-priority router with NO middleware.
+      - "traefik.http.routers.cairn-public-rtr.entrypoints=https"
+      - "traefik.http.routers.cairn-public-rtr.rule=Host(`${CAIRN_HOSTNAME:-cairn.localhost}`) && Path(`/healthz`)"
+      - "traefik.http.routers.cairn-public-rtr.tls=true"
+      - "traefik.http.routers.cairn-public-rtr.tls.certresolver=dns-namecheap"
+      - "traefik.http.routers.cairn-public-rtr.priority=100"
+      - "traefik.http.routers.cairn-public-rtr.service=cairn-svc"
+      # Panel router — everything else, behind chain-oauth.
+      - "traefik.http.routers.cairn-rtr.entrypoints=https"
+      - "traefik.http.routers.cairn-rtr.rule=Host(`${CAIRN_HOSTNAME:-cairn.localhost}`)"
+      - "traefik.http.routers.cairn-rtr.tls=true"
+      - "traefik.http.routers.cairn-rtr.tls.certresolver=dns-namecheap"
+      - "traefik.http.routers.cairn-rtr.middlewares=chain-oauth@file"
+      - "traefik.http.routers.cairn-rtr.service=cairn-svc"
+      - "traefik.http.services.cairn-svc.loadbalancer.server.port=8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ALTERNATIVE: front Cairn with the shipped Caddy instead of Traefik.
+#
+# Caddy auto-issues a Let's Encrypt cert for ${CAIRN_HOSTNAME} and terminates
+# TLS. To use it: delete the `networks:` block and the `t2_proxy` entry under the
+# service above, drop the `labels:` block, and uncomment everything below. See
+# Caddyfile.example for the proxy config.
+#
+# networks:
+#   web:
+#     driver: bridge
+#
+# (under the `cairn` service, replace `networks: [t2_proxy]` with:)
+#     networks:
+#       - web
+#     expose:
+#       - "8000"
+#
+#   caddy:
+#     image: caddy:2
+#     container_name: cairn-caddy
+#     restart: unless-stopped
+#     networks:
+#       - web
+#     ports:
+#       - "80:80"
+#       - "443:443"
+#     environment:
+#       - CAIRN_HOSTNAME=${CAIRN_HOSTNAME}
+#     volumes:
+#       - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
+#       - caddy_data:/data
+#       - caddy_config:/config
+#     depends_on:
+#       - cairn
+#
+# volumes:
+#   caddy_data:
+#   caddy_config:
+# ─────────────────────────────────────────────────────────────────────────────

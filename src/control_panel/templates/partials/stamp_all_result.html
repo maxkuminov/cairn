@@ -1,0 +1,8 @@
+{# Result of an on-demand "Stamp all" backfill, swapped into #stamp-all-result. #}
+{% if stamped > 0 %}
+  <span class="pill pill--soft pill--ok pill--sm">Stamped {{ stamped }} file{{ 's' if stamped != 1 else '' }}</span>
+{% elif queued > 0 %}
+  <span class="pill pill--soft pill--warn pill--sm">Queued {{ queued }} file{{ 's' if queued != 1 else '' }}; none stamped yet — try again</span>
+{% else %}
+  <span class="pill pill--soft pill--sm">Nothing to stamp — every file already has a proof</span>
+{% endif %}

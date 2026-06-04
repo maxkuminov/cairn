@@ -1,0 +1,13 @@
+{% import "_macros.html" as m %}
+{# Returned by GET /collection/validate-root. Replaces #root-validation; data-valid drives submit. #}
+<div id="root-validation" data-valid="{{ '1' if r.ok else '0' }}">
+  {% if has_value %}
+    <span class="input-wrap__icon" style="color:{{ 'var(--ok)' if r.ok else 'var(--danger)' }}">
+      {{ m.icon("checkCircle" if r.ok else "x", size=17) }}
+    </span>
+  {% endif %}
+  {% if has_value and not r.ok %}
+    <div class="root-msg" style="font-size:12px;color:var(--danger);margin-top:6px">{{ r.message }}</div>
+  {% endif %}
+</div>
+<script>window.cairnSyncSubmit && window.cairnSyncSubmit();</script>

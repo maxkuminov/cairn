@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}How it works · Cairn{% endblock %}
+{% block content %}
+<div style="max-width:780px">
+  <div class="page-header">
+    <div>
+      <h1>How Cairn protects your files</h1>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:18px">
+    <h2 style="margin:0 0 8px;font-size:17px">Two jobs, one fingerprint</h2>
+    <p class="text-2" style="font-size:14px;line-height:1.6;margin:0 0 10px">
+      Cairn does two things, and they lean on the same idea: a tiny <strong>fingerprint</strong> of each file.
+    </p>
+    <ul class="text-2" style="font-size:14px;line-height:1.65;margin:0 0 10px;padding-left:20px">
+      <li><strong>It watches your files and warns you when something changes.</strong> If a file goes
+        missing, gets altered, or quietly corrupts, Cairn notices and tells you, <em>before</em> the
+        damage works its way through your backups. This is what Cairn was built for.</li>
+      <li><strong>It can prove a file existed on a certain date.</strong> For files where that matters,
+        Cairn records a tamper-proof timestamp on the Bitcoin blockchain that anyone can check, without
+        trusting you or Cairn.</li>
+    </ul>
+    <p class="text-2" style="font-size:14px;line-height:1.6;margin:0">
+      The first job is the important one. The second is a powerful bonus that's essential for some files
+      and simply nice to have for the rest. Together they cover both halves of the question
+      <em>“are my files still exactly what they should be, and can I prove it?”</em>
+    </p>
+  </div>
+
+  <div class="card" style="margin-bottom:18px">
+    <h2 style="margin:0 0 8px;font-size:17px">Job one: catching silent loss before your backups do</h2>
+    <p class="text-2" style="font-size:14px;line-height:1.6;margin:0 0 10px">
+      Some files you open every day. Others — a folder of your kids' photos, old tax records, scanned
+      documents — you almost never touch, but you would be devastated to lose. Those are exactly the files
+      that can rot or vanish without anyone noticing.
+    </p>
+    <p class="text-2" style="font-size:14px;line-height:1.6;margin:0 0 10px">
+      The quiet danger is that <strong>backups copy faithfully — including the damage.</strong> If a file is
+      silently deleted, overwritten, or corrupted and you don't catch it, your backups keep dutifully copying
+      the broken version. Eventually the last good copy rotates out, and the loss is permanent. By the time
+      you finally open the file, there's nothing left to restore from.
+    </p>
+    <p class="text-2" style="font-size:14px;line-height:1.6;margin:0 0 10px">
+      Cairn closes that gap. It keeps a fingerprint of every file it watches and re-checks them on a
+      schedule. The moment a file <strong>goes missing</strong>, is <strong>modified</strong>, or quietly
+      <strong>corrupts on disk</strong> — even when its size and date look untouched — the fingerprint stops
+      matching, and Cairn flags it and can alert you. You find out while a good copy still exists, when you
+      can still do something about it.
+    </p>
+    <div class="info-strip">
+      {{ m.icon("info", size=15, cls="text-3") }}
+      <span><strong>It only watches; it never touches.</strong> Cairn reads your files to fingerprint them
+      and cannot change or delete what it monitors. Recovering a flagged file is up to you and your backups —
+      Cairn's job is to make sure you know in time.</span>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:18px">
+    <h2 style="margin:0 0 8px;font-size:17px">Job two: proving a file existed, to anyone</h2>
+    <p class="text-2" style="font-size:14px;line-height:1.6;margin:0">
+      How do you prove that a document existed on a certain date, exactly as it is now and not edited later?
+      And how do you prove it to someone who has no reason to take your word for it: an auditor, a court, a client, or your future self?
+      The old answers (a notary, mailing yourself a sealed envelope, a dated email) all ask someone to <em>trust a third party</em>.
+      Cairn gives you proof that rests on mathematics and a public record no one can quietly change. The next
+      few steps show how, starting with that same fingerprint.
+    </p>
+  </div>
+
+  <div class="card" style="margin-bottom:18px">
+    <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:6px">
+      <span class="verify-step__num">1</span>
+      <h2 style="margin:0;font-size:17px;align-self:center">A fingerprint of the file (the “hash”)</h2>
+    </div>
+    <p class="text-2" style="font-size:14px;line-height:1.6;margin:0 0 10px">
+      When Cairn first sees a file, it runs the contents through a standard calculation called <strong>SHA-256</strong>.
+      Out comes a short string of letters and numbers: a <strong>hash</strong>, or digital fingerprint, that looks like this:
+    </p>
+    <div class="mono" style="font-size:11.5px;word-break:break-all;color:var(--text-3);background:var(--surface-2);padding:10px 12px;border-radius:var(--radius);margin-bottom:10px">e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855</div>
+    <ul class="text-2" style="font-size:14px;line-height:1.65;margin:0;padding-left:20px">
+      <li><strong>It's unique to the contents.</strong> Change a single comma, pixel, or byte and the fingerprint changes completely. That's what lets Cairn spot a file that's been altered or has quietly corrupted (job one), and what makes a timestamp prove a file hasn't changed since (job two).</li>
+      <li><strong>It's one-way.</strong> You can't turn the fingerprint back into the file, so publishing it reveals nothing about what's inside.</li>
+      <li><strong>It's reproducible.</strong> Anyone, anywhere, using any tool, gets the exact same fingerprint from the same file. That's what makes it checkable by others.</li>
+    </ul>
+  </div>
+
+  <div class="card" style="margin-bottom:18px">
+    <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:6px">
+      <span class="verify-step__num">2</span>
+      <h2 style="margin:0;font-size:17px;align-self:center">A timestamp recorded on Bitcoin</h2>
+    </div>
+    <p class="text-2" style="font-size:14px;line-height:1.6;margin:0 0 10px">
+      Cairn then publishes that fingerprint into the <strong>Bitcoin blockchain</strong> using
+      <strong>OpenTimestamps</strong>, a free and open standard built for exactly this purpose.
+      The blockchain is a public ledger maintained by thousands of independent computers worldwide. Once
+      something is written into it, it is permanent, visible to everyone, and <strong>cannot be backdated or
+      quietly edited</strong>. Rewriting it would mean overpowering the entire global network.
+    </p>
+    <p class="text-2" style="font-size:14px;line-height:1.6;margin:0 0 10px">
+      Because each Bitcoin block carries a trustworthy time, recording your fingerprint in a block proves the
+      file must have existed <em>before</em> that block was created. Only the fingerprint is ever published,
+      never the file.
+    </p>
+    <div class="info-strip">
+      {{ m.icon("clock", size=15, cls="text-3") }}
+      <span><strong>“Pending” vs. “Anchored.”</strong> A new fingerprint is bundled with many others and
+      waits for the next confirmed Bitcoin block. Until that lands it reads <em>pending</em>; once it's in a
+      block it reads <em>anchored</em> and carries a confirmed date. This usually takes a few hours, and it's
+      free: there's no per-file fee.</span>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:18px">
+    <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:6px">
+      <span class="verify-step__num">3</span>
+      <h2 style="margin:0;font-size:17px;align-self:center">Anyone can check it, without trusting Cairn</h2>
+    </div>
+    <p class="text-2" style="font-size:14px;line-height:1.6;margin:0">
+      The proof Cairn keeps for each file (a small <span class="mono">.ots</span> file) is self-contained.
+      Anyone holding the file and its <span class="mono">.ots</span> proof can confirm the file existed in its
+      exact form by a given date, using free, open-source tools, with no account and no help from Cairn.
+      The guarantee rests on Bitcoin and mathematics, not on Cairn or any single company staying online. If
+      Cairn vanished tomorrow, your existing proofs would still verify.
+    </p>
+  </div>
+
+  <div class="card" style="margin-bottom:18px">
+    <h2 style="margin:0 0 10px;font-size:17px">What it proves, and what it doesn't</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
+      <div>
+        <div style="font-weight:650;font-size:13.5px;color:var(--ok);margin-bottom:6px;display:flex;align-items:center;gap:6px">{{ m.icon("check", size=15) }} It proves</div>
+        <ul class="text-2" style="font-size:13.5px;line-height:1.6;margin:0;padding-left:18px">
+          <li>This exact file existed on or before a specific date.</li>
+          <li>It has not been altered since it was recorded.</li>
+        </ul>
+      </div>
+      <div>
+        <div style="font-weight:650;font-size:13.5px;color:var(--text-3);margin-bottom:6px;display:flex;align-items:center;gap:6px">{{ m.icon("x", size=15) }} It does not prove</div>
+        <ul class="text-2" style="font-size:13.5px;line-height:1.6;margin:0;padding-left:18px">
+          <li>Who created or owns the file.</li>
+          <li>That the file's contents are true or accurate.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:18px">
+    <h2 style="margin:0 0 10px;font-size:17px">Verify a proof yourself</h2>
+    <p class="text-2" style="font-size:14px;line-height:1.6;margin:0 0 10px">
+      You don't have to use Cairn to check a proof. On any verified file's page, click
+      <strong>Download .ots proof</strong>, then confirm it independently:
+    </p>
+    <ul class="text-2" style="font-size:14px;line-height:1.65;margin:0;padding-left:20px">
+      <li>Drag the file and its <span class="mono">.ots</span> proof onto the public verifier at
+        <a href="https://opentimestamps.org" target="_blank" rel="noopener">opentimestamps.org</a>, or</li>
+      <li>Run the open-source command-line tool:
+        <span class="mono" style="font-size:12px">ots verify yourfile.pdf.ots</span></li>
+    </ul>
+    <div class="info-strip" style="margin-top:12px">
+      {{ m.icon("info", size=15, cls="text-3") }}
+      <span>The proof file contains only your file's fingerprint and the path back to its Bitcoin block,
+      not the file itself. It's safe to share with anyone you want to convince.</span>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:18px">
+    <h2 style="margin:0 0 12px;font-size:17px">Common questions</h2>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div>
+        <div style="font-weight:650;font-size:13.5px;margin-bottom:2px">Do I have to timestamp my files to use the watch?</div>
+        <div class="text-2" style="font-size:13.5px;line-height:1.55">No. The two jobs are independent. Cairn can watch a set of files for loss and corruption without ever recording a timestamp, and you can turn on timestamping only for the files where proof-of-date matters.</div>
+      </div>
+      <div>
+        <div style="font-weight:650;font-size:13.5px;margin-bottom:2px">What if a file changed because I meant to change it?</div>
+        <div class="text-2" style="font-size:13.5px;line-height:1.55">Cairn just flags that the file is different — it can't know whether you intended it. When a change is expected, you accept it as the new baseline, and Cairn watches the updated version from then on.</div>
+      </div>
+      <div>
+        <div style="font-weight:650;font-size:13.5px;margin-bottom:2px">Does Cairn upload my files anywhere?</div>
+        <div class="text-2" style="font-size:13.5px;line-height:1.55">No. Your files stay on your server. Only the fingerprint, which reveals nothing about the contents, is ever published.</div>
+      </div>
+      <div>
+        <div style="font-weight:650;font-size:13.5px;margin-bottom:2px">What happens to my proofs if Cairn shuts down?</div>
+        <div class="text-2" style="font-size:13.5px;line-height:1.55">They keep working. Each <span class="mono">.ots</span> proof can be verified independently with open-source tools, forever, with no dependency on Cairn.</div>
+      </div>
+      <div>
+        <div style="font-weight:650;font-size:13.5px;margin-bottom:2px">How long until a new proof is confirmed?</div>
+        <div class="text-2" style="font-size:13.5px;line-height:1.55">Usually a few hours, once your fingerprint is included in a Bitcoin block. Until then it shows as <em>pending</em>.</div>
+      </div>
+      <div>
+        <div style="font-weight:650;font-size:13.5px;margin-bottom:2px">Is this the same as a legal notary?</div>
+        <div class="text-2" style="font-size:13.5px;line-height:1.55">No. It's a strong, independently verifiable technical record of when a file existed. Whether and how that's used as evidence depends on your jurisdiction and situation.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-strip">
+    {{ m.icon("external", size=15, cls="text-3") }}
+    <span>OpenTimestamps is an open standard. Learn more at
+      <a href="https://opentimestamps.org" target="_blank" rel="noopener">opentimestamps.org</a>.</span>
+  </div>
+</div>
+{% endblock %}

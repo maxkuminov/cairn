@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Settings · Cairn{% endblock %}
+{% block content %}
+<div style="max-width:820px">
+  <div class="page-header">
+    <div>
+      <h1>Settings</h1>
+      <div class="page-header__sub">Your notification channels and verification backend.</div>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <a class="tab {% if tab == 'notifications' %}is-active{% endif %}" href="/settings?tab=notifications">{{ m.icon("bell", size=16) }} Notifications</a>
+    <a class="tab {% if tab == 'verify' %}is-active{% endif %}" href="/settings?tab=verify">{{ m.icon("verify", size=16) }} Verification</a>
+    {% if is_admin_tab_available %}
+      <a class="tab {% if tab == 'admin' %}is-active{% endif %}" href="/settings?tab=admin">{{ m.icon("users", size=16) }} Users &amp; mounts</a>
+    {% endif %}
+  </div>
+
+  {% if tab == "notifications" %}
+    <div class="settings-stack">
+      {# Email channel #}
+      <div>
+        <div class="section-label">Alert channel</div>
+        <div class="card" style="margin-top:12px;padding:20px">
+          <div class="channel-head" style="margin-bottom:16px">
+            <div class="icon-tile icon-tile--accent">{{ m.icon("mail", size=19) }}</div>
+            <div class="channel-head__body">
+              <div class="channel-title-row">
+                <span class="channel-title">Email</span>
+                <span class="pill pill--soft pill--ok pill--sm">{{ m.icon("checkCircle", size=11.5, stroke=2) }}Verified</span>
+              </div>
+              <div class="channel-sub">The SMTP server Cairn sends alert mail through. Per-collection recipients are set on each collection.</div>
+            </div>
+            <button type="button" class="toggle is-on" aria-label="Email enabled"><span class="toggle__knob"></span></button>
+          </div>
+          <div>
+            <div style="font-size:12px;font-weight:600;color:var(--text-2);margin-bottom:8px">Provider</div>
+            <div class="seg seg--equal" id="provider-seg" style="margin-bottom:14px">
+              {%- set active_prov = "smtp" if email_provider == "local" else email_provider -%}
+              {% for k, lbl in [("smtp", "Local SMTP"), ("resend", "Resend"), ("ses", "AWS SES")] %}
+                <button type="button" class="seg__btn {% if k == active_prov %}is-active{% endif %}" data-prov="{{ k }}" onclick="cairnSetProvider('{{ k }}')">{{ lbl }}</button>
+              {% endfor %}
+            </div>
+
+            {% if smtp_saved %}
+              <div class="info-strip" style="margin-bottom:12px">{{ m.icon("checkCircle", size=15) }}<span>SMTP settings saved.</span></div>
+            {% endif %}
+            {% if smtp_test == "ok" %}
+              <div class="info-strip" style="margin-bottom:12px">{{ m.icon("checkCircle", size=15) }}<span>Test email sent — {{ smtp_test_msg }}.</span></div>
+            {% elif smtp_test == "err" %}
+              <div class="info-strip" style="margin-bottom:12px;color:var(--danger)">{{ m.icon("alert", size=15) }}<span>Test failed: {{ smtp_test_msg }}</span></div>
+            {% endif %}
+
+            {# Local SMTP: editable server config (admins only). Resend/SES stay informational. #}
+            <div id="provider-smtp" data-prov-panel="smtp">
+              {% if can_edit_smtp %}
+                <form method="post" action="/settings/smtp" class="form-stack" style="gap:14px">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                  <div class="form-grid-2">
+                    <label class="field">
+                      <div class="field__label-row"><span class="field__label">Host</span></div>
+                      <input class="input" name="smtp_host" type="text" value="{{ smtp_host }}" placeholder="smtp.example.com" />
+                    </label>
+                    <label class="field">
+                      <div class="field__label-row"><span class="field__label">Port</span></div>
+                      <input class="input" name="smtp_port" type="number" min="1" max="65535" value="{{ smtp_port }}" placeholder="587" />
+                    </label>
+                  </div>
+                  <label class="field">
+                    <div class="field__label-row"><span class="field__label">Encryption</span></div>
+                    <select class="input" name="smtp_encryption">
+                      <option value="starttls" {% if smtp_starttls %}selected{% endif %}>STARTTLS</option>
+                      <option value="none" {% if not smtp_starttls %}selected{% endif %}>None</option>
+                    </select>
+                  </label>
+                  <div class="form-grid-2">
+                    <label class="field">
+                      <div class="field__label-row"><span class="field__label">Username</span></div>
+                      <input class="input" name="smtp_user" type="text" autocomplete="off" value="{{ smtp_user }}" placeholder="cairn@example.com" />
+                    </label>
+                    <label class="field">
+                      <div class="field__label-row"><span class="field__label">Password</span></div>
+                      <input class="input" name="smtp_password" type="password" autocomplete="new-password"
+                             placeholder="{% if smtp_password_set %}•••••••• (unchanged){% else %}set a password{% endif %}" />
+                      <div class="field__hint">Stored in the local database. Leave blank to keep the current password.</div>
+                    </label>
+                  </div>
+                  <label class="field">
+                    <div class="field__label-row"><span class="field__label">From address</span></div>
+                    <input class="input" name="smtp_from" type="text" value="{{ smtp_from }}" placeholder="cairn@example.com" />
+                  </label>
+                  <div class="flex" style="gap:10px">
+                    <button type="submit" class="btn btn--primary">Save SMTP settings</button>
+                  </div>
+                </form>
+
+                <form method="post" action="/settings/smtp/test" class="flex-center" style="gap:10px;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                  <input class="input" name="test_to" type="text" style="flex:1" placeholder="you@example.com" />
+                  <button type="submit" class="btn">Send test email</button>
+                </form>
+                <div class="field__hint" style="margin-top:8px">Sends a one-off test message with the saved settings above.</div>
+              {% else %}
+                <div class="config-preview">
+                  <div class="config-row"><span class="config-row__key">Host</span><span class="config-row__val mono">{{ smtp_host or "(not configured)" }}</span></div>
+                  <div class="config-row"><span class="config-row__key">From</span><span class="config-row__val mono">{{ smtp_from or "(not configured)" }}</span></div>
+                  <div class="config-row"><span class="config-row__key">Encryption</span><span class="config-row__val mono">{{ "STARTTLS" if smtp_starttls else "none" }}</span></div>
+                </div>
+                <div style="font-size:12px;color:var(--text-3);margin-top:10px">The shared SMTP server is managed by an administrator.</div>
+              {% endif %}
+            </div>
+
+            <div id="provider-resend" data-prov-panel="resend" style="display:none">
+              <div class="config-preview">
+                <div class="config-row"><span class="config-row__key">API key</span><span class="config-row__val mono">re_••••••••••3f9a</span></div>
+                <div class="config-row"><span class="config-row__key">From</span><span class="config-row__val mono">alerts@example.com</span></div>
+              </div>
+              <div style="font-size:12px;color:var(--text-3);margin-top:10px">Resend transport is recognized but not yet wired — alerts are sent via Local SMTP.</div>
+            </div>
+
+            <div id="provider-ses" data-prov-panel="ses" style="display:none">
+              <div class="config-preview">
+                <div class="config-row"><span class="config-row__key">Region</span><span class="config-row__val mono">us-east-1</span></div>
+                <div class="config-row"><span class="config-row__key">From</span><span class="config-row__val mono">alerts@example.com</span></div>
+              </div>
+              <div style="font-size:12px;color:var(--text-3);margin-top:10px">AWS SES transport is recognized but not yet wired — alerts are sent via Local SMTP.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# Health monitoring #}
+      <div>
+        <div class="section-label">Health monitoring</div>
+        <div class="card" style="margin-top:12px;padding:18px">
+          <div class="channel-head">
+            <div class="icon-tile icon-tile--ok">{{ m.icon("pulse", size=19) }}</div>
+            <div class="channel-head__body">
+              <div class="channel-title-row">
+                <span class="channel-title">Health endpoint</span>
+                <span class="pill pill--soft pill--ok pill--sm">{{ m.icon("checkCircle", size=11.5, stroke=2) }}Healthy</span>
+              </div>
+              <div class="channel-sub">Point Uptime Kuma or any monitor at this URL — it returns scan freshness as a dead-man's switch.</div>
+            </div>
+          </div>
+          <div class="mono-row" style="margin-top:13px">
+            <span style="color:var(--ok);font-weight:600">GET</span>
+            <span class="text-2" id="healthz-url">{{ healthz_url }}</span>
+            <button type="button" class="copy-btn" style="margin-left:auto" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('healthz-url').textContent.trim())">{{ m.icon("copy", size=15) }}</button>
+          </div>
+        </div>
+      </div>
+
+      {# Planned channels #}
+      <div>
+        <div class="section-label">Planned channels</div>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:12px">
+          {% for ic, lbl, desc in [
+            ("webhook", "Webhook", "POST a JSON payload to a URL of your choosing."),
+            ("signal", "Telegram", "Push to a Telegram chat via a bot token."),
+            ("signal", "Signal", "Push to your Signal number via a relay.")] %}
+            <div class="planned-card">
+              <div class="icon-tile icon-tile--muted">{{ m.icon(ic, size=19) }}</div>
+              <div class="planned-card__body">
+                <div style="font-size:14px;font-weight:600">{{ lbl }}</div>
+                <div class="channel-sub">{{ desc }}</div>
+              </div>
+              <span class="pill pill--soft pill--muted pill--sm">Planned</span>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <script>
+      function cairnSetProvider(k) {
+        document.querySelectorAll("[data-prov-panel]").forEach(function (p) {
+          p.style.display = p.getAttribute("data-prov-panel") === k ? "" : "none";
+        });
+        document.querySelectorAll("#provider-seg .seg__btn").forEach(function (b) {
+          b.classList.toggle("is-active", b.getAttribute("data-prov") === k);
+        });
+      }
+      cairnSetProvider("{{ 'smtp' if email_provider == 'local' else email_provider }}");
+    </script>
+
+  {% elif tab == "verify" %}
+    <div class="form-stack">
+      <div class="card" style="padding:22px">
+        <div class="section-label">Block source</div>
+        <div class="text-2" style="font-size:13px;margin:10px 0 16px;line-height:1.5">How Cairn checks proofs against the Bitcoin blockchain when verifying.</div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div class="radio-card {% if verify_backend == 'explorer' %}is-selected{% endif %}">
+            <span class="radio-card__check">{{ m.icon("checkCircle" if verify_backend == "explorer" else "minusCircle", size=18) }}</span>
+            <div>
+              <div class="channel-title-row"><span class="radio-card__title">Block explorer</span><span class="pill pill--soft pill--accent pill--sm">Default</span></div>
+              <div class="radio-card__desc">{{ explorer_host }} — works out of the box. You trust the explorer's lookup.</div>
+            </div>
+          </div>
+          <div class="radio-card {% if verify_backend == 'node' %}is-selected{% endif %}">
+            <span class="radio-card__check">{{ m.icon("checkCircle" if verify_backend == "node" else "minusCircle", size=18) }}</span>
+            <div>
+              <div class="radio-card__title">Your own Bitcoin node</div>
+              <div class="radio-card__desc">Point at a node's RPC for fully trustless verification — nothing to trust but your own chain.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="padding:22px">
+        <div class="section-label">Calendar servers</div>
+        <div class="text-2" style="font-size:13px;margin:10px 0 16px">OpenTimestamps aggregators used when stamping new files.</div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          {% for cal in calendars %}
+            <div class="cal-row mono">{{ m.dot("var(--ok)", size=7) }}{{ cal }}<span style="margin-left:auto;color:var(--text-3);font-size:11.5px">configured</span></div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+  {% elif tab == "admin" %}
+    <div class="info-strip">{{ m.icon("lock", size=15, cls="text-3") }}<span>Users &amp; mounts management is available in multi-user mode only.</span></div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% import "_macros.html" as m %}
+<div id="verify-results">
+  <div style="padding:0 18px 6px;font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-3)">
+    {% if q %}{{ match_count }} match{{ "" if match_count == 1 else "es" }}{% else %}Recently anchored{% endif %}
+  </div>
+  <div style="max-height:420px;overflow-y:auto;padding-bottom:6px">
+    {% for f in results %}
+      <button class="verify-row" type="button"
+              hx-post="/verify" hx-vals='{"file_id": {{ f.id }}}' hx-target="#verify-pane" hx-swap="innerHTML">
+        {{ m.icon("file", size=16, cls="text-3") }}
+        <div style="min-width:0;flex:1">
+          <div class="verify-row__name">{{ f.filename }}</div>
+          <div class="verify-row__meta mono">{{ f.collection }} · {{ f.relpath }}</div>
+        </div>
+        {{ m.ots_badge("complete", "sm") }}
+        {{ m.icon("chevronR", size=15, cls="text-3") }}
+      </button>
+    {% endfor %}
+    {% if q and not results %}
+      <div class="empty-state" style="border-top:1px solid var(--border)">No anchored files match “{{ q }}”.</div>
+    {% endif %}
+  </div>
+</div>

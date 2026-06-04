@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}{{ c.name }} · Cairn{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <a class="back-link" href="/">{{ m.icon("arrowLeft", size=15) }} All collections</a>
+    <h1>{{ c.name }}</h1>
+  </div>
+  <div class="page-header__actions">
+    <a class="btn" href="/collection/{{ c.id }}/edit">{{ m.icon("settings", size=15) }} Edit</a>
+    {# Scan now runs in the background and swaps the live status badge in place (no full reload). #}
+    <form hx-post="/collection/{{ c.id }}/scan" hx-target="#op-status-{{ c.id }}" hx-swap="outerHTML" style="display:inline">
+      <button class="btn btn--subtle" type="submit">{{ m.icon("refresh", size=15) }} Scan now</button>
+    </form>
+    {% if c.ots != "none" %}
+      {# On-demand backfill: stamp every currently-unstamped file (perfile collections only). Async — the
+         live badge reflects progress. #}
+      <form hx-post="/collection/{{ c.id }}/stamp-all" hx-target="#op-status-{{ c.id }}" hx-swap="outerHTML"
+            hx-disabled-elt="find button" style="display:inline">
+        <button class="btn btn--subtle" type="submit">{{ m.icon("bitcoin", size=15) }} Stamp all</button>
+      </form>
+    {% endif %}
+    {# Re-baseline action: clears modified/missing alarms AND promotes informational `new` files to
+       `ok` (a scan never does — it preserves status). Shown whenever there is anything to baseline,
+       so a new-only collection (e.g. a freshly added one) can be moved into the "Verified OK" count. #}
+    {% if c.issues > 0 %}
+      <a class="btn btn--subtle" href="/collection/{{ c.id }}/review">{{ m.icon("alert", size=15) }} Review issues</a>
+    {% endif %}
+    {% if c.issues > 0 or c.counts.new > 0 %}
+      <form hx-post="/collection/{{ c.id }}/accept" hx-swap="none" style="display:inline">
+        <button class="btn btn--primary" type="submit">{{ m.icon("check", size=15) }} {% if c.issues > 0 %}Accept changes{% else %}Baseline new files{% endif %}</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+{# Meta strip #}
+<div class="card card--flush" style="margin-bottom:20px">
+  <div class="meta-strip">
+    <div class="meta-cell meta-cell--wide">
+      <div class="meta-cell__label">Status</div>
+      {# Live operation badge while a scan/stamp/upgrade runs; resting status pill otherwise. #}
+      <div class="meta-cell__value">{% include "partials/op_status.html" %}</div>
+    </div>
+    <div class="meta-cell"><div class="meta-cell__label">Root path</div><div class="meta-cell__value mono" style="font-size:12px">{{ c.root }}</div></div>
+    <div class="meta-cell"><div class="meta-cell__label">Policy</div><div class="meta-cell__value" style="text-transform:uppercase;letter-spacing:0.03em">{{ c.mode }}</div></div>
+    <div class="meta-cell"><div class="meta-cell__label">Notarization</div><div class="meta-cell__value">{% if c.ots == "none" %}Tripwire only{% else %}Per-file · new files only{% endif %}</div></div>
+    <div class="meta-cell"><div class="meta-cell__label">Scan cadence</div><div class="meta-cell__value">{{ c.cadence }}</div></div>
+    <div class="meta-cell" style="border-right:none"><div class="meta-cell__label">Owner</div><div class="meta-cell__value">{{ c.owner }}</div></div>
+  </div>
+</div>
+
+{# Stat row #}
+<div class="stat-row">
+  <div class="card mini-stat">
+    <div class="mini-stat__label">{{ m.icon("file", size=15, stroke=1.9) }}<span>Total files</span></div>
+    <div class="mini-stat__value">{{ "{:,}".format(c.file_count) }}</div>
+    <div class="mini-stat__sub">{{ c.size }}</div>
+  </div>
+  <div class="card mini-stat">
+    <div class="mini-stat__label">{{ m.icon("checkCircle", size=15, stroke=1.9) }}<span>Verified OK</span></div>
+    <div class="mini-stat__value" style="color:var(--ok)">{{ "{:,}".format(c.counts.ok) }}</div>
+  </div>
+  {% if c.issues %}
+  <a class="card mini-stat mini-stat--link" href="/collection/{{ c.id }}/review">
+    <div class="mini-stat__label">{{ m.icon("alert", size=15, stroke=1.9) }}<span>Changed / missing</span></div>
+    <div class="mini-stat__value" style="color:var(--danger)">{{ c.issues }}</div>
+    <div class="mini-stat__sub">{{ c.counts.missing }} missing · {{ c.counts.modified }} modified <span class="mini-stat__cta">· Review {{ m.icon("chevronR", size=11) }}</span></div>
+  </a>
+  {% else %}
+  <div class="card mini-stat">
+    <div class="mini-stat__label">{{ m.icon("alert", size=15, stroke=1.9) }}<span>Changed / missing</span></div>
+    <div class="mini-stat__value" style="color:var(--text-3)">0</div>
+    <div class="mini-stat__sub">{{ c.counts.missing }} missing · {{ c.counts.modified }} modified</div>
+  </div>
+  {% endif %}
+  {% if c.ots != "none" %}
+    <div class="card mini-stat">
+      <div class="mini-stat__label">{{ m.icon("bitcoin", size=15, stroke=1.9) }}<span>Anchored to chain</span></div>
+      <div class="mini-stat__value" style="color:var(--accent)">{{ "{:,}".format(c.ots_counts.complete) }}</div>
+      {% set pend = c.ots_counts.pending + c.ots_counts.incomplete %}
+      <div class="mini-stat__sub">{% if pend %}{{ pend }} pending{% else %}all confirmed{% endif %}</div>
+    </div>
+  {% else %}
+    <div class="card mini-stat">
+      <div class="mini-stat__label">{{ m.icon("clock", size=15, stroke=1.9) }}<span>Last scan</span></div>
+      <div class="mini-stat__value">{{ c.last_scan }}</div>
+      <div class="mini-stat__sub">{{ c.last_scan_full }}</div>
+    </div>
+  {% endif %}
+</div>
+
+{# File browser card — Tree (default) ⇄ List toggle. #}
+<div class="card card--flush browser" id="browser-{{ c.id }}" data-view="tree">
+  <div class="table-toolbar">
+    <h3 style="font-size:14.5px">Files</h3>
+    <div class="seg view-toggle">
+      <button type="button" class="seg__btn is-active" data-view="tree">{{ m.icon("folder", size=13) }} Tree</button>
+      <button type="button" class="seg__btn" data-view="list">{{ m.icon("stack", size=13) }} List</button>
+    </div>
+    <div class="table-search browser-list-only" style="margin-left:auto">
+      {{ m.icon("search", size=15) }}
+      <input type="search" name="q" placeholder="Search {{ '{:,}'.format(c.file_count) }} files by path…"
+             hx-get="/collection/{{ c.id }}/files"
+             hx-trigger="keyup changed delay:200ms, search"
+             hx-target="#file-table" hx-swap="outerHTML"
+             hx-include="[name='filter'],[name='sort'],[name='dir']" />
+    </div>
+    <div class="seg filter-seg browser-list-only">
+      {% for k, lbl in [("all", "All"), ("issues", "Issues"), ("new", "New"), ("ok", "OK")] %}
+        <label class="seg__btn {% if filter == k %}is-active{% endif %}">
+          <input type="radio" name="filter" value="{{ k }}" {% if filter == k %}checked{% endif %} style="display:none"
+                 hx-get="/collection/{{ c.id }}/files" hx-target="#file-table" hx-swap="outerHTML"
+                 hx-include="[name='q'],[name='sort'],[name='dir']" />
+          {{ lbl }}
+        </label>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="browser-tree">
+    {% include "partials/file_tree.html" %}
+  </div>
+  <div class="browser-list">
+    <div class="table-scroll">
+      {% include "partials/file_table.html" %}
+    </div>
+  </div>
+</div>
+
+<script>
+  (function () {
+    // Tree ⇄ List toggle: flip the browser's data-view; CSS hides the inactive region + the
+    // list-only search/filter while in tree mode.
+    var browser = document.getElementById("browser-{{ c.id }}");
+    if (browser) {
+      browser.querySelectorAll(".view-toggle .seg__btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          browser.dataset.view = btn.getAttribute("data-view");
+          browser.querySelectorAll(".view-toggle .seg__btn").forEach(function (b) { b.classList.remove("is-active"); });
+          btn.classList.add("is-active");
+        });
+      });
+    }
+  })();
+  // Keep the filter segmented control's active class in sync (scoped to its own group, so the
+  // Tree/List toggle's active state is left untouched).
+  document.addEventListener("change", function (e) {
+    if (e.target && e.target.name === "filter") {
+      var seg = e.target.closest(".seg");
+      if (seg) {
+        seg.querySelectorAll(".seg__btn").forEach(function (b) { b.classList.remove("is-active"); });
+        var lbl = e.target.closest(".seg__btn");
+        if (lbl) { lbl.classList.add("is-active"); }
+      }
+    }
+  });
+</script>
+{% endblock %}

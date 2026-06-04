@@ -1,0 +1,15 @@
+# Cairn runtime dependencies (Python 3.12).
+# The ots CLI ships with opentimestamps-client (de-risked: v0.7.2 stamps on 3.12).
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sqlalchemy[asyncio]>=2.0.29
+aiosqlite>=0.20
+alembic>=1.13
+pydantic-settings>=2.2
+passlib[bcrypt]>=1.7.4
+itsdangerous>=2.1
+jinja2>=3.1
+python-multipart>=0.0.9
+httpx>=0.27
+pyyaml>=6.0
+opentimestamps-client>=0.7.2

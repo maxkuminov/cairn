@@ -1,0 +1,105 @@
+/* Cairn panel — design tokens (Slate only, light + dark).
+   Copied verbatim from docs/design/cairn/theme.css (the token source of truth).
+   Two attributes on <html>: data-theme="slate" and data-mode="light|dark".
+   Fonts: Google Fonts @import with system-ui / ui-monospace fallbacks. Self-hosting
+   the woff2 files is a documented follow-up (see CLAUDE.md) — not required here. */
+
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* ===========================================================
+   SLATE — clean cool SaaS, blue signal, grotesk sans
+   =========================================================== */
+:root,
+[data-theme="slate"] {
+  --font-ui: 'Hanken Grotesk', system-ui, sans-serif;
+  --font-head: 'Hanken Grotesk', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --head-weight: 600;
+  --head-spacing: -0.015em;
+  --radius: 10px;
+  --radius-sm: 7px;
+  --radius-lg: 16px;
+}
+[data-theme="slate"][data-mode="light"] {
+  --bg:        oklch(0.985 0.004 250);
+  --bg-2:      oklch(0.965 0.005 250);
+  --surface:   oklch(1 0 0);
+  --surface-2: oklch(0.975 0.004 250);
+  --border:    oklch(0.915 0.006 250);
+  --border-strong: oklch(0.86 0.008 250);
+  --text:      oklch(0.26 0.024 256);
+  --text-2:    oklch(0.46 0.02 256);
+  --text-3:    oklch(0.62 0.018 256);
+  --accent:    oklch(0.55 0.16 256);
+  --accent-fg: oklch(0.99 0.01 256);
+  --accent-soft: oklch(0.95 0.03 256);
+  --accent-border: oklch(0.86 0.07 256);
+  --ok:        oklch(0.6 0.12 158);
+  --ok-soft:   oklch(0.95 0.04 158);
+  --warn:      oklch(0.7 0.13 70);
+  --warn-soft: oklch(0.95 0.05 75);
+  --danger:    oklch(0.57 0.19 25);
+  --danger-soft: oklch(0.95 0.04 25);
+  --shadow: 0 1px 2px oklch(0.5 0.02 256 / 0.06), 0 4px 16px oklch(0.5 0.02 256 / 0.05);
+  --shadow-lg: 0 8px 40px oklch(0.4 0.03 256 / 0.12);
+}
+[data-theme="slate"][data-mode="dark"] {
+  --bg:        oklch(0.185 0.014 256);
+  --bg-2:      oklch(0.16 0.014 256);
+  --surface:   oklch(0.225 0.016 256);
+  --surface-2: oklch(0.26 0.017 256);
+  --border:    oklch(0.31 0.016 256);
+  --border-strong: oklch(0.4 0.018 256);
+  --text:      oklch(0.95 0.006 256);
+  --text-2:    oklch(0.74 0.014 256);
+  --text-3:    oklch(0.58 0.016 256);
+  --accent:    oklch(0.7 0.14 256);
+  --accent-fg: oklch(0.16 0.02 256);
+  --accent-soft: oklch(0.3 0.06 256);
+  --accent-border: oklch(0.42 0.09 256);
+  --ok:        oklch(0.72 0.13 158);
+  --ok-soft:   oklch(0.32 0.06 158);
+  --warn:      oklch(0.78 0.13 75);
+  --warn-soft: oklch(0.34 0.06 75);
+  --danger:    oklch(0.68 0.17 25);
+  --danger-soft: oklch(0.33 0.08 25);
+  --shadow: 0 1px 2px oklch(0 0 0 / 0.3), 0 4px 16px oklch(0 0 0 / 0.3);
+  --shadow-lg: 0 8px 40px oklch(0 0 0 / 0.5);
+}
+
+/* ---------- Reset / base (from theme.css) ---------- */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+h1, h2, h3, h4 {
+  font-family: var(--font-head);
+  font-weight: var(--head-weight);
+  letter-spacing: var(--head-spacing);
+  margin: 0;
+  color: var(--text);
+}
+.mono { font-family: var(--font-mono); font-feature-settings: "ss01"; }
+button { font-family: inherit; cursor: pointer; }
+input, select, textarea { font-family: inherit; }
+::selection { background: var(--accent-soft); }
+
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 8px; border: 3px solid var(--bg); }
+::-webkit-scrollbar-track { background: transparent; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+a { color: var(--accent); text-decoration: none; }

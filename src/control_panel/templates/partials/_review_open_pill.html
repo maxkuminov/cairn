@@ -1,0 +1,5 @@
+{% if review_open and review_open > 0 %}
+  <span class="pill pill--soft pill--danger pill--sm">{{ review_open }} need action</span>
+{% else %}
+  <span class="pill pill--soft pill--ok pill--sm">All acknowledged</span>
+{% endif %}

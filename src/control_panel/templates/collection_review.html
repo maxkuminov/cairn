@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Review — {{ c.name }} · Cairn{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <a class="back-link" href="/collection/{{ c.id }}">{{ m.icon("arrowLeft", size=15) }} {{ c.name }}</a>
+    <h1>What changed</h1>
+    <div class="page-header__sub">
+      Files in <strong>{{ c.name }}</strong> that went missing or changed. Review each one, recover it
+      from your backup if you want it back, then acknowledge or accept.
+    </div>
+  </div>
+  <div class="page-header__actions">
+    <span id="review-open-pill">{% include "partials/_review_open_pill.html" %}</span>
+    {% if review_open and review_open > 0 %}
+      <form method="post" action="/collection/{{ c.id }}/review/ack-all" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <button class="btn btn--subtle btn--sm" type="submit">{{ m.icon("check", size=14, stroke=2) }} Acknowledge all</button>
+      </form>
+    {% endif %}
+    {% if total_issues > 0 %}
+      <form method="post" action="/collection/{{ c.id }}/review/accept" style="display:inline"
+            onsubmit="return confirm('Accept all changes? Modified files become the new baseline and missing files stop being tracked. This does not delete anything on disk.');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <button class="btn btn--primary btn--sm" type="submit">{{ m.icon("check", size=14, stroke=2) }} Accept all changes</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+{% if total_issues == 0 %}
+  <div class="card">
+    <div class="empty-state">
+      <div style="display:flex;justify-content:center;margin-bottom:10px;color:var(--ok)">{{ m.icon("checkCircle", size=34, stroke=1.7) }}</div>
+      <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px">All clear</div>
+      <div>Nothing is missing or changed in this collection right now.</div>
+      <a class="btn btn--subtle btn--sm" href="/collection/{{ c.id }}" style="margin-top:16px;display:inline-flex">Back to {{ c.name }}</a>
+    </div>
+  </div>
+{% else %}
+  {# Recovery panel — tool-agnostic. Copy the affected paths into whatever backup tool you use. #}
+  <div class="card recovery" id="recovery"
+       data-root="{{ c.root }}"
+       data-relpaths="{{ copy_relpaths | e }}">
+    <div class="recovery__head">
+      <div class="recovery__title">{{ m.icon("download", size=16, stroke=1.9) }} Recover these files</div>
+      <div class="recovery__actions">
+        <button type="button" class="btn btn--sm" data-copy="rel">{{ m.icon("copy", size=14) }} Copy paths</button>
+        <button type="button" class="btn btn--sm" data-copy="abs">{{ m.icon("copy", size=14) }} Copy full paths</button>
+        <span class="recovery__copied" id="recovery-copied" hidden>Copied ✓</span>
+      </div>
+    </div>
+    <div class="recovery__hint">
+      Cairn watches your files read-only — it never restores them itself. Paste the list above into
+      your own backup tool (restic, Borg, rsync, Time Machine, a cloud sync…) to bring them back, then
+      <strong>Scan now</strong> on the collection to confirm, or <strong>Accept all changes</strong> to
+      stop tracking what's gone for good.
+      {% if copy_truncated %}<br />Showing the first {{ "{:,}".format(copy_count) }} of {{ "{:,}".format(total_issues) }} paths — use <span class="mono">cairn status</span> for the full set.{% endif %}
+    </div>
+    <details class="recovery__more">
+      <summary>How to recover (any backup tool)</summary>
+      <ol class="recovery__steps">
+        <li>Copy the affected paths with the <strong>Copy paths</strong> button above (relative to the collection root, or full paths).</li>
+        <li>In your backup tool, restore exactly those paths to the collection root <span class="mono">{{ c.root }}</span>.</li>
+        <li>Run <strong>Scan now</strong> — recovered files flip back to <em>restored / OK</em>.</li>
+        <li>For anything you don't want back, <strong>Accept all changes</strong> to clear it from tracking.</li>
+      </ol>
+    </details>
+  </div>
+
+  <div class="card card--flush review-list">
+    <div class="review-list__head">
+      <h3>{{ total_issues }} {{ "file" if total_issues == 1 else "files" }} need attention</h3>
+      <div class="review-list__legend">
+        {% if c.counts.missing %}<span class="legend__stat">{{ m.dot("var(--danger)", size=7) }}{{ c.counts.missing }} missing</span>{% endif %}
+        {% if c.counts.modified %}<span class="legend__stat">{{ m.dot("var(--warn)", size=7) }}{{ c.counts.modified }} modified</span>{% endif %}
+      </div>
+    </div>
+    {% for it in items %}
+      {% include "partials/review_row.html" %}
+    {% endfor %}
+    {% if truncated %}
+      <div class="review-list__more">Showing the first {{ shown }} of {{ total_issues }} — open the
+        <a href="/collection/{{ c.id }}">file browser</a> (filter: Issues) to see the rest.</div>
+    {% endif %}
+  </div>
+{% endif %}
+
+<script>
+  (function () {
+    var card = document.getElementById("recovery");
+    if (!card) return;
+    var rel = card.getAttribute("data-relpaths") || "";
+    var root = card.getAttribute("data-root") || "";
+    var note = document.getElementById("recovery-copied");
+    function paths(kind) {
+      if (!rel) return "";
+      if (kind === "rel") return rel;
+      var base = root.replace(/\/+$/, "");
+      return rel.split("\n").map(function (p) { return base + "/" + p; }).join("\n");
+    }
+    card.querySelectorAll("[data-copy]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var text = paths(btn.getAttribute("data-copy"));
+        navigator.clipboard.writeText(text).then(function () {
+          if (note) { note.hidden = false; setTimeout(function () { note.hidden = true; }, 1800); }
+        });
+      });
+    });
+  })();
+</script>
+{% endblock %}

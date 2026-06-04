@@ -1,0 +1,63 @@
+{% import "_macros.html" as m %}
+<a class="card card--flush card--hover collection-card" href="/collection/{{ c.id }}">
+  <div class="collection-card__head">
+    <div class="collection-card__title-row">
+      <div style="min-width:0">
+        <div class="flex-center gap-8" style="margin-bottom:4px">
+          {{ m.icon("folder", size=17, cls="text-3") }}
+          <h3 class="collection-card__name">{{ c.name }}</h3>
+        </div>
+        <div class="collection-card__root mono">{{ c.root }}</div>
+      </div>
+      {# Live operation badge while a scan/stamp/upgrade runs (polls itself), resting pill otherwise. #}
+      {% include "partials/op_status.html" %}
+    </div>
+
+    <div class="collection-card__meta">
+      <div><div class="meta__label">Files</div><div class="meta__value">{{ "{:,}".format(c.file_count) }}</div></div>
+      <div><div class="meta__label">Size</div><div class="meta__value">{{ c.size }}</div></div>
+      <div><div class="meta__label">Owner</div><div class="meta__value">{{ c.owner }}</div></div>
+      <div><div class="meta__label">Last scan</div><div class="meta__value">{{ c.last_scan }}</div></div>
+    </div>
+
+    {% set total = (c.counts.ok + c.counts.new + c.counts.modified + c.counts.missing) or 1 %}
+    <div class="segbar">
+      {% if c.counts.ok > 0 %}<div class="segbar__seg" style="width:{{ (c.counts.ok / total * 100)|round(2) }}%;background:var(--ok)"></div>{% endif %}
+      {% if c.counts.new > 0 %}<div class="segbar__seg" style="width:{{ (c.counts.new / total * 100)|round(2) }}%;background:var(--accent)"></div>{% endif %}
+      {% if c.counts.modified > 0 %}<div class="segbar__seg" style="width:{{ (c.counts.modified / total * 100)|round(2) }}%;background:var(--warn)"></div>{% endif %}
+      {% if c.counts.missing > 0 %}<div class="segbar__seg" style="width:{{ (c.counts.missing / total * 100)|round(2) }}%;background:var(--danger)"></div>{% endif %}
+    </div>
+    <div class="legend">
+      {% if c.issues > 0 %}
+        {# The card links to detail; the issue counts deep-link to the focused review page. A span
+           (not a nested <a>, which is invalid) intercepts the click and navigates to review. #}
+        <span class="legend__review" role="link" tabindex="0"
+              onclick="event.preventDefault();event.stopPropagation();window.location.href='/collection/{{ c.id }}/review'"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();window.location.href='/collection/{{ c.id }}/review'}">
+          {% if c.counts.missing > 0 %}<span class="legend__stat">{{ m.dot("var(--danger)", size=7) }}{{ c.counts.missing }} missing</span>{% endif %}
+          {% if c.counts.modified > 0 %}<span class="legend__stat">{{ m.dot("var(--warn)", size=7) }}{{ c.counts.modified }} modified</span>{% endif %}
+          <span class="legend__cta">Review {{ m.icon("chevronR", size=12) }}</span>
+        </span>
+        {% if c.counts.new > 0 %}<span class="legend__stat">{{ m.dot("var(--accent)", size=7) }}{{ c.counts.new }} new</span>{% endif %}
+      {% elif c.counts.new > 0 %}
+        <span class="legend__stat">{{ m.dot("var(--accent)", size=7) }}{{ c.counts.new }} new</span>
+      {% else %}
+        <span class="legend__stat">{{ m.dot("var(--ok)", size=7) }}All files verified</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="collection-card__footer">
+    <div class="flex-center gap-8">
+      {% if c.ots == "none" %}
+        <span class="flex-center" style="gap:6px;font-size:12px;color:var(--text-3)">{{ m.icon("minusCircle", size=14) }} Tripwire only — no notarization</span>
+      {% else %}
+        <span class="text-3" style="display:inline-flex">{{ m.icon("bitcoin", size=15, cls="") }}</span>
+        <span style="font-size:12px;color:var(--text-2)">
+          <strong style="color:var(--text)">{{ "{:,}".format(c.ots_counts.complete) }}</strong> anchored{% set pend = c.ots_counts.pending + c.ots_counts.incomplete %}{% if pend > 0 %}<span style="color:var(--warn)"> · {{ pend }} pending</span>{% endif %}
+        </span>
+      {% endif %}
+    </div>
+    <div class="flex gap-8">{{ m.icon("mail", size=14, cls="text-3") }}</div>
+  </div>
+</a>

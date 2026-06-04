@@ -1,0 +1,12 @@
+{# Recent-events feed body — the innerHTML of #events-feed. Returned by POST /events/ack-all with
+   OOB swaps that refresh the header controls (pill + Acknowledge-all) and the sidebar alert badge. #}
+{% for e in events %}
+  {% include "partials/_event_row.html" %}
+{% endfor %}
+{% if not events %}<div class="empty-state">No events recorded yet.</div>{% endif %}
+<span id="open-events-pill" hx-swap-oob="innerHTML">
+  {% include "partials/_events_controls.html" %}
+</span>
+<span id="sidebar-alert-badge" hx-swap-oob="innerHTML">
+  {% if alert_count and alert_count > 0 %}<span class="nav-badge">{{ alert_count }}</span>{% endif %}
+</span>

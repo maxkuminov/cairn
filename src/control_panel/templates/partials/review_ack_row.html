@@ -1,0 +1,7 @@
+{# Response to acknowledging a single file from the review page: swap the row in place, and
+   OOB-refresh the collection's "need action" pill + the global sidebar alert badge. #}
+{% include "partials/review_row.html" %}
+<span id="review-open-pill" hx-swap-oob="innerHTML">{% include "partials/_review_open_pill.html" %}</span>
+<span id="sidebar-alert-badge" hx-swap-oob="innerHTML">
+  {% if alert_count and alert_count > 0 %}<span class="nav-badge">{{ alert_count }}</span>{% endif %}
+</span>

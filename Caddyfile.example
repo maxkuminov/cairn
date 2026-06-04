@@ -1,0 +1,35 @@
+# Caddyfile for the simplest self-host path.
+# Caddy auto-issues a Let's Encrypt cert for {$CAIRN_HOSTNAME}, terminates TLS,
+# and reverse-proxies to the Cairn container on port 8000. See the commented
+# Caddy block at the bottom of docker-compose.yml for how to wire it up.
+
+{$CAIRN_HOSTNAME} {
+    encode gzip
+
+    # Cairn owns its OWN login. In multi mode (CAIRN_AUTH_MODE=multi) it enforces
+    # username/password auth and per-user scoping at the application layer, so NO
+    # external auth proxy is required — just proxy straight through.
+    reverse_proxy cairn:8000
+
+    # ── Optional gate for single-user installs ──
+    # Single-user mode (CAIRN_AUTH_MODE=single) has no in-app login. If you still
+    # want a front-door gate, uncomment ONE of the blocks below (and remove the
+    # bare `reverse_proxy` above — fold it into the chosen block instead).
+    #
+    # ── Option 1: Caddy basic auth ──
+    # Generate hash: docker run --rm caddy:2 caddy hash-password --plaintext 'YOUR_PASSWORD'
+    # basic_auth {
+    #     youruser $2a$14$REPLACE_WITH_BCRYPT_HASH
+    # }
+    #
+    # ── Option 2: IP allowlist ──
+    # @untrusted not remote_ip 1.2.3.4 5.6.7.8/32
+    # respond @untrusted "Forbidden" 403
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        -Server
+    }
+}

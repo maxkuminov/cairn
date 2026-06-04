@@ -1,0 +1,30 @@
+{% import "_macros.html" as m %}
+{%- set kind_meta = {
+  "added": ("New", "var(--accent)", "var(--accent-soft)", "plus"),
+  "modified": ("Modified", "var(--warn)", "var(--warn-soft)", "alert"),
+  "missing": ("Missing", "var(--danger)", "var(--danger-soft)", "minusCircle"),
+  "restored": ("Restored", "var(--ok)", "var(--ok-soft)", "refresh"),
+  "moved": ("Moved", "var(--accent)", "var(--accent-soft)", "move"),
+}.get(e.kind, ("Event", "var(--text-2)", "var(--surface-2)", "info")) -%}
+<div class="event-row" id="event-row-{{ e.id }}">
+  <div class="event-icon" style="background:{{ kind_meta[2] }};color:{{ kind_meta[1] }}">
+    {{ m.icon(kind_meta[3], size=15, stroke=2.1) }}
+  </div>
+  <div class="event-row__body">
+    <div class="event-row__title">
+      <span class="event-row__kind" style="color:{{ kind_meta[1] }}">{{ kind_meta[0] }}</span>
+      {% if e.stamped %}<span class="pill pill--soft pill--accent pill--sm">{{ m.icon("bitcoin", size=11.5, stroke=2) }}stamped</span>{% endif %}
+      <span class="event-row__time">{{ e.at }}</span>
+    </div>
+    <div class="event-row__relpath mono">{% if e.kind == "moved" and e.detail %}{{ e.detail }}{% else %}{{ e.relpath }}{% endif %}</div>
+    <div class="event-row__collection">{{ e.collection_name }}</div>
+    {% if not e.acked %}
+      <div style="margin-top:8px">
+        <button class="btn btn--sm {{ 'btn--danger' if e.kind == 'missing' else 'btn--subtle' }}"
+                hx-post="/events/{{ e.id }}/ack" hx-target="#event-row-{{ e.id }}" hx-swap="outerHTML">
+          {{ m.icon("check", size=15, stroke=2) }} Acknowledge
+        </button>
+      </div>
+    {% endif %}
+  </div>
+</div>

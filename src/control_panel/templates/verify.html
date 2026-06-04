@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Verify a proof · Cairn{% endblock %}
+{% block content %}
+<div style="max-width:820px">
+  <div class="page-header">
+    <div>
+      <h1>Verify a proof</h1>
+      <div class="page-header__sub">Prove that a file existed in its exact, unaltered form on or before a certain date, in a way anyone can independently check. Pick a file below and Cairn confirms when it was first recorded. The file itself never leaves the server; nothing is uploaded.</div>
+    </div>
+  </div>
+
+  <div id="verify-pane">
+    {% if preselect %}
+      {# Deep-link: verify immediately via a load-triggered POST. #}
+      <div hx-post="/verify" hx-vals='{"file_id": {{ preselect }}}' hx-trigger="load" hx-target="#verify-pane" hx-swap="innerHTML">
+        <div class="card" style="padding:48px;text-align:center">
+          <div class="spinner"></div>
+          <div style="font-size:15px;font-weight:600;margin-bottom:6px">Verifying against the blockchain…</div>
+          <div class="text-3" style="font-size:13px">Re-hashing · loading proof · checking explorer</div>
+        </div>
+      </div>
+    {% else %}
+      <div class="card card--flush">
+        <div style="padding:18px 18px 16px">
+          <div class="verify-search">
+            {{ m.icon("search", size=18) }}
+            <input type="search" name="q" autofocus
+                   placeholder="Search {{ '{:,}'.format(total_anchored) }} anchored files by path or collection…"
+                   hx-get="/verify/search" hx-trigger="keyup changed delay:200ms, search"
+                   hx-target="#verify-results" hx-swap="outerHTML" />
+          </div>
+        </div>
+        {% with results=recent, q="", match_count=recent|length %}
+          {% include "partials/verify_results.html" %}
+        {% endwith %}
+        <div class="info-strip" style="border-radius:0;background:transparent;border-top:1px solid var(--border)">
+          {{ m.icon("info", size=14, cls="text-3") }}
+          <span>Or open any file from a collection and click its <strong class="text-2">Anchored</strong> badge to verify it directly.</span>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+
+  <details class="card" style="margin-top:18px" {% if not preselect %}open{% endif %}>
+    <summary style="cursor:pointer;font-weight:650;font-size:14px;display:flex;align-items:center;gap:8px">
+      {{ m.icon("info", size=16, cls="text-3") }} How this works
+    </summary>
+    <div style="margin-top:14px;display:flex;flex-direction:column;gap:14px">
+      <div style="display:flex;gap:12px;align-items:flex-start">
+        <span class="verify-step__num">1</span>
+        <div>
+          <div style="font-weight:650;font-size:13.5px;margin-bottom:2px">A digital fingerprint of the file</div>
+          <div class="text-2" style="font-size:13px;line-height:1.55">When Cairn first sees a file, it calculates a <strong>hash</strong> (technically a “SHA-256”): a short, unique fingerprint computed from the file's exact contents. Change a single comma and the fingerprint changes completely, so it can prove a file hasn't been altered. The fingerprint can't be turned back into the file, so it reveals nothing about what's inside.</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:flex-start">
+        <span class="verify-step__num">2</span>
+        <div>
+          <div style="font-weight:650;font-size:13.5px;margin-bottom:2px">Recorded permanently on Bitcoin</div>
+          <div class="text-2" style="font-size:13px;line-height:1.55">That fingerprint is written into the <strong>Bitcoin blockchain</strong>, a public, worldwide ledger that is permanent and cannot be backdated or quietly edited. Cairn does this using <strong>OpenTimestamps</strong>, a free and open standard for timestamping. Only the fingerprint is published, never the file.</div>
+        </div>
+      </div>
+      <div style="display:flex;gap:12px;align-items:flex-start">
+        <span class="verify-step__num">3</span>
+        <div>
+          <div style="font-weight:650;font-size:13.5px;margin-bottom:2px">Anyone can check it, without trusting Cairn</div>
+          <div class="text-2" style="font-size:13px;line-height:1.55">Because the record is public, you, or an auditor, lawyer, or client, can confirm the file existed in this exact form by a given date, using the file plus its small proof file. The guarantee rests on Bitcoin and math, not on Cairn or any single company staying online.</div>
+        </div>
+      </div>
+      <a class="btn btn--ghost btn--sm" href="/learn" style="align-self:flex-start">{{ m.icon("info", size=14) }} Read the full primer</a>
+    </div>
+  </details>
+</div>
+{% endblock %}

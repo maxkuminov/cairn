@@ -1,0 +1,36 @@
+{% import "_macros.html" as m %}
+<!doctype html>
+<html lang="en" data-theme="slate" data-mode="{{ mode }}">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in · Cairn</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='css/tokens.css') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', path='css/panel.css') }}" />
+  </head>
+  {# Built for multi-user mode; single-user installs skip login entirely. #}
+  <body>
+    <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;position:relative">
+      <a class="icon-btn" href="/mode/toggle" style="position:absolute;top:22px;right:22px">{{ m.icon("sun" if mode == "dark" else "moon", size=18) }}</a>
+      <div style="width:100%;max-width:380px">
+        <div style="display:flex;flex-direction:column;align-items:center;margin-bottom:28px">
+          {{ m.cairn_mark(48) }}
+          <div style="font-family:var(--font-head);font-size:27px;font-weight:700;letter-spacing:var(--head-spacing);margin-top:12px">Cairn</div>
+          <div class="text-3" style="font-size:13px;margin-top:4px">File-integrity monitor &amp; notary</div>
+        </div>
+        <form class="card" style="padding:26px" method="post" action="/login">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <div style="display:flex;flex-direction:column;gap:16px">
+            <label class="field"><div class="field__label-row"><span class="field__label">Username</span></div><input class="input" name="username" /></label>
+            <label class="field"><div class="field__label-row"><span class="field__label">Password</span></div><input class="input" type="password" name="password" /></label>
+            <button class="btn btn--primary btn--full btn--lg" type="submit">{{ m.icon("lock", size=17) }} Sign in</button>
+          </div>
+        </form>
+        <div class="info-strip" style="margin-top:16px">
+          {{ m.icon("info", size=15, cls="text-3") }}
+          <span>This instance runs in <strong class="text-2">multi-user</strong> mode. Single-user installs skip login entirely.</span>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

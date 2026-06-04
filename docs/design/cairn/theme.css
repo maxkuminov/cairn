@@ -1,0 +1,226 @@
+/* Cairn panel — theming
+   Two attributes on <html>: data-theme (slate|archive|granite) and data-mode (light|dark).
+   Everything else reads CSS custom properties. */
+
+/* ---------- Fonts ---------- */
+@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600;8..60,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+/* ===========================================================
+   SLATE — clean cool SaaS, blue signal, grotesk sans
+   =========================================================== */
+:root,
+[data-theme="slate"] {
+  --font-ui: 'Hanken Grotesk', system-ui, sans-serif;
+  --font-head: 'Hanken Grotesk', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --head-weight: 600;
+  --head-spacing: -0.015em;
+  --radius: 10px;
+  --radius-sm: 7px;
+  --radius-lg: 16px;
+}
+[data-theme="slate"][data-mode="light"] {
+  --bg:        oklch(0.985 0.004 250);
+  --bg-2:      oklch(0.965 0.005 250);
+  --surface:   oklch(1 0 0);
+  --surface-2: oklch(0.975 0.004 250);
+  --border:    oklch(0.915 0.006 250);
+  --border-strong: oklch(0.86 0.008 250);
+  --text:      oklch(0.26 0.024 256);
+  --text-2:    oklch(0.46 0.02 256);
+  --text-3:    oklch(0.62 0.018 256);
+  --accent:    oklch(0.55 0.16 256);
+  --accent-fg: oklch(0.99 0.01 256);
+  --accent-soft: oklch(0.95 0.03 256);
+  --accent-border: oklch(0.86 0.07 256);
+  --ok:        oklch(0.6 0.12 158);
+  --ok-soft:   oklch(0.95 0.04 158);
+  --warn:      oklch(0.7 0.13 70);
+  --warn-soft: oklch(0.95 0.05 75);
+  --danger:    oklch(0.57 0.19 25);
+  --danger-soft: oklch(0.95 0.04 25);
+  --shadow: 0 1px 2px oklch(0.5 0.02 256 / 0.06), 0 4px 16px oklch(0.5 0.02 256 / 0.05);
+  --shadow-lg: 0 8px 40px oklch(0.4 0.03 256 / 0.12);
+}
+[data-theme="slate"][data-mode="dark"] {
+  --bg:        oklch(0.185 0.014 256);
+  --bg-2:      oklch(0.16 0.014 256);
+  --surface:   oklch(0.225 0.016 256);
+  --surface-2: oklch(0.26 0.017 256);
+  --border:    oklch(0.31 0.016 256);
+  --border-strong: oklch(0.4 0.018 256);
+  --text:      oklch(0.95 0.006 256);
+  --text-2:    oklch(0.74 0.014 256);
+  --text-3:    oklch(0.58 0.016 256);
+  --accent:    oklch(0.7 0.14 256);
+  --accent-fg: oklch(0.16 0.02 256);
+  --accent-soft: oklch(0.3 0.06 256);
+  --accent-border: oklch(0.42 0.09 256);
+  --ok:        oklch(0.72 0.13 158);
+  --ok-soft:   oklch(0.32 0.06 158);
+  --warn:      oklch(0.78 0.13 75);
+  --warn-soft: oklch(0.34 0.06 75);
+  --danger:    oklch(0.68 0.17 25);
+  --danger-soft: oklch(0.33 0.08 25);
+  --shadow: 0 1px 2px oklch(0 0 0 / 0.3), 0 4px 16px oklch(0 0 0 / 0.3);
+  --shadow-lg: 0 8px 40px oklch(0 0 0 / 0.5);
+}
+
+/* ===========================================================
+   ARCHIVE — warm archival paper, clay accent, serif headings
+   =========================================================== */
+[data-theme="archive"] {
+  --font-ui: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-head: 'Source Serif 4', Georgia, serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --head-weight: 600;
+  --head-spacing: 0;
+  --radius: 7px;
+  --radius-sm: 5px;
+  --radius-lg: 12px;
+}
+[data-theme="archive"][data-mode="light"] {
+  --bg:        oklch(0.97 0.008 82);
+  --bg-2:      oklch(0.95 0.009 82);
+  --surface:   oklch(0.99 0.006 82);
+  --surface-2: oklch(0.965 0.008 82);
+  --border:    oklch(0.89 0.012 76);
+  --border-strong: oklch(0.82 0.016 72);
+  --text:      oklch(0.29 0.018 60);
+  --text-2:    oklch(0.47 0.02 58);
+  --text-3:    oklch(0.62 0.02 60);
+  --accent:    oklch(0.55 0.1 48);
+  --accent-fg: oklch(0.99 0.01 70);
+  --accent-soft: oklch(0.93 0.035 56);
+  --accent-border: oklch(0.83 0.06 52);
+  --ok:        oklch(0.55 0.09 145);
+  --ok-soft:   oklch(0.93 0.035 145);
+  --warn:      oklch(0.66 0.11 65);
+  --warn-soft: oklch(0.93 0.05 70);
+  --danger:    oklch(0.53 0.16 30);
+  --danger-soft: oklch(0.93 0.04 35);
+  --shadow: 0 1px 2px oklch(0.5 0.04 60 / 0.07), 0 3px 14px oklch(0.5 0.04 60 / 0.06);
+  --shadow-lg: 0 10px 40px oklch(0.4 0.05 60 / 0.14);
+}
+[data-theme="archive"][data-mode="dark"] {
+  --bg:        oklch(0.2 0.012 62);
+  --bg-2:      oklch(0.175 0.012 62);
+  --surface:   oklch(0.245 0.014 64);
+  --surface-2: oklch(0.285 0.015 64);
+  --border:    oklch(0.33 0.015 64);
+  --border-strong: oklch(0.42 0.017 64);
+  --text:      oklch(0.93 0.01 70);
+  --text-2:    oklch(0.73 0.016 66);
+  --text-3:    oklch(0.58 0.018 64);
+  --accent:    oklch(0.68 0.09 52);
+  --accent-fg: oklch(0.18 0.02 60);
+  --accent-soft: oklch(0.33 0.05 54);
+  --accent-border: oklch(0.45 0.07 52);
+  --ok:        oklch(0.68 0.1 148);
+  --ok-soft:   oklch(0.32 0.05 148);
+  --warn:      oklch(0.75 0.11 70);
+  --warn-soft: oklch(0.34 0.06 70);
+  --danger:    oklch(0.66 0.16 32);
+  --danger-soft: oklch(0.33 0.07 32);
+  --shadow: 0 1px 2px oklch(0 0 0 / 0.35), 0 4px 16px oklch(0 0 0 / 0.32);
+  --shadow-lg: 0 10px 40px oklch(0 0 0 / 0.5);
+}
+
+/* ===========================================================
+   GRANITE — grounded geological, muted sage, mono-forward
+   =========================================================== */
+[data-theme="granite"] {
+  --font-ui: 'Space Grotesk', system-ui, sans-serif;
+  --font-head: 'Space Grotesk', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --head-weight: 600;
+  --head-spacing: -0.01em;
+  --radius: 4px;
+  --radius-sm: 3px;
+  --radius-lg: 8px;
+}
+[data-theme="granite"][data-mode="light"] {
+  --bg:        oklch(0.97 0.004 165);
+  --bg-2:      oklch(0.95 0.005 165);
+  --surface:   oklch(0.99 0.003 165);
+  --surface-2: oklch(0.965 0.005 165);
+  --border:    oklch(0.89 0.007 160);
+  --border-strong: oklch(0.81 0.01 158);
+  --text:      oklch(0.27 0.012 165);
+  --text-2:    oklch(0.46 0.014 162);
+  --text-3:    oklch(0.61 0.014 162);
+  --accent:    oklch(0.5 0.075 158);
+  --accent-fg: oklch(0.99 0.01 158);
+  --accent-soft: oklch(0.93 0.03 158);
+  --accent-border: oklch(0.82 0.05 158);
+  --ok:        oklch(0.56 0.1 152);
+  --ok-soft:   oklch(0.93 0.035 152);
+  --warn:      oklch(0.66 0.12 68);
+  --warn-soft: oklch(0.93 0.05 72);
+  --danger:    oklch(0.54 0.17 28);
+  --danger-soft: oklch(0.93 0.04 32);
+  --shadow: 0 1px 2px oklch(0.4 0.02 165 / 0.07), 0 2px 10px oklch(0.4 0.02 165 / 0.05);
+  --shadow-lg: 0 8px 32px oklch(0.35 0.02 165 / 0.13);
+}
+[data-theme="granite"][data-mode="dark"] {
+  --bg:        oklch(0.185 0.01 165);
+  --bg-2:      oklch(0.16 0.01 165);
+  --surface:   oklch(0.225 0.012 165);
+  --surface-2: oklch(0.265 0.013 165);
+  --border:    oklch(0.31 0.012 162);
+  --border-strong: oklch(0.4 0.014 162);
+  --text:      oklch(0.94 0.005 165);
+  --text-2:    oklch(0.73 0.012 162);
+  --text-3:    oklch(0.57 0.013 162);
+  --accent:    oklch(0.66 0.08 158);
+  --accent-fg: oklch(0.16 0.02 158);
+  --accent-soft: oklch(0.3 0.05 158);
+  --accent-border: oklch(0.42 0.06 158);
+  --ok:        oklch(0.7 0.11 152);
+  --ok-soft:   oklch(0.31 0.05 152);
+  --warn:      oklch(0.77 0.12 72);
+  --warn-soft: oklch(0.33 0.06 72);
+  --danger:    oklch(0.67 0.16 30);
+  --danger-soft: oklch(0.32 0.07 30);
+  --shadow: 0 1px 2px oklch(0 0 0 / 0.3), 0 3px 14px oklch(0 0 0 / 0.32);
+  --shadow-lg: 0 8px 32px oklch(0 0 0 / 0.5);
+}
+
+/* ---------- Reset / base ---------- */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+h1, h2, h3, h4 {
+  font-family: var(--font-head);
+  font-weight: var(--head-weight);
+  letter-spacing: var(--head-spacing);
+  margin: 0;
+  color: var(--text);
+}
+.mono { font-family: var(--font-mono); font-feature-settings: "ss01"; }
+button { font-family: inherit; cursor: pointer; }
+input, select, textarea { font-family: inherit; }
+::selection { background: var(--accent-soft); }
+
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 8px; border: 3px solid var(--bg); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- Utility-ish shared classes ---------- */
+.cairn-app { display: flex; min-height: 100vh; }
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+a { color: var(--accent); text-decoration: none; }

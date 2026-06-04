@@ -1,0 +1,10 @@
+{% import "_macros.html" as m %}
+{%- set ok = status == "ok" -%}
+<div id="health-pill"
+     hx-get="/health-pill" hx-trigger="every 30s" hx-swap="outerHTML"
+     class="health-pill {% if not ok %}is-{{ status }}{% endif %}"
+     title="Exposed at /healthz for external monitors">
+  {{ m.dot("var(--ok)" if ok else "var(--danger)", size=7, pulse=true) }}
+  <span class="health-pill__label">{{ "Healthy" if ok else ("Degraded" if status == "degraded" else "Error") }}</span>
+  <span class="health-pill__url mono">/healthz</span>
+</div>

@@ -1,0 +1,132 @@
+{% import "_macros.html" as m %}
+<!doctype html>
+<html lang="en" data-theme="slate" data-mode="{{ mode }}">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}Cairn{% endblock %}</title>
+    <meta name="csrf-token" content="{{ csrf_token }}" />
+    <link rel="stylesheet" href="{{ url_for('static', path='css/tokens.css') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', path='css/panel.css') }}" />
+    {# htmx is vendored under static/js for offline self-hosting. If it is missing,
+       fall back to the CDN: https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js #}
+    <script src="{{ url_for('static', path='js/htmx.min.js') }}" defer></script>
+    <script>
+      // Send the CSRF token on every htmx mutating request.
+      document.addEventListener("htmx:configRequest", function (e) {
+        var meta = document.querySelector('meta[name="csrf-token"]');
+        if (meta) { e.detail.headers["X-CSRF-Token"] = meta.getAttribute("content"); }
+      });
+    </script>
+  </head>
+  <body>
+    <div class="cairn-app">
+      {# Backdrop behind the off-canvas sidebar on mobile; tap to close (CSS-hidden on desktop). #}
+      <div class="nav-backdrop" id="nav-backdrop"></div>
+      {# ---- 248px sidebar (off-canvas drawer < 768px) ---- #}
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar__brand">
+          {{ m.cairn_mark(30) }}
+          <div>
+            <div class="sidebar__brand-name">Cairn</div>
+            <div class="sidebar__brand-eyebrow">Integrity &amp; Notary</div>
+          </div>
+        </div>
+
+        <nav class="sidebar__nav">
+          <a class="nav-item {% if page == 'dashboard' %}is-active{% endif %}" href="/">
+            {{ m.icon("dashboard", size=18, stroke=2.1 if page == 'dashboard' else 1.8) }}
+            <span class="nav-item__label">Dashboard</span>
+            <span id="sidebar-alert-badge">
+              {% if alert_count and alert_count > 0 %}<span class="nav-badge">{{ alert_count }}</span>{% endif %}
+            </span>
+          </a>
+          <a class="nav-item {% if page in ('collections', 'collection', 'addCollection') %}is-active{% endif %}" href="/collections">
+            {{ m.icon("stack", size=18) }}<span class="nav-item__label">Collections</span>
+          </a>
+          <a class="nav-item {% if page == 'verify' %}is-active{% endif %}" href="/verify">
+            {{ m.icon("verify", size=18) }}<span class="nav-item__label">Verify proof</span>
+          </a>
+          <a class="nav-item {% if page == 'learn' %}is-active{% endif %}" href="/learn">
+            {{ m.icon("info", size=18) }}<span class="nav-item__label">How it works</span>
+          </a>
+
+          <div class="sidebar__divider"></div>
+          <div class="sidebar__label">Collections</div>
+          {% for c in sidebar_collections %}
+            <a class="collection-row" href="/collection/{{ c.id }}">
+              {{ m.dot(c.dot_color, size=7, pulse=c.is_alert) }}
+              <span class="collection-row__name">{{ c.name }}</span>
+              <span class="collection-row__count">{{ c.file_count_h }}</span>
+            </a>
+          {% endfor %}
+          <a class="add-collection" href="/collection/new">{{ m.icon("plus", size=15) }} Add collection</a>
+        </nav>
+
+        <div class="sidebar__footer">
+          <a class="nav-item {% if page == 'settings' %}is-active{% endif %}" href="/settings">
+            {{ m.icon("settings", size=18) }}<span class="nav-item__label">Settings</span>
+          </a>
+          <div class="user-block">
+            <div class="avatar">{{ (username or "?")[0]|upper }}</div>
+            <div style="flex:1;min-width:0">
+              <div class="user-block__name">{{ username }}{% if is_admin %}<span class="admin-chip">ADMIN</span>{% endif %}</div>
+              <div class="user-block__email">{{ user_email }}</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      {# ---- main column ---- #}
+      <div class="main-col">
+        <header class="topbar">
+          <button class="icon-btn nav-toggle" id="nav-toggle" type="button"
+                  aria-label="Open navigation" aria-controls="sidebar">
+            {{ m.icon("menu", size=18) }}
+          </button>
+          <div class="topbar__search">
+            {{ m.icon("search", size=16) }}
+            <input placeholder="Search files, paths, hashes…" aria-label="Search" />
+          </div>
+          <div class="topbar__spacer"></div>
+
+          <div id="health-pill"
+               hx-get="/health-pill" hx-trigger="load, every 30s" hx-swap="outerHTML"
+               class="health-pill" title="Exposed at /healthz for external monitors">
+            {{ m.dot("var(--ok)", size=7, pulse=true) }}
+            <span class="health-pill__label">Healthy</span>
+            <span class="health-pill__url mono">/healthz</span>
+          </div>
+
+          <a class="icon-btn" href="/mode/toggle" title="Switch to {{ 'light' if mode == 'dark' else 'dark' }} mode">
+            {{ m.icon("sun" if mode == "dark" else "moon", size=18) }}
+          </a>
+          <a class="icon-btn" href="#" title="Log out (single-user — no session)" aria-label="Log out">
+            {{ m.icon("logout", size=18) }}
+          </a>
+        </header>
+
+        <main class="content">
+          {% block content %}{% endblock %}
+        </main>
+      </div>
+    </div>
+    <script>
+      // Mobile nav drawer: the hamburger toggles `body.nav-open`; the backdrop and any sidebar
+      // link close it. No-op on desktop (the drawer styles only apply under the breakpoint).
+      (function () {
+        var body = document.body;
+        var close = function () { body.classList.remove("nav-open"); };
+        var toggle = document.getElementById("nav-toggle");
+        if (toggle) {
+          toggle.addEventListener("click", function () { body.classList.toggle("nav-open"); });
+        }
+        var backdrop = document.getElementById("nav-backdrop");
+        if (backdrop) { backdrop.addEventListener("click", close); }
+        document.querySelectorAll(".sidebar a").forEach(function (a) {
+          a.addEventListener("click", close);
+        });
+      })();
+    </script>
+  </body>
+</html>

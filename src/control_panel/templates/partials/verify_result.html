@@ -1,0 +1,59 @@
+{% import "_macros.html" as m %}
+<div>
+  <div class="verdict verdict--{{ verdict }}">
+    <div class="verdict__badge">{{ m.icon("check" if verdict == "ok" else ("clock" if verdict == "warn" else "x"), size=26, stroke=2.4) }}</div>
+    <div style="flex:1;min-width:0">
+      <div class="verdict__title">{{ title }}</div>
+      <div class="verdict__sub">
+        {% if verdict == "ok" and existed_by %}
+          <span class="mono">{{ filename }}</span> existed in this exact form, unaltered, on or before <strong>{{ existed_by }}</strong>, confirmed against the public Bitcoin record.
+        {% elif verdict == "warn" %}
+          <span class="mono">{{ filename }}</span>'s fingerprint has been submitted to Bitcoin but isn't confirmed yet. This usually settles within a few hours.
+        {% else %}
+          We couldn't confirm <span class="mono">{{ filename }}</span> against the public Bitcoin record. Its contents may have changed since it was recorded, or the proof isn't confirmed yet.
+        {% endif %}
+      </div>
+    </div>
+    <a class="btn btn--ghost" href="/verify">{{ m.icon("arrowLeft", size=15) }} Verify another</a>
+  </div>
+
+  <div class="card card--flush">
+    <div class="detail-row"><div class="detail-row__label">{{ m.icon("file", size=15) }} File</div><div class="detail-row__value mono" style="font-size:12.5px">{{ relpath }}</div><span></span></div>
+    <div class="detail-row"><div class="detail-row__label">Collection</div><div class="detail-row__value">{{ collection }}</div><span></span></div>
+    <div class="detail-row">
+      <div class="detail-row__label">Fingerprint</div>
+      <div class="detail-row__value">
+        <span class="mono" style="font-size:11.5px;word-break:break-all;color:var(--text-2)" id="verify-sha">{{ sha256 }}</span>
+        <div class="detail-row__hint">The file's unique digital fingerprint (a SHA-256 hash). Any change to the file would produce a different one.</div>
+      </div>
+      <button type="button" class="copy-btn" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('verify-sha').textContent.trim())">{{ m.icon("copy", size=15) }}</button>
+    </div>
+    {% if existed_by %}
+    <div class="detail-row"><div class="detail-row__label">{{ m.icon("calendar", size=15) }} Existed by</div><div class="detail-row__value"><strong>{{ existed_by }}</strong><div class="detail-row__hint">The file provably existed in this exact form on or before this date.</div></div><span></span></div>
+    {% endif %}
+    {% if block_height %}
+    <div class="detail-row"><div class="detail-row__label">{{ m.icon("bitcoin", size=15) }} Bitcoin block</div><div class="detail-row__value"><span class="mono">#{{ "{:,}".format(block_height) }}</span> {% if block_hash %}<span class="mono" style="color:var(--text-3);font-size:11.5px">{{ block_hash }}</span>{% endif %}<div class="detail-row__hint">The entry in the public Bitcoin ledger where this fingerprint is permanently recorded.</div></div><span></span></div>
+    {% endif %}
+    {% if calendars %}
+    <div class="detail-row"><div class="detail-row__label">Timestamp servers</div><div class="detail-row__value"><div style="display:flex;flex-direction:column;gap:3px">{% for cal in calendars %}<span class="mono" style="font-size:11.5px;color:var(--text-2)">{{ cal }}</span>{% endfor %}</div><div class="detail-row__hint">The OpenTimestamps services that submitted the fingerprint to Bitcoin.</div></div><span></span></div>
+    {% endif %}
+    <div class="detail-row"><div class="detail-row__label">{{ m.icon("search", size=15) }} Checked using</div><div class="detail-row__value">{{ verified_via }}<div class="detail-row__hint">Where Cairn looked up the Bitcoin record to confirm this proof.</div></div><span></span></div>
+  </div>
+
+  <pre id="verify-report" hidden>Cairn verification report
+File:        {{ relpath }}
+Collection:      {{ collection }}
+SHA-256:     {{ sha256 }}
+Verdict:     {{ title }}{% if existed_by %}
+Existed by:  {{ existed_by }}{% endif %}{% if block_height %}
+Bitcoin block: #{{ "{:,}".format(block_height) }}{% endif %}
+Verified via: {{ verified_via }}</pre>
+  <div class="flex gap-10" style="margin-top:16px">
+    <a class="btn" href="/verify/export/{{ file_id }}">{{ m.icon("download", size=15) }} Download .ots proof</a>
+    <button type="button" class="btn btn--ghost" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('verify-report').textContent)">{{ m.icon("copy", size=15) }} Copy verification report</button>
+  </div>
+  <div class="info-strip" style="margin-top:18px">
+    {{ m.icon("info", size=15, cls="text-3") }}
+    <span>Verified by explorer lookup. For fully trustless verification, point Cairn at your own Bitcoin node in Settings. The <span class="mono">.ots</span> proof is portable: a third party can verify it against their own copy of the file, without Cairn ever handing out the watched file's bytes. <a href="/learn">How this works →</a></span>
+  </div>
+</div>

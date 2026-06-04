@@ -1,0 +1,21 @@
+{# Live operation-status indicator for a collection, shared by the dashboard card and the collection
+   detail status pill. While a run is in flight (or one was just launched) it carries the poll
+   trigger and renders the labelled progress badge; when idle it renders the resting status pill
+   WITHOUT a trigger, so an idle collection never polls and polling stops on its own once a run ends.
+   Expects `c` = {id, status_kind, status_icon, status_label, op}; `op` is the running run (or
+   None). Optional flags: `just_started` (op launched this request, poll for it) and
+   `already_running` (a second op was refused). A running badge's poll URL carries `was_running=1`
+   so the endpoint only emits `HX-Refresh` on a real running→idle transition (a just-started op
+   that hasn't yet committed its run polls without it, so the first poll never reloads). #}
+{% import "_macros.html" as m %}
+<span id="op-status-{{ c.id }}" class="op-status"
+      {% if c.op or just_started %}hx-get="/collection/{{ c.id }}/op-status{% if c.op %}?was_running=1{% endif %}" hx-trigger="every 4s" hx-target="this" hx-swap="outerHTML"{% endif %}>
+  {% if c.op %}
+    {{ m.op_badge(c.op) }}
+    {% if already_running %}<span class="op-note">already running</span>{% endif %}
+  {% elif just_started %}
+    <span class="op-badge op-badge--{{ 'scan' }}"><span class="op-badge__pulse"></span><span class="op-badge__label">Starting…</span></span>
+  {% else %}
+    <span class="pill pill--soft pill--{{ c.status_kind }}">{{ m.icon(c.status_icon, size=12.5, stroke=2) }}{{ c.status_label }}</span>
+  {% endif %}
+</span>

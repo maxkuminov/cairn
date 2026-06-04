@@ -1,0 +1,34 @@
+{% import "_macros.html" as m %}
+<div class="review-row" id="review-row-{{ it.id }}">
+  <div class="review-row__icon review-row__icon--{{ 'danger' if it.status == 'missing' else 'warn' }}">
+    {{ m.icon('minusCircle' if it.status == 'missing' else 'alert', size=16, stroke=2) }}
+  </div>
+  <div class="review-row__body">
+    <div class="review-row__path">
+      {% if it.dir %}<span class="review-row__dir mono">{{ it.dir }}/</span>{% endif %}
+      <span class="review-row__name mono">{{ it.name }}</span>
+    </div>
+    <div class="review-row__story">
+      {% if it.status == 'missing' %}
+        Gone from disk — last seen {{ it.last_seen }} <span class="review-row__when">({{ it.last_seen_full }})</span>
+      {% else %}
+        Contents changed — detected {{ it.detected }}
+      {% endif %}
+      <span class="review-row__sep">·</span> {{ it.size }}
+      {% if it.notarized %}
+        <span class="review-row__proof" title="An OpenTimestamps proof attests this file existed before it was lost — it survives even though the bytes are gone.">{{ m.icon('bitcoin', size=12) }} proof of prior existence kept</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="review-row__action">
+    {% if it.acked %}
+      <span class="pill pill--soft pill--ok pill--sm">{{ m.icon('check', size=12, stroke=2) }} Acknowledged</span>
+    {% else %}
+      <button class="btn btn--sm {{ 'btn--danger' if it.status == 'missing' else 'btn--subtle' }}"
+              hx-post="/events/{{ it.event_id }}/ack?view=review"
+              hx-target="#review-row-{{ it.id }}" hx-swap="outerHTML">
+        {{ m.icon('check', size=14, stroke=2) }} Acknowledge
+      </button>
+    {% endif %}
+  </div>
+</div>

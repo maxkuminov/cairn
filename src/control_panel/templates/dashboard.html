@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Dashboard · Cairn{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>Dashboard</h1>
+    <div class="page-header__sub">Integrity status across every collection you monitor.</div>
+  </div>
+  <div class="page-header__actions">
+    <form hx-post="/scan" hx-swap="none" style="display:inline">
+      <button class="btn btn--subtle" type="submit">{{ m.icon("refresh", size=15) }} Run scan now</button>
+    </form>
+  </div>
+</div>
+
+{# Summary tiles #}
+<div class="tiles">
+  <div class="card tile">
+    <div class="tile__label">{{ m.icon("file", size=16, stroke=1.9) }}<span>Files monitored</span></div>
+    <div class="tile__value">{{ tiles.files }}</div>
+    <div class="tile__sub">{{ tiles.files_sub }}</div>
+  </div>
+  <div class="card tile">
+    <div class="tile__label">{{ m.icon("alert", size=16, stroke=1.9) }}<span>Open issues</span></div>
+    <div class="tile__value" style="color:{{ tiles.issues_color }}">{{ tiles.issues }}</div>
+    <div class="tile__sub">{{ tiles.issues_sub }}</div>
+  </div>
+  <div class="card tile">
+    <div class="tile__label">{{ m.icon("bitcoin", size=16, stroke=1.9) }}<span>Proofs anchored</span></div>
+    <div class="tile__value">{{ tiles.anchored }}</div>
+    <div class="tile__sub">{{ tiles.anchored_sub }}</div>
+  </div>
+  <div class="card tile">
+    <div class="tile__label">{{ m.icon("pulse", size=16, stroke=1.9) }}<span>Last activity</span></div>
+    <div class="tile__value">{{ tiles.last_activity }}</div>
+    <div class="tile__sub">{{ tiles.last_activity_sub }}</div>
+  </div>
+</div>
+
+<div class="dash-grid" id="collections">
+  {# Left: collection cards #}
+  <div class="collection-cards">
+    <div class="section-label">Collections</div>
+    {% for c in collections %}
+      {% include "partials/_collection_card.html" %}
+    {% endfor %}
+    {% if not collections %}
+      <div class="card empty-state">No collections yet. <a href="/collection/new">Add one</a> to start monitoring.</div>
+    {% endif %}
+  </div>
+
+  {# Right rail: recent events #}
+  <div class="right-rail">
+    <div class="card" style="padding:18px">
+      <div class="row-between" style="margin-bottom:4px">
+        <h3 style="font-size:14.5px">Recent events</h3>
+        <span id="open-events-pill" style="display:flex;gap:6px;align-items:center">
+          {% include "partials/_events_controls.html" %}
+        </span>
+      </div>
+      <div id="events-feed">
+        {% for e in events %}
+          {% include "partials/_event_row.html" %}
+        {% endfor %}
+        {% if not events %}<div class="empty-state">No events recorded yet.</div>{% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
