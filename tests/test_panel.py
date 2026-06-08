@@ -993,7 +993,13 @@ def test_review_page_lists_missing_file_with_story_and_recovery(cairn_env):
         assert "proof of prior existence kept" in body       # notarized note
         assert "Copy paths" in body and "Copy full paths" in body  # recovery affordance
         assert "/collection/1/review/accept" in body         # bulk accept
+        assert "/collection/1/review/ack-all" in body        # bulk acknowledge
         assert "2019/IMG_4421.jpg" in body                   # recovery copy list payload
+        # The two bulk actions are disambiguated, not two look-alike buttons: each carries a
+        # plain-English consequence pill so Acknowledge (note it) can't be confused with Accept
+        # (rewrite the baseline).
+        assert "Baseline unchanged" in body
+        assert "Rewrites your baseline" in body
 
 
 def test_dashboard_issue_count_links_to_review(cairn_env):

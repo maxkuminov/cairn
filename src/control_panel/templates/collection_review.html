@@ -7,25 +7,15 @@
     <a class="back-link" href="/collection/{{ c.id }}">{{ m.icon("arrowLeft", size=15) }} {{ c.name }}</a>
     <h1>What changed</h1>
     <div class="page-header__sub">
-      Files in <strong>{{ c.name }}</strong> that went missing or changed. Review each one, recover it
-      from your backup if you want it back, then acknowledge or accept.
+      Files in <strong>{{ c.name }}</strong> that went missing or changed. Recover anything you want
+      back, then clear the alerts — <strong>Acknowledge</strong> to just note them, or
+      <strong>Accept</strong> to make the current state your new baseline.
     </div>
   </div>
+  {# The bulk actions used to live here as two near-identical buttons; they now live in the
+     self-explaining "Clear these alerts" panel below so Acknowledge vs Accept can't be confused. #}
   <div class="page-header__actions">
     <span id="review-open-pill">{% include "partials/_review_open_pill.html" %}</span>
-    {% if review_open and review_open > 0 %}
-      <form method="post" action="/collection/{{ c.id }}/review/ack-all" style="display:inline">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <button class="btn btn--subtle btn--sm" type="submit">{{ m.icon("check", size=14, stroke=2) }} Acknowledge all</button>
-      </form>
-    {% endif %}
-    {% if total_issues > 0 %}
-      <form method="post" action="/collection/{{ c.id }}/review/accept" style="display:inline"
-            onsubmit="return confirm('Accept all changes? Modified files become the new baseline and missing files stop being tracked. This does not delete anything on disk.');">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <button class="btn btn--primary btn--sm" type="submit">{{ m.icon("check", size=14, stroke=2) }} Accept all changes</button>
-      </form>
-    {% endif %}
   </div>
 </div>
 
@@ -67,6 +57,58 @@
         <li>For anything you don't want back, <strong>Accept all changes</strong> to clear it from tracking.</li>
       </ol>
     </details>
+  </div>
+
+  {# Resolve panel — the two bulk actions shown each next to what it actually does. Acknowledge and
+     Accept land on different routes and have very different consequences, so they're spelled out and
+     visually contrasted (neutral vs amber) rather than sitting as two look-alike buttons. Per-file
+     Acknowledge still lives on each row in the list below. #}
+  <div class="card resolve">
+    <div class="resolve__head">{{ m.icon("checkCircle", size=16, stroke=1.9) }} Clear these alerts</div>
+    <div class="resolve__sub">Two ways to resolve, depending on whether the change was expected.</div>
+    <div class="resolve__grid">
+      <div class="resolve__opt">
+        <div class="resolve__opt-head">
+          <span class="resolve__chip resolve__chip--ack">{{ m.icon("check", size=16, stroke=2) }}</span>
+          <div>
+            <div class="resolve__opt-title">Acknowledge</div>
+            <span class="pill pill--soft pill--muted pill--sm">Baseline unchanged</span>
+          </div>
+        </div>
+        <div class="resolve__opt-desc">
+          You've reviewed these. Cairn keeps watching and keeps your baseline — each file stays on
+          record as missing or changed and any existence proof is kept. Clears the alert, but it can
+          return if the file changes again.
+        </div>
+        {% if review_open and review_open > 0 %}
+          <form method="post" action="/collection/{{ c.id }}/review/ack-all">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button class="btn btn--subtle btn--full" type="submit">{{ m.icon("check", size=15, stroke=2) }} Acknowledge all</button>
+          </form>
+        {% else %}
+          <span class="resolve__done">{{ m.icon("checkCircle", size=14) }} Nothing left to acknowledge</span>
+        {% endif %}
+      </div>
+      <div class="resolve__opt resolve__opt--accept">
+        <div class="resolve__opt-head">
+          <span class="resolve__chip resolve__chip--accept">{{ m.icon("refresh", size=16, stroke=2) }}</span>
+          <div>
+            <div class="resolve__opt-title">Accept as new baseline</div>
+            <span class="pill pill--soft pill--warn pill--sm">Rewrites your baseline</span>
+          </div>
+        </div>
+        <div class="resolve__opt-desc">
+          Treat the current state as correct from now on: changed files become the new expected
+          version and missing files stop being tracked. Nothing on disk is touched — only what Cairn
+          expects. Use this when <em>you</em> made the change.
+        </div>
+        <form method="post" action="/collection/{{ c.id }}/review/accept"
+              onsubmit="return confirm('Accept all changes? Modified files become the new baseline and missing files stop being tracked. This does not delete anything on disk.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <button class="btn btn--subtle btn--full" type="submit">{{ m.icon("refresh", size=15, stroke=2) }} Accept all changes</button>
+        </form>
+      </div>
+    </div>
   </div>
 
   <div class="card card--flush review-list">

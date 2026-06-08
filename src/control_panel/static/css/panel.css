@@ -862,6 +862,26 @@
   .review-row__action { width: 100%; padding-left: 45px; }
 }
 
+/* --- resolve choices: Acknowledge vs Accept, each shown next to its consequence --- */
+.resolve { padding: 18px 20px; margin-bottom: 20px; }
+.resolve__head { font-weight: 600; font-size: 14.5px; color: var(--text); display: inline-flex; align-items: center; gap: 8px; }
+.resolve__sub { margin-top: 5px; font-size: 12.5px; line-height: 1.55; color: var(--text-2); }
+.resolve__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
+.resolve__opt { border: 1px solid var(--border); border-radius: var(--radius); padding: 15px 16px; display: flex; flex-direction: column; gap: 12px; }
+.resolve__opt--accept { border-color: color-mix(in oklch, var(--warn) 35%, var(--border)); background: color-mix(in oklch, var(--warn-soft) 40%, var(--surface)); }
+.resolve__opt-head { display: flex; align-items: flex-start; gap: 11px; }
+.resolve__chip { width: 31px; height: 31px; border-radius: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.resolve__chip--ack { color: var(--accent); background: var(--accent-soft); }
+.resolve__chip--accept { color: var(--warn); background: var(--warn-soft); }
+.resolve__opt-title { font-weight: 600; font-size: 13.5px; color: var(--text); margin-bottom: 5px; }
+.resolve__opt-desc { font-size: 12.5px; line-height: 1.6; color: var(--text-2); flex: 1; }
+.resolve__opt form { margin-top: auto; }
+.resolve__done { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); margin-top: auto; padding: 7px 0; }
+
+@media (max-width: 720px) {
+  .resolve__grid { grid-template-columns: 1fr; }
+}
+
 /* clickable issue affordances -> review page */
 .legend__review { display: inline-flex; align-items: center; gap: 14px; cursor: pointer; border-radius: var(--radius-sm); padding: 2px 7px; margin: -2px -7px; transition: background 0.14s; }
 .legend__review:hover { background: var(--danger-soft); }
