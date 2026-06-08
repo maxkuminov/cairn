@@ -28,7 +28,11 @@
       <a class="btn btn--subtle" href="/collection/{{ c.id }}/review">{{ m.icon("alert", size=15) }} Review issues</a>
     {% endif %}
     {% if c.issues > 0 or c.counts.new > 0 %}
-      <form hx-post="/collection/{{ c.id }}/accept" hx-swap="none" style="display:inline">
+      {# Plain POST→303 redirect (not htmx): re-baselining changes the tiles, file table, status pill,
+         and this button's own visibility, so a full reload is the correct refresh. An htmx hx-post with
+         hx-swap="none" would silently discard the redirected page and leave the UI stale. #}
+      <form method="post" action="/collection/{{ c.id }}/accept" style="display:inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <button class="btn btn--primary" type="submit">{{ m.icon("check", size=15) }} {% if c.issues > 0 %}Accept changes{% else %}Baseline new files{% endif %}</button>
       </form>
     {% endif %}

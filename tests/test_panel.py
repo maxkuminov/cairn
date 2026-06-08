@@ -280,6 +280,11 @@ def test_new_only_collection_reads_all_clear_with_baseline_button(cairn_env):
         # The baseline affordance is present (and labelled for new files, not "Accept changes").
         assert "Baseline new files" in r.text
         assert "/collection/1/accept" in r.text
+        # Regression: the form must be a plain POST→redirect (a real page refresh), not an htmx
+        # hx-post with hx-swap="none" that silently discards the redirected page and leaves the UI
+        # stale after a successful re-baseline.
+        assert 'action="/collection/1/accept"' in r.text
+        assert 'hx-post="/collection/1/accept"' not in r.text
 
 
 def test_tripwire_hides_notarization_column(cairn_env):

@@ -8,7 +8,10 @@
     <div class="page-header__sub">Integrity status across every collection you monitor.</div>
   </div>
   <div class="page-header__actions">
-    <form hx-post="/scan" hx-swap="none" style="display:inline">
+    {# Plain POST→303 redirect (not htmx): the scan refreshes the whole dashboard, so let the redirect
+       reload it. An htmx hx-post with hx-swap="none" would discard the redirected page and never update. #}
+    <form method="post" action="/scan" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
       <button class="btn btn--subtle" type="submit">{{ m.icon("refresh", size=15) }} Run scan now</button>
     </form>
   </div>
