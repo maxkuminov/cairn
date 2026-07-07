@@ -87,6 +87,7 @@ async def stamp_pending(
     batch_size = max(1, settings.ots_stamp_batch_size)
     now = _utcnow()
     stamped = 0
+    skipped = 0  # files whose proof path can never be written (e.g. name past the FS byte limit)
     for start in range(0, len(work), batch_size):
         chunk = work[start : start + batch_size]
         # Offload the blocking `ots` subprocess (process spawn + calendar round-trip) to a worker
@@ -104,6 +105,18 @@ async def stamp_pending(
                     await asyncio.to_thread(
                         ots.stamp_via_symlink, real, out, calendars, staging
                     )
+                except ots.OtsPathError as exc:
+                    # The proof output path can never be written (typically ENAMETOOLONG — a
+                    # multi-byte name plus ``.ots`` past the filesystem's per-name byte limit). Skip
+                    # it and drop it out of `pending` to `none` so a normal scan does not re-queue and
+                    # re-fail it every pass (a bad file used to abort the whole batch and re-run the
+                    # tree). It is left unstamped-and-untracked-for-proof, exactly like an
+                    # un-storable-path skip in the scanner; a `stamp --all` can retry it cheaply.
+                    log.warning("skip stamp, unwritable proof path for %s: %s", real, exc)
+                    entry.ots_state = "none"
+                    entry.ots_path = None  # no proof stored; never leave a stale pointer behind
+                    skipped += 1
+                    continue
                 except ots.OtsError as exc:
                     log.warning("stamp failed for %s: %s", real, exc)
                     continue
@@ -115,6 +128,12 @@ async def stamp_pending(
             # Persist progress per batch (the callback commits) so the badge advances live.
             await progress(stamped)
 
+    if skipped:
+        log.warning(
+            "collection %s: skipped %d file(s) with an unwritable proof path (set ots_state=none)",
+            collection.id,
+            skipped,
+        )
     await session.commit()
     return stamped
 

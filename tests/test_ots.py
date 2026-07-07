@@ -681,6 +681,191 @@ async def test_stamp_pending_failure_isolation(cairn_env, monkeypatch):
     assert lone, "expected an individual fallback stamp for the failed member"
 
 
+# --- proofs/ots: an unwritable proof path (ENAMETOOLONG) is skipped, never fatal ---------------
+
+
+def test_stamp_via_symlink_raises_path_error_on_overlong_name(tmp_path, monkeypatch):
+    """A proof output name past the filesystem byte limit fails fast with OtsPathError — before any
+    symlink or calendar round-trip — and OtsPathError is an OtsError so existing callers still catch
+    it."""
+    from src.services import ots
+
+    real = tmp_path / "f.bin"
+    real.write_bytes(b"data")
+    long_base = "д" * 126  # 252 bytes; + ".ots" = 256 bytes > NAME_MAX
+    out = tmp_path / "store" / "1" / (long_base + ".ots")
+    assert len(os.fsencode(out.name)) > ots._NAME_MAX_BYTES
+
+    def _boom(args, timeout=ots.DEFAULT_TIMEOUT):  # pragma: no cover - must not be reached
+        raise AssertionError("ots must not be invoked for an unwritable-output file")
+
+    monkeypatch.setattr(ots, "_run_ots", _boom)
+
+    assert issubclass(ots.OtsPathError, ots.OtsError)
+    with pytest.raises(ots.OtsPathError):
+        ots.stamp_via_symlink(real, out, [], tmp_path / "store" / ".staging")
+
+
+def test_place_proof_wraps_filesystem_enametoolong(tmp_path, monkeypatch):
+    """The os.replace backstop converts a genuine filesystem ENAMETOOLONG into OtsPathError even if
+    the byte pre-check would have let the name through (e.g. a smaller real NAME_MAX)."""
+    from src.services import ots
+
+    monkeypatch.setattr(ots, "_NAME_MAX_BYTES", 100_000)  # make the pre-check permissive
+    staged = tmp_path / "staged.ots"
+    staged.write_bytes(b"proof")
+    out = tmp_path / ("д" * 130 + ".ots")  # 264 bytes → real ENAMETOOLONG on ext4
+
+    with pytest.raises(ots.OtsPathError):
+        ots._place_proof(staged, out)
+
+
+def test_place_proof_non_enametoolong_oserror_is_transient(tmp_path, monkeypatch):
+    """A non-ENAMETOOLONG write failure (a full or read-only proof store) is a *transient* OtsError,
+    NOT a permanent OtsPathError — so the caller retries instead of dropping the proof to `none`."""
+    import errno as _errno
+
+    from src.services import ots
+
+    staged = tmp_path / "staged.ots"
+    staged.write_bytes(b"proof")
+    out = tmp_path / "1" / "f.txt.ots"
+
+    def boom_replace(src, dst):
+        raise OSError(_errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(ots.os, "replace", boom_replace)
+
+    with pytest.raises(ots.OtsError) as excinfo:
+        ots._place_proof(staged, out)
+    # Crucially NOT the permanent subclass — a transient error must stay retryable.
+    assert not isinstance(excinfo.value, ots.OtsPathError)
+
+
+async def test_stamp_pending_transient_write_error_stays_pending(cairn_env, monkeypatch):
+    """A transient placement failure (read-only/full store) leaves files `pending` for retry — it
+    must never be misread as a permanent skip and dropped to `none`."""
+    import errno as _errno
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry
+    from src.services import ots, proofs
+    from src.services.scanner import _utcnow
+
+    root = cairn_env / "rofs"
+    root.mkdir()
+    for i in range(3):
+        (root / f"f{i}.txt").write_text(f"c{i}")
+    cid = await _make_collection(root, mode="worm", ots_mode="perfile")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        for i in range(3):
+            s.add(FileEntry(
+                collection_id=cid, relpath=f"f{i}.txt", size=2, sha256=f"{i:064d}",
+                status="new", first_seen=_utcnow(), ots_state="pending",
+            ))
+        await s.commit()
+
+    # The `ots stamp` subprocess still "produces" proofs, but placing them always fails EROFS.
+    monkeypatch.setattr(ots, "_run_ots", _batch_fake([]))
+
+    def boom_replace(src, dst):
+        raise OSError(_errno.EROFS, "Read-only file system")
+
+    monkeypatch.setattr(ots.os, "replace", boom_replace)
+
+    async with sm() as s:
+        count = await proofs.stamp_pending(s, await s.get(Collection, cid))
+        assert count == 0  # nothing stamped
+        files = list(await s.scalars(select(FileEntry).where(FileEntry.collection_id == cid)))
+        # Every file stays PENDING (retryable) — a transient store error is never a `none` skip.
+        assert {f.ots_state for f in files} == {"pending"}
+
+
+def test_stamp_batch_skips_overlong_proof_name_and_keeps_the_rest(tmp_path, monkeypatch):
+    """A batch member whose proof name is too long is skipped (never symlinked or submitted); the
+    other members are still stamped and the whole call completes without raising."""
+    from src.services import ots
+
+    root = tmp_path / "src"
+    root.mkdir()
+    store = tmp_path / "proofs"
+    staging = store / ".staging"
+
+    good = root / "a.txt"
+    good.write_bytes(b"a")
+    long_base = "д" * 126  # source 252 bytes (creatable); proof 256 bytes (> NAME_MAX)
+    longf = root / long_base
+    longf.write_bytes(b"b")
+    assert len(os.fsencode(long_base + ".ots")) > ots._NAME_MAX_BYTES
+
+    items = [
+        (good, store / "1" / "a.txt.ots"),
+        (longf, store / "1" / (long_base + ".ots")),
+    ]
+    invocations: list = []
+    monkeypatch.setattr(ots, "_run_ots", _batch_fake(invocations))
+
+    results = ots.stamp_batch_via_symlink(items, [], staging)
+
+    assert results == [True, False]
+    assert items[0][1].exists()          # the good file is stamped
+    # The overlong proof is never written (its name can't even be stat()'d, so list the dir instead).
+    assert [p.name for p in (store / "1").iterdir()] == ["a.txt.ots"]
+    assert not any(staging.iterdir())    # links + stray .ots cleaned up
+    # The overlong member was never sent to the calendar: exactly one link in the stamp invocation.
+    stamp_calls = [a for a in invocations if a and a[0] == "stamp"]
+    assert len(stamp_calls) == 1
+    assert sum(1 for x in stamp_calls[0] if str(staging) in x) == 1
+
+
+async def test_stamp_pending_skips_overlong_name_and_stamps_rest(cairn_env, monkeypatch):
+    """The real crash-loop regression: a pending file whose `.ots` name exceeds the filesystem byte
+    limit is skipped-and-counted (dropped to `ots_state='none'`) instead of aborting the batch, and
+    the remaining files are stamped normally."""
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry
+    from src.services import ots, proofs
+    from src.services.scanner import _utcnow
+
+    root = cairn_env / "toolong"
+    root.mkdir()
+    (root / "a.txt").write_text("alpha")
+    (root / "c.txt").write_text("gamma")
+    long_base = "д" * 126  # source 252 bytes (≤ NAME_MAX, creatable); proof 256 bytes (> NAME_MAX)
+    assert len(os.fsencode(long_base)) <= ots._NAME_MAX_BYTES
+    assert len(os.fsencode(long_base + ".ots")) > ots._NAME_MAX_BYTES
+    (root / long_base).write_text("too-long")
+    cid = await _make_collection(root, mode="worm", ots_mode="perfile")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        for rp, sha in [("a.txt", "1"), ("c.txt", "3"), (long_base, "2")]:
+            s.add(FileEntry(
+                collection_id=cid, relpath=rp, size=5, sha256=sha * 64,
+                status="new", first_seen=_utcnow(), ots_state="pending",
+            ))
+        await s.commit()
+
+    invocations: list = []
+    monkeypatch.setattr(ots, "_run_ots", _batch_fake(invocations))
+
+    async with sm() as s:
+        count = await proofs.stamp_pending(s, await s.get(Collection, cid))
+        assert count == 2  # only the two normal files
+        files = {
+            f.relpath: f
+            for f in await s.scalars(select(FileEntry).where(FileEntry.collection_id == cid))
+        }
+        assert files["a.txt"].ots_state == "incomplete" and files["a.txt"].ots_path
+        assert files["c.txt"].ots_state == "incomplete" and files["c.txt"].ots_path
+        # The overlong-proof file is skipped and dropped to `none` (no proof, no crash), so a normal
+        # scan will not re-queue and re-fail it every pass.
+        assert files[long_base].ots_state == "none"
+        assert files[long_base].ots_path is None
+
+
 async def test_mark_unstamped_pending_scopes_to_none_and_present(cairn_env, monkeypatch):
     """Backfill marks only ots_state='none' non-missing files; never re-stamps existing proofs."""
     from src.database import get_sessionmaker

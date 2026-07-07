@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import binascii
 import datetime
+import errno
 import json
 import os
 import re
@@ -33,6 +34,13 @@ from pathlib import Path
 
 # Default per-call timeout (seconds) for the ``ots`` CLI.
 DEFAULT_TIMEOUT = 60
+
+# ext4/xfs and most Linux filesystems cap a single path COMPONENT at 255 *bytes* (NAME_MAX), not
+# characters. A multi-byte name (e.g. Cyrillic, 2 bytes/char in UTF-8) can blow past that while
+# looking short — and a proof name is the file's own name plus ``.ots``, so an already-long name
+# tips over. ``os.replace`` onto such a path then raises ``OSError`` (ENAMETOOLONG, errno 36), which
+# must be skipped-and-counted, never allowed to abort a whole stamp batch.
+_NAME_MAX_BYTES = 255
 
 # Default block-explorer base. esplora-compatible (blockstream.info / mempool.space): the
 # REST routes ``/api/block-height/<n>`` and ``/api/block/<hash>`` give the canonical block hash
@@ -76,6 +84,16 @@ _VERIFY_SUCCESS_RE = re.compile(
 
 class OtsError(Exception):
     """A genuine failure of the ``ots`` CLI (not a normal pending state)."""
+
+
+class OtsPathError(OtsError):
+    """The proof output path cannot be written — e.g. its final component exceeds the filesystem's
+    per-name byte limit (ENAMETOOLONG), or the destination is otherwise un-writable.
+
+    Distinct from a transient failure (an unreachable calendar, a timeout): a path a filesystem
+    refuses will never succeed on retry, so callers skip-and-count the one file instead of leaving
+    it ``pending`` to re-attempt — and re-flood — on every subsequent scan.
+    """
 
 
 @dataclass
@@ -126,6 +144,40 @@ def _is_pending(text: str) -> bool:
     return any(marker in low for marker in _PENDING_MARKERS)
 
 
+def _proof_output_writable(out_ots_path: Path) -> bool:
+    """Whether ``out_ots_path``'s final component fits the filesystem's per-name byte limit.
+
+    The *byte* length is what matters (NAME_MAX is bytes, not characters): a short-looking multi-byte
+    name — a Cyrillic filename plus its extension plus ``.ots`` — can still exceed it. This is a cheap
+    pre-check so an un-writable proof is skipped before a symlink or a calendar round-trip is spent on
+    it; :func:`_place_proof` is the authoritative backstop for any limit this pre-check does not model
+    (a smaller NAME_MAX, name-inflating filesystems like eCryptfs, a too-long parent component).
+    """
+    try:
+        return len(os.fsencode(out_ots_path.name)) <= _NAME_MAX_BYTES
+    except (ValueError, TypeError):  # pragma: no cover - defensive
+        return False
+
+
+def _place_proof(staged_ots: Path, out_ots_path: Path) -> None:
+    """Move a produced staging proof to its final ``out_ots_path`` (creating parent dirs first).
+
+    Only a **permanent** refusal — ENAMETOOLONG, when a path component exceeds the filesystem's
+    per-name byte limit — is re-raised as :class:`OtsPathError`, so the caller skips just this one
+    file and never re-attempts it. Every other ``OSError`` (a full or read-only proof store, a
+    cross-device staging dir, an I/O error) is **transient**: it is re-raised as a generic
+    :class:`OtsError` so the caller leaves the file ``pending`` for retry rather than silently
+    dropping a proof it could take later. The rest of a batch is unaffected either way.
+    """
+    try:
+        out_ots_path.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staged_ots, out_ots_path)
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            raise OtsPathError(f"cannot write proof to {out_ots_path!r}: {exc}") from exc
+        raise OtsError(f"failed to place proof at {out_ots_path!r}: {exc}") from exc
+
+
 def info(ots_path: str | os.PathLike[str]) -> ProofInfo:
     """Classify an ``.ots`` proof OFFLINE via ``ots info`` (no network).
 
@@ -173,8 +225,13 @@ def stamp_via_symlink(
     real_path = Path(real_path)
     out_ots_path = Path(out_ots_path)
     staging_dir = Path(staging_dir)
+    # Fail fast on an un-writable proof name before spending a symlink or a calendar round-trip.
+    if not _proof_output_writable(out_ots_path):
+        raise OtsPathError(
+            f"proof output name too long to store "
+            f"({len(os.fsencode(out_ots_path.name))} bytes > {_NAME_MAX_BYTES}): {out_ots_path!r}"
+        )
     staging_dir.mkdir(parents=True, exist_ok=True)
-    out_ots_path.parent.mkdir(parents=True, exist_ok=True)
 
     link = staging_dir / uuid.uuid4().hex
     staged_ots = link.with_name(link.name + ".ots")
@@ -190,7 +247,7 @@ def stamp_via_symlink(
                 f"ots stamp produced no proof for {real_path} "
                 f"(rc={rc}): {(err or out).strip()}"
             )
-        os.replace(staged_ots, out_ots_path)
+        _place_proof(staged_ots, out_ots_path)
     finally:
         for stray in (link, staged_ots):
             try:
@@ -224,33 +281,55 @@ def stamp_batch_via_symlink(
     staging_dir = Path(staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)
 
-    links: list[tuple[Path, Path]] = []  # (symlink, staged .ots) parallel to ``pairs``
+    # Parallel to ``pairs``: (symlink, staged .ots) for a member we submit, or ``None`` for one whose
+    # proof output name can't be written — it is neither symlinked nor sent to the calendar. Such a
+    # member stays ``False``; the caller's single-file fallback re-checks it and records it as a
+    # permanent skip rather than re-attempting it forever.
+    links: list[tuple[Path, Path] | None] = []
     results = [False] * len(pairs)
     try:
-        for real, _out in pairs:
+        for real, out in pairs:
+            if not _proof_output_writable(out):
+                links.append(None)
+                continue
             link = staging_dir / uuid.uuid4().hex
             link.symlink_to(real)
             links.append((link, link.with_name(link.name + ".ots")))
 
-        args = ["stamp"]
-        for cal in calendars:
-            args += ["-c", cal]
-        args += ["--timeout", str(timeout)]
-        args += [str(link) for link, _ in links]
-        try:
-            _run_ots(args, timeout=timeout + 10)
-        except OtsError:
-            # A missing binary or a timeout aborts the whole call; fall through to filesystem
-            # truth so any proofs already written are still harvested and the rest fall back.
-            pass
+        submit = [entry for entry in links if entry is not None]
+        if submit:
+            args = ["stamp"]
+            for cal in calendars:
+                args += ["-c", cal]
+            args += ["--timeout", str(timeout)]
+            args += [str(link) for link, _ in submit]
+            try:
+                _run_ots(args, timeout=timeout + 10)
+            except OtsError:
+                # A missing binary or a timeout aborts the whole call; fall through to filesystem
+                # truth so any proofs already written are still harvested and the rest fall back.
+                pass
 
-        for i, ((_real, out), (_link, staged_ots)) in enumerate(zip(pairs, links)):
+        for i, ((_real, out), entry) in enumerate(zip(pairs, links)):
+            if entry is None:
+                continue  # unwritable output name — skipped, results[i] stays False
+            _link, staged_ots = entry
             if staged_ots.exists():
-                out.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(staged_ots, out)
-                results[i] = True
+                try:
+                    _place_proof(staged_ots, out)
+                    results[i] = True
+                except OtsError:
+                    # Could not place this proof — an unwritable path the pre-check did not model, or
+                    # a transient store error (full / read-only). Leave ``False`` so the single-file
+                    # fallback re-raises the right class and the caller classifies it permanent vs.
+                    # transient; the staged proof is cleaned up below. One bad member never aborts the
+                    # batch.
+                    pass
     finally:
-        for link, staged_ots in links:
+        for entry in links:
+            if entry is None:
+                continue
+            link, staged_ots = entry
             for stray in (link, staged_ots):
                 try:
                     stray.unlink()
