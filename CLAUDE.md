@@ -304,6 +304,37 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > collections stay off (e.g. tax/legal, where new additions are reviewed by hand). Does not change the
 > notary guarantee — `new` vs `ok` is only a baseline/UI distinction.
 
+## Engineering workflow
+
+The standard flow — supervisor main thread, **Opus** subagents, OpenSpec, the
+two Codex audit gates, `openspec-verifier`, and the `user-representative`
+browser pass — is defined once in `~/.claude/rules/engineering-workflow.md` and
+applies here. Read it; don't restate it. This section records only what is
+specific to Cairn.
+
+**Local gates**
+
+| Gate | Command |
+| --- | --- |
+| Dependency audit | `make audit` (pip-audit) |
+| Migrations | `make migrate` (alembic) |
+| Deploy | `make deploy` (build → Trivy → compose) |
+
+**Codex framing for this product.** Cairn's product *is* a trust claim: it
+tells a user that a file existed, unmodified, at a point in time. When briefing
+the adversarial gate, say so — the expensive failure is a **false negative**
+(a modified or deleted file that scans clean, or a proof that verifies when it
+shouldn't). Anything touching hashing, the scan→diff→classify path, OTS
+stamp/upgrade/verify, or proof export is a mandatory adversarial-pass trigger:
+a wrong answer there silently voids the evidentiary value of every proof.
+
+**`user-representative` pass** applies to the web panel (`cairn serve`). Note
+in the brief that this is a self-hosted multi-user tool for a technical
+operator, not a consumer app.
+
+**OpenSpec is already the norm here** — Phase 1 was built change-by-change.
+Keep it that way.
+
 ## Conventions
 - Build private; open-source when stable. Keep Max's host-specific paths/secrets out of tracked
   files (config & env, never hardcoded) — see DESIGN.md "core vs personal".
