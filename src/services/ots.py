@@ -13,11 +13,27 @@ The state machine (see DESIGN.md §6):
 
 ``info`` classifies an existing ``.ots`` OFFLINE by attestation type; ``verify``/``upgrade`` hit
 the network.
+
+**Proof-path failure classification — the governing rule.** A *permanent* failure
+(:class:`OtsPathError`) drops a file out of the stamp queue for good (the caller sets
+``ots_state='none'``), so a wrong "permanent" is a silent loss of notarization, while a wrong
+"transient" costs only a retry. Therefore:
+
+    Only a failure on the FINAL proof output path may be classified permanent
+    (:class:`OtsPathError`). Every staging-side failure is transient (:class:`OtsError`).
+    The pre-check measures only the path components Cairn itself creates below the proof-store
+    root — never the store root's own components.
+
+Concretely: the staging dir, its symlinks and their cleanup can only ever raise/suppress transient
+errors (an overlong *staging* pathname is a property of the deployment, not of the file), and
+:func:`_place_proof` on the final output path is the one place a permanent verdict is reached at
+runtime.
 """
 
 from __future__ import annotations
 
 import binascii
+import contextlib
 import datetime
 import errno
 import json
@@ -87,12 +103,14 @@ class OtsError(Exception):
 
 
 class OtsPathError(OtsError):
-    """The proof output path cannot be written — e.g. its final component exceeds the filesystem's
-    per-name byte limit (ENAMETOOLONG), or the destination is otherwise un-writable.
+    """The FINAL proof output path cannot be written — a component Cairn creates below the proof
+    store exceeds the filesystem's per-name byte limit (ENAMETOOLONG), or the destination is
+    otherwise permanently un-writable.
 
-    Distinct from a transient failure (an unreachable calendar, a timeout): a path a filesystem
-    refuses will never succeed on retry, so callers skip-and-count the one file instead of leaving
-    it ``pending`` to re-attempt — and re-flood — on every subsequent scan.
+    Distinct from a transient failure (an unreachable calendar, a timeout, anything staging-side):
+    a final path a filesystem refuses will never succeed on retry, so callers skip-and-count the one
+    file instead of leaving it ``pending`` to re-attempt — and re-flood — on every subsequent scan.
+    Raised ONLY by the output-path pre-check and by :func:`_place_proof`; see the module docstring.
     """
 
 
@@ -144,8 +162,8 @@ def _is_pending(text: str) -> bool:
     return any(marker in low for marker in _PENDING_MARKERS)
 
 
-def _proof_output_writable(out_ots_path: Path) -> bool:
-    """Whether EVERY component of ``out_ots_path`` fits the filesystem's per-name byte limit.
+def _proof_output_writable(out_ots_path: Path, *, below: Path | None = None) -> bool:
+    """Whether the components Cairn CREATES for ``out_ots_path`` fit the per-name byte limit.
 
     The *byte* length is what matters (NAME_MAX is bytes, not characters): a short-looking multi-byte
     name — a Cyrillic filename plus its extension plus ``.ots`` — can still exceed it. Checking only
@@ -154,34 +172,26 @@ def _proof_output_writable(out_ots_path: Path) -> bool:
     it with ENAMETOOLONG — and would otherwise slip past this pre-check and burn a batch calendar
     round-trip plus a single-file retry before :func:`_place_proof` classified it.
 
-    Components above the proof store root are checked too; they are harmless to test, since a store
-    root that exists on disk necessarily has components the filesystem already accepted.
+    ``below`` is the proof-store root, the boundary between "path Cairn is given" and "path Cairn
+    creates". Only ``out_ots_path`` relative to it — ``<collection_id>/<relpath>.ots`` — is measured.
+    The store root's OWN components are never validated: it already exists on a filesystem that
+    accepted it, and applying our hard 255-byte assumption to it would declare every descendant proof
+    permanently unwritable and silently drop a whole collection to ``ots_state='none'``. Without
+    ``below`` (or if the path is not under it) only the final ``.ots`` name — the one component
+    unambiguously ours — is measured; :func:`_place_proof` still catches the rest at runtime.
 
     This is a cheap pre-check so an un-writable proof is skipped before a symlink or a calendar
     round-trip is spent on it; :func:`_place_proof` remains the authoritative backstop for any limit
     this pre-check does not model (a smaller NAME_MAX, name-inflating filesystems like eCryptfs).
     """
     try:
-        parts = out_ots_path.parts
-        if out_ots_path.anchor:
-            parts = parts[1:]  # skip the root anchor ('/'), which is not a name
+        parts: tuple[str, ...] = (out_ots_path.name,)
+        if below is not None:
+            with contextlib.suppress(ValueError):
+                parts = out_ots_path.relative_to(below).parts
         return all(len(os.fsencode(part)) <= _NAME_MAX_BYTES for part in parts)
     except (ValueError, TypeError):  # pragma: no cover - defensive
         return False
-
-
-def _staging_link_error(exc: OSError, real_path: Path) -> OtsError:
-    """Classify a failure to create a staging symlink for ``real_path``.
-
-    ENAMETOOLONG is permanent **for this file** (the OS refuses to record a link to a path this
-    long), so it becomes :class:`OtsPathError` and the caller skips the one file. Every other
-    ``OSError`` — a read-only or full proof store, a permissions problem on the staging dir — is
-    transient and must stay retryable, so the file is left ``pending``.
-    """
-    msg = f"cannot create the stamp staging link for {real_path}: {exc}"
-    if exc.errno == errno.ENAMETOOLONG:
-        return OtsPathError(msg)
-    return OtsError(msg)
 
 
 def _prepare_staging_dir(staging_dir: Path) -> None:
@@ -200,8 +210,10 @@ def _prepare_staging_dir(staging_dir: Path) -> None:
 def _place_proof(staged_ots: Path, out_ots_path: Path) -> None:
     """Move a produced staging proof to its final ``out_ots_path`` (creating parent dirs first).
 
-    Only a **permanent** refusal — ENAMETOOLONG, when a path component exceeds the filesystem's
-    per-name byte limit — is re-raised as :class:`OtsPathError`, so the caller skips just this one
+    This is the one runtime place a permanent verdict is reached, and it is legitimate here because
+    the operand IS the final output path: its location is fully determined by the file's relpath, so
+    even a whole-path (PATH_MAX) overflow is permanent for this member. Only a **permanent** refusal
+    — ENAMETOOLONG — is re-raised as :class:`OtsPathError`, so the caller skips just this one
     file and never re-attempts it. Every other ``OSError`` (a full or read-only proof store, a
     cross-device staging dir, an I/O error) is **transient**: it is re-raised as a generic
     :class:`OtsError` so the caller leaves the file ``pending`` for retry rather than silently
@@ -252,6 +264,8 @@ def stamp_via_symlink(
     calendars: list[str],
     staging_dir: str | os.PathLike[str],
     timeout: int = DEFAULT_TIMEOUT,
+    *,
+    store_root: str | os.PathLike[str] | None = None,
 ) -> Path:
     """Stamp ``real_path`` and place the proof at ``out_ots_path`` without writing beside it.
 
@@ -259,12 +273,16 @@ def stamp_via_symlink(
     files live on a read-only mount. So we symlink ``staging_dir/<uuid>`` -> ``real_path``, stamp
     the symlink (``ots`` reads the real bytes, writes ``<uuid>.ots`` in the writable staging dir),
     then atomically move that ``.ots`` to ``out_ots_path`` and remove the symlink.
+
+    ``store_root`` is the proof-store root: only the components below it (the ones Cairn creates)
+    are pre-checked for the per-name byte limit. Staging-side failures are always transient.
     """
     real_path = Path(real_path)
     out_ots_path = Path(out_ots_path)
     staging_dir = Path(staging_dir)
+    root = Path(store_root) if store_root is not None else None
     # Fail fast on an un-writable proof name before spending a symlink or a calendar round-trip.
-    if not _proof_output_writable(out_ots_path):
+    if not _proof_output_writable(out_ots_path, below=root):
         raise OtsPathError(
             f"proof output name too long to store "
             f"({len(os.fsencode(out_ots_path.name))} bytes > {_NAME_MAX_BYTES}): {out_ots_path!r}"
@@ -273,13 +291,23 @@ def stamp_via_symlink(
 
     link = staging_dir / uuid.uuid4().hex
     staged_ots = link.with_name(link.name + ".ots")
+    # Only what we actually created gets cleaned up — cleaning a path that was never made can itself
+    # raise (an overlong staging pathname refuses `unlink` exactly as it refused `symlink`), and that
+    # raw OSError would replace the classified exception on the way out of `finally`.
+    created: list[Path] = []
     try:
         try:
             link.symlink_to(real_path)
         except OSError as exc:
-            # Never let a raw OSError out: the caller classifies stamp failures by exception type,
-            # and a raw PermissionError would escape its per-file handling and abort the whole pass.
-            raise _staging_link_error(exc, real_path) from exc
+            # ALWAYS transient (module docstring): the operand here is the STAGING pathname, whose
+            # length/permissions are a property of the deployment, not of this file — even
+            # ENAMETOOLONG. Permanence is decided only by the output-path pre-check above and by
+            # `_place_proof` below. A raw OSError must never escape either: the caller classifies
+            # stamp failures by exception type and would abort its whole pass.
+            raise OtsError(
+                f"cannot create the stamp staging link for {real_path}: {exc}"
+            ) from exc
+        created = [link, staged_ots]
         args = ["stamp"]
         for cal in calendars:
             args += ["-c", cal]
@@ -292,11 +320,10 @@ def stamp_via_symlink(
             )
         _place_proof(staged_ots, out_ots_path)
     finally:
-        for stray in (link, staged_ots):
-            try:
+        for stray in created:
+            # Best-effort: cleanup must never mask or replace the classified exception.
+            with contextlib.suppress(OSError):
                 stray.unlink()
-            except FileNotFoundError:
-                pass
     return out_ots_path
 
 
@@ -305,6 +332,8 @@ def stamp_batch_via_symlink(
     calendars: list[str],
     staging_dir: str | os.PathLike[str],
     timeout: int = DEFAULT_TIMEOUT,
+    *,
+    store_root: str | os.PathLike[str] | None = None,
 ) -> list[bool]:
     """Stamp many files in ONE ``ots stamp`` call; return per-item success aligned with ``items``.
 
@@ -316,12 +345,14 @@ def stamp_batch_via_symlink(
     Success is decided by *filesystem truth* — whether each ``<linkI>.ots`` was actually produced —
     not by the process exit code, so a whole-batch failure, a timeout, or one unreadable file
     aborting the run leaves the unaffected members stamped and the rest reported ``False`` for the
-    caller to retry individually. Links and stray ``.ots`` are always cleaned up in ``finally``.
+    caller to retry individually. Links and stray ``.ots`` are always cleaned up (best-effort) in
+    ``finally``. ``store_root`` bounds the output-path pre-check to the components Cairn creates.
     """
     pairs = [(Path(real), Path(out)) for real, out in items]
     if not pairs:
         return []
     staging_dir = Path(staging_dir)
+    root = Path(store_root) if store_root is not None else None
     # A staging dir we cannot create fails the whole call transiently (OtsError): no member is
     # symlinked, nothing is submitted, and the caller leaves every file `pending` for retry.
     _prepare_staging_dir(staging_dir)
@@ -334,17 +365,18 @@ def stamp_batch_via_symlink(
     results = [False] * len(pairs)
     try:
         for real, out in pairs:
-            if not _proof_output_writable(out):
+            if not _proof_output_writable(out, below=root):
                 links.append(None)
                 continue
             link = staging_dir / uuid.uuid4().hex
             try:
                 link.symlink_to(real)
             except OSError:
-                # One member we could not stage (an un-writable staging dir, a path the OS refuses).
-                # Drop it from the submission and leave its result ``False`` — the caller's
-                # single-file fallback re-raises the properly classified error for this one file.
-                # A raw OSError here would abort the batch AND the caller's whole stamp pass.
+                # One member we could not stage (an un-writable staging dir, a staging pathname the
+                # OS refuses). Drop it from the submission and leave its result ``False`` — the
+                # caller's single-file fallback re-raises the properly classified (always transient,
+                # for a staging failure) error for this one file. A raw OSError here would abort the
+                # batch AND the caller's whole stamp pass. Nothing was created, so nothing to clean.
                 links.append(None)
                 continue
             links.append((link, link.with_name(link.name + ".ots")))
@@ -384,10 +416,10 @@ def stamp_batch_via_symlink(
                 continue
             link, staged_ots = entry
             for stray in (link, staged_ots):
-                try:
+                # Best-effort: a cleanup failure must never replace a member's classified outcome
+                # (or, worse, escape as a raw OSError and abort the caller's whole stamp pass).
+                with contextlib.suppress(OSError):
                     stray.unlink()
-                except FileNotFoundError:
-                    pass
     return results
 
 

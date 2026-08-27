@@ -1017,15 +1017,39 @@ async def test_permanent_skip_clears_stamp_time_and_keeps_status(cairn_env, monk
 
 
 def test_proof_output_writable_rejects_overlong_parent_component(tmp_path):
-    """The pre-check covers EVERY relpath-derived component, not just the final `.ots` name — an
-    overlong directory is just as un-writable (mkdir refuses it with ENAMETOOLONG)."""
+    """The pre-check covers every component Cairn CREATES below the store root, not just the final
+    `.ots` name — an overlong relpath directory is just as un-writable (mkdir refuses it with
+    ENAMETOOLONG)."""
     from src.services import ots
 
+    store = tmp_path / "proofs"
     long_dir = "д" * 130  # 260 bytes > NAME_MAX
     assert len(os.fsencode(long_dir)) > ots._NAME_MAX_BYTES
 
-    assert ots._proof_output_writable(tmp_path / "1" / "sub" / "a.txt.ots")
-    assert not ots._proof_output_writable(tmp_path / "1" / long_dir / "a.txt.ots")
+    assert ots._proof_output_writable(store / "1" / "sub" / "a.txt.ots", below=store)
+    # The overlong component is one Cairn creates (it comes from the file's relpath) → permanent.
+    assert not ots._proof_output_writable(store / "1" / long_dir / "a.txt.ots", below=store)
+
+
+def test_proof_output_writable_ignores_store_root_components(tmp_path):
+    """A store root whose OWN components are overlong must not make every descendant proof look
+    permanently unwritable.
+
+    Regression (mass false negative): the pre-check measured every component of the absolute output
+    path, so a proof store living under a directory the filesystem already accepted at >255 bytes
+    would fail the check for every file — silently dropping a whole collection to
+    `ots_state='none'`. Only `<collection_id>/<relpath>.ots` is ours to validate.
+    """
+    from src.services import ots
+
+    long_dir = "д" * 130  # 260 bytes > NAME_MAX, but it is the OPERATOR's path, not ours
+    store = tmp_path / long_dir / "proofs"
+    assert len(os.fsencode(long_dir)) > ots._NAME_MAX_BYTES
+
+    assert ots._proof_output_writable(store / "1" / "a.txt.ots", below=store)
+    assert ots._proof_output_writable(store / "1" / "sub" / "a.txt.ots", below=store)
+    # …while an overlong component below the root is still rejected.
+    assert not ots._proof_output_writable(store / "1" / (long_dir + ".ots"), below=store)
 
 
 def test_stamp_batch_skips_overlong_parent_dir_before_any_symlink(tmp_path, monkeypatch):
@@ -1061,7 +1085,7 @@ def test_stamp_batch_skips_overlong_parent_dir_before_any_symlink(tmp_path, monk
     invocations: list = []
     monkeypatch.setattr(ots, "_run_ots", _batch_fake(invocations))
 
-    results = ots.stamp_batch_via_symlink(items, [], staging)
+    results = ots.stamp_batch_via_symlink(items, [], staging, store_root=store)
 
     assert results == [True, False]
     assert len(symlinked) == 1  # the overlong-parent member was never staged
@@ -1070,6 +1094,121 @@ def test_stamp_batch_skips_overlong_parent_dir_before_any_symlink(tmp_path, monk
     assert len(stamp_calls) == 1
     assert sum(1 for x in stamp_calls[0] if str(staging) in x) == 1
     assert not any(staging.iterdir())  # links + stray .ots cleaned up
+
+
+def test_staging_symlink_enametoolong_is_transient(tmp_path, monkeypatch):
+    """A staging-side ENAMETOOLONG is TRANSIENT (plain OtsError), never a permanent OtsPathError.
+
+    The overlong operand there is the *staging* pathname — `<store>/.staging/<uuid>` on a store path
+    already near PATH_MAX — which is a property of the deployment, not of this file. Classifying it
+    permanent dropped the file to `ots_state='none'` and abandoned its notarization forever.
+    Permanence is decided only by the output-path pre-check and by `_place_proof`.
+    """
+    import errno as _errno
+
+    from src.services import ots
+
+    real = tmp_path / "f.bin"
+    real.write_bytes(b"data")
+    staging = tmp_path / "store" / ".staging"
+
+    def boom_symlink(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise OSError(_errno.ENAMETOOLONG, "File name too long")
+
+    # The cleanup unlink of that same overlong staging path used to raise a RAW OSError out of
+    # `finally`, replacing the classified exception and aborting the caller's whole stamp pass.
+    def boom_unlink(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise OSError(_errno.ENAMETOOLONG, "File name too long")
+
+    monkeypatch.setattr(os, "symlink", boom_symlink)
+    monkeypatch.setattr(os, "unlink", boom_unlink)
+
+    with pytest.raises(ots.OtsError) as excinfo:
+        ots.stamp_via_symlink(real, tmp_path / "store" / "1" / "f.bin.ots", [], staging,
+                              store_root=tmp_path / "store")
+    assert not isinstance(excinfo.value, ots.OtsPathError)
+
+
+async def test_stamp_pending_staging_link_enametoolong_stays_pending(cairn_env, monkeypatch):
+    """End-to-end: a staging-symlink ENAMETOOLONG leaves every member `pending` (never `none`), does
+    not abort the pass, and lets no raw OSError escape — including through the cleanup unlink."""
+    import errno as _errno
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry
+    from src.services import ots, proofs
+    from src.services.scanner import _utcnow
+
+    root = cairn_env / "longlink"
+    root.mkdir()
+    for i in range(3):
+        (root / f"f{i}.txt").write_text(f"c{i}")
+    cid = await _make_collection(root, mode="worm", ots_mode="perfile")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        for i in range(3):
+            s.add(FileEntry(
+                collection_id=cid, relpath=f"f{i}.txt", size=2, sha256=f"{i:064d}",
+                status="new", first_seen=_utcnow(), ots_state="pending",
+            ))
+        await s.commit()
+
+    invocations: list = []
+    monkeypatch.setattr(ots, "_run_ots", _batch_fake(invocations))
+
+    def boom(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise OSError(_errno.ENAMETOOLONG, "File name too long")
+
+    monkeypatch.setattr(os, "symlink", boom)
+    monkeypatch.setattr(os, "unlink", boom)  # cleaning an overlong staging path fails the same way
+
+    async with sm() as s:
+        count = await proofs.stamp_pending(s, await s.get(Collection, cid))  # must not raise
+        assert count == 0
+        files = list(await s.scalars(select(FileEntry).where(FileEntry.collection_id == cid)))
+        # Transient ⇒ retryable: still `pending`, and no trust metadata invented or discarded.
+        assert {f.ots_state for f in files} == {"pending"}
+        assert all(f.ots_path is None and f.ots_stamped_at is None for f in files)
+
+    assert not [a for a in invocations if a and a[0] == "stamp"]  # nothing reached a calendar
+
+
+def test_stamp_ignores_overlong_components_of_the_store_root(tmp_path, monkeypatch):
+    """A store root carrying an over-limit component still stamps normally: only the components
+    Cairn creates below it (`<collection_id>/<relpath>.ots`) are pre-checked.
+
+    Regression (mass false negative): the all-components pre-check judged the operator's store path
+    too, so every proof under such a root read "permanently unwritable" and the whole collection was
+    silently dropped to `ots_state='none'`. The limit is shrunk here rather than creating a real
+    >255-byte directory (ext4 refuses one), which is the same shape of failure.
+    """
+    from src.services import ots
+
+    monkeypatch.setattr(ots, "_NAME_MAX_BYTES", 12)
+    store = tmp_path / ("s" * 40) / "proofs"  # a store-root component past the (shrunk) limit
+    staging = store / ".staging"
+    root = tmp_path / "src"
+    root.mkdir()
+    for name in ("a.txt", "b.txt"):
+        (root / name).write_bytes(b"x")
+    assert len(os.fsencode(store.parent.name)) > ots._NAME_MAX_BYTES
+
+    invocations: list = []
+    monkeypatch.setattr(ots, "_run_ots", _batch_fake(invocations))
+
+    results = ots.stamp_batch_via_symlink(
+        [(root / "a.txt", store / "1" / "a.txt.ots")], [], staging, store_root=store
+    )
+    assert results == [True]
+    assert (store / "1" / "a.txt.ots").exists()
+
+    # …and the single-file path agrees (it is the fallback that decides permanent vs. transient).
+    out = ots.stamp_via_symlink(
+        root / "b.txt", store / "1" / "b.txt.ots", [], staging, store_root=store
+    )
+    assert out.exists()
+    assert len([a for a in invocations if a and a[0] == "stamp"]) == 2
 
 
 async def test_mark_unstamped_pending_scopes_to_none_and_present(cairn_env, monkeypatch):
@@ -1534,7 +1673,7 @@ async def test_stamp_pending_runs_off_the_event_loop(cairn_env, monkeypatch):
 
     seen_threads: list = []
 
-    def fake_batch(pairs, calendars, staging):
+    def fake_batch(pairs, calendars, staging, **kwargs):  # noqa: ANN003
         seen_threads.append(threading.current_thread())
         return [True] * len(pairs)  # every file stamped
 

@@ -73,6 +73,11 @@ async def stamp_pending(
 
     root = Path(collection.root)
     staging = staging_dir(settings)
+    # The proof-store root bounds the "can this proof path be written?" pre-check: only the
+    # components Cairn creates under it (`<collection_id>/<relpath>.ots`) are length-checked. The
+    # store root's own components are the operator's and must never make a proof look permanently
+    # unwritable — that would drop a whole collection to `ots_state='none'`.
+    store_root = Path(settings.proof_store_path)
     calendars = settings.ots_calendars
 
     # Only stamp files still on disk; a vanished file stays pending for the next scan to reclassify.
@@ -98,6 +103,7 @@ async def stamp_pending(
                 [(real, out) for _entry, real, out in chunk],
                 calendars,
                 staging,
+                store_root=store_root,
             )
         except ots.OtsError as exc:
             # A batch-level failure (e.g. the shared staging dir cannot be created) says nothing
@@ -111,7 +117,8 @@ async def stamp_pending(
                 # Isolate the failure: retry just this file on its own before giving up on it.
                 try:
                     await asyncio.to_thread(
-                        ots.stamp_via_symlink, real, out, calendars, staging
+                        ots.stamp_via_symlink, real, out, calendars, staging,
+                        store_root=store_root,
                     )
                 except ots.OtsPathError as exc:
                     # The proof output path can never be written (typically ENAMETOOLONG — a

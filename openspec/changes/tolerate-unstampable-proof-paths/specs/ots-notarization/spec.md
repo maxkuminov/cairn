@@ -6,9 +6,13 @@
 
 Stamping SHALL NOT abort a batch, fail a scan, or crash the process when a file's proof output path
 cannot be written by the filesystem. A proof output path is *un-writable* (a **permanent** condition)
-when a component of it exceeds the filesystem's per-name limit — `ENAMETOOLONG`; `NAME_MAX` is measured
-in **bytes**, so a multi-byte name such as a Cyrillic filename plus its extension plus `.ots` can
-exceed it while looking short. For each such file the system SHALL skip writing its proof, SHALL count
+when a component **that the system itself creates below the proof-store root** (`<collection_id>/`,
+the file's relpath directories, and the final `.ots` name) exceeds the filesystem's per-name limit —
+`ENAMETOOLONG`; `NAME_MAX` is measured in **bytes**, so a multi-byte name such as a Cyrillic filename
+plus its extension plus `.ots` can exceed it while looking short. The proof-store root's own
+components SHALL NOT be validated: the operator supplied that path and the filesystem already accepted
+it, so judging it would mark every proof under that store permanently un-writable and silently drop a
+whole collection to `none`. For each such file the system SHALL skip writing its proof, SHALL count
 it, and SHALL log the skipped path so an operator can locate it. A skipped file SHALL be left unstamped
 with `ots_state = none`, no `ots_path` and no stamp time (no proof recorded, no stale pointer, and no
 timestamp claiming a notarization that no proof backs), so it is not re-queued and re-attempted by
@@ -16,9 +20,15 @@ every subsequent scan; the other files in the same batch SHALL be stamped normal
 A skip SHALL NOT change the file's monitored `status`, and SHALL NOT suppress `missing`/`modified`
 alerting for that file.
 
-The system SHALL treat only the permanent `ENAMETOOLONG` condition as a `none` skip. **Every other**
-write failure — a full or read-only proof store, a staging directory or staging symlink that cannot
-be created, a cross-device staging dir, an I/O error — SHALL be treated as **transient**: the file
+Only a failure on the **final proof output path** may be classified permanent. **Every** staging-side
+failure — the staging directory or a staging symlink that cannot be created — SHALL be treated as
+transient *regardless of its errno*, `ENAMETOOLONG` included: the overlong operand there is the
+staging pathname, a property of the deployment, not of the file. Cleaning up staging paths SHALL be
+best-effort and SHALL NEVER mask, replace, or escape past the classified outcome of a member.
+
+The system SHALL treat only that permanent `ENAMETOOLONG` condition as a `none` skip. **Every other**
+write failure — a full or read-only proof store, a staging failure of any kind, a cross-device staging
+dir, an I/O error — SHALL be treated as **transient**: the file
 SHALL be left `pending` for retry on the next pass, exactly like an
 unreachable calendar or a timeout (see "A failed batch member does not drop the batch's proofs"). A
 transient error SHALL NEVER drop a file to `none`, because the proof could succeed once the condition
@@ -37,6 +47,21 @@ clears and a normal scan would not re-queue a `none` file.
 - **THEN** the system SHALL set that file's `ots_state` to `none` so a later normal scan (which
   queues only newly added or changed files) does not re-queue it, and SHALL record it in the run's
   stamped count as not-stamped
+
+#### Scenario: A staging-side failure is transient whatever its errno
+
+- **WHEN** a staging symlink for a pending file cannot be created and the failure is `ENAMETOOLONG`
+  (the staging pathname, not the file's proof name, is what the filesystem refused)
+- **THEN** the system SHALL leave that file `pending`, SHALL NOT drop it to `none`, SHALL NOT abort
+  the stamping pass, and SHALL NOT let the underlying `OSError` escape — including from the cleanup
+  of staging paths
+
+#### Scenario: A proof store under an over-limit directory still stamps
+
+- **WHEN** the proof store root itself contains a path component longer than the per-name byte limit
+  the system assumes, and a pending file's `<collection_id>/<relpath>.ots` components are all within it
+- **THEN** the system SHALL stamp that file normally and SHALL NOT classify its proof path
+  un-writable
 
 #### Scenario: A transient failure is not treated as a permanent skip
 
