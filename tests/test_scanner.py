@@ -709,7 +709,7 @@ async def test_auto_baseline_promotes_intact_new_on_deep(cairn_env):
 async def test_auto_baseline_quick_scan_does_not_promote(cairn_env):
     """A quick (non-deep) scan never auto-baselines, even with the flag on."""
     from src.database import get_sessionmaker
-    from src.models.db import Collection, FileEntry
+    from src.models.db import Collection
     from src.services.scanner import scan_collection
 
     root = cairn_env / "abq"

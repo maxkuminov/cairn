@@ -209,7 +209,8 @@ policy + alert routing · optional witness (restic) config · optional Kuma hear
 ## 7. What we reuse from the Obsidian-MCP server (the sibling FastAPI app)
 Cairn is the same *shape* of app, so we lift patterns (and where clean, code):
 - **Stack:** FastAPI / uvicorn / SQLAlchemy async / Alembic / Jinja2 + htmx + Tailwind.
-- **Auth:** session login, password hashing (`passlib[bcrypt]`), `User` model with
+- **Auth:** session login, password hashing (`pwdlib[argon2]` — *not* passlib, which is
+  unmaintained and whose bcrypt backend is broken against bcrypt>=5), `User` model with
   `is_admin`/`is_active`, per-user scoping (their `vault_path` → our per-user collections). Drop the
   API-key + OAuth2/PKCE layers (MCP-specific; Cairn v1 needs only the panel session auth).
 - **Indexer → scanner:** the "run on startup, then on a cadence, hash-based change detection"

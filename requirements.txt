@@ -1,15 +1,28 @@
 # Cairn runtime dependencies (Python 3.12).
 # The ots CLI ships with opentimestamps-client (de-risked: v0.7.2 stamps on 3.12).
-fastapi>=0.110
-uvicorn[standard]>=0.29
-sqlalchemy[asyncio]>=2.0.29
-aiosqlite>=0.20
-alembic>=1.13
-pydantic-settings>=2.2
-passlib[bcrypt]>=1.7.4
-itsdangerous>=2.1
-jinja2>=3.1
-python-multipart>=0.0.9
-httpx>=0.27
-pyyaml>=6.0
+#
+# Floors are security floors, not just "new enough": a `>=` that predates a fix lets a clean
+# resolve install a vulnerable version. Raise a floor when the old one permits a known-bad release.
+fastapi>=0.139
+# Explicit, not transitive. FastAPI's own floor is starlette>=0.46, which resolves versions
+# vulnerable to PYSEC-2026-248/249 (unauthenticated DoS; attacker-controlled url.hostname).
+# Pinning fastapi does NOT protect against this — starlette needs its own floor.
+starlette>=1.3.1
+uvicorn[standard]>=0.50
+sqlalchemy[asyncio]>=2.0.51
+aiosqlite>=0.22
+alembic>=1.18
+pydantic-settings>=2.14.2
+itsdangerous>=2.2
+# >=3.1 permitted 3.1.0, which predates several 3.1.x sandbox-escape fixes.
+jinja2>=3.1.6
+# 0.0.31 fixes PYSEC-2026-3040 (negative Content-Length buffers the whole body).
+python-multipart>=0.0.32
+httpx>=0.28
+pyyaml>=6.0.3
 opentimestamps-client>=0.7.2
+# Transitive of opentimestamps-client (which floors it at >=2.0.8, permitting versions with 15
+# advisories, two CVSS 8.8). Cairn never imports it — src/services/ots.py only shells
+# `ots stamp/upgrade/verify` — but an unfloored transitive is how the built image ended up
+# carrying them, so it gets an explicit floor like starlette.
+gitpython>=3.1.60

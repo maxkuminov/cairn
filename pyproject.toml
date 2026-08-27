@@ -11,19 +11,21 @@ requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Max Kuminov" }]
 dependencies = [
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.29",
-    "sqlalchemy[asyncio]>=2.0.29",
-    "aiosqlite>=0.20",
-    "alembic>=1.13",
-    "pydantic-settings>=2.2",
-    "passlib[bcrypt]>=1.7.4",
-    "itsdangerous>=2.1",
-    "jinja2>=3.1",
-    "python-multipart>=0.0.9",
-    "httpx>=0.27",
-    "pyyaml>=6.0",
+    # Kept in lockstep with requirements.txt — see the rationale for each floor there.
+    "fastapi>=0.139",
+    "starlette>=1.3.1",
+    "uvicorn[standard]>=0.50",
+    "sqlalchemy[asyncio]>=2.0.51",
+    "aiosqlite>=0.22",
+    "alembic>=1.18",
+    "pydantic-settings>=2.14.2",
+    "itsdangerous>=2.2",
+    "jinja2>=3.1.6",
+    "python-multipart>=0.0.32",
+    "httpx>=0.28",
+    "pyyaml>=6.0.3",
     "opentimestamps-client>=0.7.2",
+    "gitpython>=3.1.60",
 ]
 
 [project.scripts]
@@ -44,6 +46,14 @@ packages = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+# Pin the rule set explicitly. Ruff's *default* selection widened in 0.16, which turned a green
+# gate red overnight with 132 findings the project never opted into — 56 of them B008 firing on
+# FastAPI's `Depends()` default-argument idiom, which is correct usage here, not a defect. An
+# implicit gate that changes meaning on a dependency bump is not a gate. Widening the selection is
+# a deliberate decision to make on its own, not a side effect of upgrading the linter.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

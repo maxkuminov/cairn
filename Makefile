@@ -149,5 +149,17 @@ clean: down
 	docker rmi $(IMAGE_NAME):$(IMAGE_TAG) $(FULL_IMAGE) 2>/dev/null || true
 	@echo "$(GREEN)Cleaned. Data in $(DATA_DIR) and proofs in $(PROOFS_DIR) preserved.$(NC)"
 
+# Two audits, because they answer different questions:
+#   1. the declared floors — would a CLEAN resolve pull a known-vulnerable version?
+#   2. the installed environment — is what is ACTUALLY here vulnerable right now?
+# (1) alone is a blind spot: with `>=` floors it resolves today's latest and reports clean while
+# the environment (and the built image, which pins nothing) carries older, vulnerable transitives.
 audit:
+	@echo "--- declared floors (requirements.txt) ---"
 	pip-audit -r requirements.txt
+	@echo "--- installed environment ---"
+	pip-audit
+	@echo "--- built image ($(IMAGE_NAME):$(IMAGE_TAG)) ---"
+	@docker run --rm --entrypoint sh $(IMAGE_NAME):$(IMAGE_TAG) -c \
+		'pip install -q pip-audit 2>/dev/null && pip-audit' \
+		|| echo "(image not built or pip-audit unavailable in image — skipped)"

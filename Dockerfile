@@ -1,4 +1,9 @@
-FROM python:3.12-slim
+# Patch-pinned for reproducibility: `python:3.12-slim` silently drifts between builds, which is
+# how two builds a week apart end up with different dependency trees. Staying on 3.12 (supported
+# to Oct 2028) is deliberate — the notary stack (opentimestamps-client 0.7.2, opentimestamps
+# 0.4.5, python-bitcoinlib) is effectively unmaintained, so moving the interpreter under it needs
+# its own `ots stamp/upgrade/verify` smoke test, not a drive-by bump.
+FROM python:3.12.13-slim
 
 WORKDIR /app
 
@@ -13,7 +18,7 @@ RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-reco
     sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Add non-root user (the app runs unprivileged; watched corpora are mounted ro)
+# Add non-root user (the app runs unprivileged; watched collections are mounted ro)
 RUN useradd -m -u 1000 -s /bin/bash appuser
 
 # Install Python dependencies. This pulls in `opentimestamps-client`, which puts
@@ -21,7 +26,9 @@ RUN useradd -m -u 1000 -s /bin/bash appuser
 # stamp/upgrade/verify work on Python 3.12 (see DESIGN.md §3 / CLAUDE.md). If you
 # change the pin, re-run the smoke test before trusting proofs.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Upgrade pip first: the base image ships a pip with its own advisories.
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
 # Copy application code. Alembic runs on startup when CAIRN_AUTO_MIGRATE=1.
 COPY alembic.ini .
