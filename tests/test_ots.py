@@ -866,6 +866,212 @@ async def test_stamp_pending_skips_overlong_name_and_stamps_rest(cairn_env, monk
         assert files[long_base].ots_path is None
 
 
+# --- regression: a filesystem failure while STAGING never escapes as a raw OSError -------------
+
+
+async def test_stamp_pending_symlink_failure_leaves_files_pending(cairn_env, monkeypatch):
+    """An un-writable staging dir (symlink creation refused) must not escape as a raw OSError.
+
+    Regression: `link.symlink_to(...)` was unguarded in both the batch and the single-file path, so a
+    `PermissionError` blew past `stamp_pending`'s per-file handling and aborted the whole pass —
+    including every later chunk. Now it is classified as a *transient* OtsError: nothing raises,
+    nothing is dropped to `none`, every file stays `pending` for the next pass.
+    """
+    import errno as _errno
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry
+    from src.services import ots, proofs
+    from src.services.scanner import _utcnow
+
+    root = cairn_env / "nolink"
+    root.mkdir()
+    for i in range(3):
+        (root / f"f{i}.txt").write_text(f"c{i}")
+    cid = await _make_collection(root, mode="worm", ots_mode="perfile")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        for i in range(3):
+            s.add(FileEntry(
+                collection_id=cid, relpath=f"f{i}.txt", size=2, sha256=f"{i:064d}",
+                status="new", first_seen=_utcnow(), ots_state="pending",
+            ))
+        await s.commit()
+
+    invocations: list = []
+    monkeypatch.setattr(ots, "_run_ots", _batch_fake(invocations))
+
+    def boom_symlink(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise PermissionError(_errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(os, "symlink", boom_symlink)
+
+    async with sm() as s:
+        count = await proofs.stamp_pending(s, await s.get(Collection, cid))  # must not raise
+        assert count == 0
+        files = list(await s.scalars(select(FileEntry).where(FileEntry.collection_id == cid)))
+        # Transient ⇒ retryable: still `pending`, no proof pointer, no phantom stamp time.
+        assert {f.ots_state for f in files} == {"pending"}
+        assert all(f.ots_path is None and f.ots_stamped_at is None for f in files)
+
+    # Nothing was ever submitted to a calendar — the failure happened before the `ots` call.
+    assert not [a for a in invocations if a and a[0] == "stamp"]
+
+
+async def test_stamp_pending_staging_dir_failure_does_not_abort_later_chunks(cairn_env, monkeypatch):
+    """A batch-level OtsError (the shared staging dir cannot be created) degrades to the per-file
+    fallback and still walks EVERY chunk — it never propagates out of `stamp_pending`."""
+    import errno as _errno
+
+    from src.config import get_settings
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry
+    from src.services import ots, proofs
+    from src.services.scanner import _utcnow
+
+    monkeypatch.setenv("CAIRN_OTS_STAMP_BATCH_SIZE", "2")
+    get_settings.cache_clear()
+
+    root = cairn_env / "nostaging"
+    root.mkdir()
+    n = 5  # ceil(5 / 2) == 3 chunks
+    for i in range(n):
+        (root / f"f{i}.txt").write_text(f"c{i}")
+    cid = await _make_collection(root, mode="worm", ots_mode="perfile")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        for i in range(n):
+            s.add(FileEntry(
+                collection_id=cid, relpath=f"f{i}.txt", size=2, sha256=f"{i:064d}",
+                status="new", first_seen=_utcnow(), ots_state="pending",
+            ))
+        await s.commit()
+
+    assert not proofs.staging_dir(get_settings()).exists()  # so mkdir really is attempted
+
+    # Count the single-file fallbacks: one per file proves all three chunks were processed.
+    attempts: list[str] = []
+    original_single = ots.stamp_via_symlink
+
+    def counting_single(real, out, calendars, staging, **kwargs):  # noqa: ANN001, ANN003
+        attempts.append(Path(real).name)
+        return original_single(real, out, calendars, staging, **kwargs)
+
+    monkeypatch.setattr(ots, "stamp_via_symlink", counting_single)
+    monkeypatch.setattr(ots, "_run_ots", _batch_fake([]))
+
+    def boom_mkdir(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise PermissionError(_errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(os, "mkdir", boom_mkdir)
+
+    async with sm() as s:
+        count = await proofs.stamp_pending(s, await s.get(Collection, cid))  # must not raise
+        assert count == 0
+        files = list(await s.scalars(select(FileEntry).where(FileEntry.collection_id == cid)))
+        assert {f.ots_state for f in files} == {"pending"}  # transient — never `none`
+
+    assert sorted(attempts) == [f"f{i}.txt" for i in range(n)]
+
+
+async def test_permanent_skip_clears_stamp_time_and_keeps_status(cairn_env, monkeypatch):
+    """The permanent `none` skip must leave NO trust metadata behind — and must not re-baseline.
+
+    A file stamped under an old name, then renamed to an un-writable (overlong) one and modified,
+    kept its previous `ots_stamped_at` while losing its proof: the panel then showed a stamp date
+    for content nothing attests. `none` must mean nothing is claimed. The monitored `status` is a
+    scanner concern and is left exactly as found.
+    """
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry
+    from src.services import ots, proofs
+    from src.services.scanner import _utcnow
+
+    root = cairn_env / "stale-stamp"
+    root.mkdir()
+    long_base = "д" * 126  # source 252 bytes (creatable); proof 256 bytes (> NAME_MAX)
+    (root / long_base).write_text("renamed-then-modified")
+    cid = await _make_collection(root, mode="worm", ots_mode="perfile")
+    sm = get_sessionmaker()
+
+    stamped_before = _utcnow() - timedelta(days=30)
+    async with sm() as s:
+        s.add(FileEntry(
+            collection_id=cid, relpath=long_base, size=21, sha256="7" * 64,
+            status="modified", first_seen=_utcnow(), ots_state="pending",
+            ots_path="/proofs/1/old-name.txt.ots", ots_stamped_at=stamped_before,
+        ))
+        await s.commit()
+
+    monkeypatch.setattr(ots, "_run_ots", _batch_fake([]))
+
+    async with sm() as s:
+        assert await proofs.stamp_pending(s, await s.get(Collection, cid)) == 0
+        entry = await s.scalar(select(FileEntry).where(FileEntry.collection_id == cid))
+        assert entry.ots_state == "none"
+        assert entry.ots_path is None
+        assert entry.ots_stamped_at is None  # no stamp time without a proof to back it
+        assert entry.status == "modified"    # a notarization skip never re-baselines the file
+
+
+def test_proof_output_writable_rejects_overlong_parent_component(tmp_path):
+    """The pre-check covers EVERY relpath-derived component, not just the final `.ots` name — an
+    overlong directory is just as un-writable (mkdir refuses it with ENAMETOOLONG)."""
+    from src.services import ots
+
+    long_dir = "д" * 130  # 260 bytes > NAME_MAX
+    assert len(os.fsencode(long_dir)) > ots._NAME_MAX_BYTES
+
+    assert ots._proof_output_writable(tmp_path / "1" / "sub" / "a.txt.ots")
+    assert not ots._proof_output_writable(tmp_path / "1" / long_dir / "a.txt.ots")
+
+
+def test_stamp_batch_skips_overlong_parent_dir_before_any_symlink(tmp_path, monkeypatch):
+    """A member whose proof PARENT directory is overlong (its own name short) is skipped up front —
+    no staging symlink, no calendar submission — instead of burning a batch round-trip plus a
+    single-file retry before `_place_proof` classifies it."""
+    from src.services import ots
+
+    root = tmp_path / "src"
+    root.mkdir()
+    store = tmp_path / "proofs"
+    staging = store / ".staging"
+
+    good = root / "a.txt"
+    good.write_bytes(b"a")
+    deep = root / "b.txt"
+    deep.write_bytes(b"b")
+    long_dir = "д" * 130  # 260 bytes > NAME_MAX, though "b.txt.ots" itself is short
+
+    items = [
+        (good, store / "1" / "a.txt.ots"),
+        (deep, store / "1" / long_dir / "b.txt.ots"),
+    ]
+
+    symlinked: list[str] = []
+    real_symlink = os.symlink
+
+    def counting_symlink(target, link, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        symlinked.append(str(link))
+        return real_symlink(target, link, *args, **kwargs)
+
+    monkeypatch.setattr(os, "symlink", counting_symlink)
+    invocations: list = []
+    monkeypatch.setattr(ots, "_run_ots", _batch_fake(invocations))
+
+    results = ots.stamp_batch_via_symlink(items, [], staging)
+
+    assert results == [True, False]
+    assert len(symlinked) == 1  # the overlong-parent member was never staged
+    assert [p.name for p in (store / "1").iterdir()] == ["a.txt.ots"]
+    stamp_calls = [a for a in invocations if a and a[0] == "stamp"]
+    assert len(stamp_calls) == 1
+    assert sum(1 for x in stamp_calls[0] if str(staging) in x) == 1
+    assert not any(staging.iterdir())  # links + stray .ots cleaned up
+
+
 async def test_mark_unstamped_pending_scopes_to_none_and_present(cairn_env, monkeypatch):
     """Backfill marks only ots_state='none' non-missing files; never re-stamps existing proofs."""
     from src.database import get_sessionmaker

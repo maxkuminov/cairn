@@ -10,14 +10,16 @@ when a component of it exceeds the filesystem's per-name limit — `ENAMETOOLONG
 in **bytes**, so a multi-byte name such as a Cyrillic filename plus its extension plus `.ots` can
 exceed it while looking short. For each such file the system SHALL skip writing its proof, SHALL count
 it, and SHALL log the skipped path so an operator can locate it. A skipped file SHALL be left unstamped
-with `ots_state = none` and no `ots_path` (no proof recorded, no stale pointer), so it is not re-queued
-and re-attempted by every subsequent scan; the other files in the same batch SHALL be stamped normally.
+with `ots_state = none`, no `ots_path` and no stamp time (no proof recorded, no stale pointer, and no
+timestamp claiming a notarization that no proof backs), so it is not re-queued and re-attempted by
+every subsequent scan; the other files in the same batch SHALL be stamped normally.
 A skip SHALL NOT change the file's monitored `status`, and SHALL NOT suppress `missing`/`modified`
 alerting for that file.
 
 The system SHALL treat only the permanent `ENAMETOOLONG` condition as a `none` skip. **Every other**
-write failure — a full or read-only proof store, a cross-device staging dir, an I/O error — SHALL be
-treated as **transient**: the file SHALL be left `pending` for retry on the next pass, exactly like an
+write failure — a full or read-only proof store, a staging directory or staging symlink that cannot
+be created, a cross-device staging dir, an I/O error — SHALL be treated as **transient**: the file
+SHALL be left `pending` for retry on the next pass, exactly like an
 unreachable calendar or a timeout (see "A failed batch member does not drop the batch's proofs"). A
 transient error SHALL NEVER drop a file to `none`, because the proof could succeed once the condition
 clears and a normal scan would not re-queue a `none` file.

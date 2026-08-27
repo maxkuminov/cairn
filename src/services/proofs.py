@@ -92,12 +92,20 @@ async def stamp_pending(
         chunk = work[start : start + batch_size]
         # Offload the blocking `ots` subprocess (process spawn + calendar round-trip) to a worker
         # thread so the event loop stays free to serve the panel — mirrors scanner hashing.
-        outcomes = await asyncio.to_thread(
-            ots.stamp_batch_via_symlink,
-            [(real, out) for _entry, real, out in chunk],
-            calendars,
-            staging,
-        )
+        try:
+            outcomes = await asyncio.to_thread(
+                ots.stamp_batch_via_symlink,
+                [(real, out) for _entry, real, out in chunk],
+                calendars,
+                staging,
+            )
+        except ots.OtsError as exc:
+            # A batch-level failure (e.g. the shared staging dir cannot be created) says nothing
+            # about the individual files. Degrade to the per-file fallback below, which classifies
+            # each one permanent vs. transient — and, crucially, never abort the later chunks or
+            # propagate to the caller (a scan must not fail because stamping could not run).
+            log.warning("batch stamp failed for collection %s: %s", collection.id, exc)
+            outcomes = [False] * len(chunk)
         for (entry, real, out), ok in zip(chunk, outcomes):
             if not ok:
                 # Isolate the failure: retry just this file on its own before giving up on it.
@@ -115,6 +123,12 @@ async def stamp_pending(
                     log.warning("skip stamp, unwritable proof path for %s: %s", real, exc)
                     entry.ots_state = "none"
                     entry.ots_path = None  # no proof stored; never leave a stale pointer behind
+                    # …and no stamp time either: a file renamed onto an un-writable path after an
+                    # earlier stamp would otherwise keep the OLD content's timestamp with no proof
+                    # to back it, which the panel renders as trust metadata ("notarized on …").
+                    # `none` must mean nothing is claimed. The monitored `status` is untouched —
+                    # this is a notarization skip, not a re-baseline.
+                    entry.ots_stamped_at = None
                     skipped += 1
                     continue
                 except ots.OtsError as exc:

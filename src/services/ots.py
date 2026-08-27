@@ -145,18 +145,56 @@ def _is_pending(text: str) -> bool:
 
 
 def _proof_output_writable(out_ots_path: Path) -> bool:
-    """Whether ``out_ots_path``'s final component fits the filesystem's per-name byte limit.
+    """Whether EVERY component of ``out_ots_path`` fits the filesystem's per-name byte limit.
 
     The *byte* length is what matters (NAME_MAX is bytes, not characters): a short-looking multi-byte
-    name — a Cyrillic filename plus its extension plus ``.ots`` — can still exceed it. This is a cheap
-    pre-check so an un-writable proof is skipped before a symlink or a calendar round-trip is spent on
-    it; :func:`_place_proof` is the authoritative backstop for any limit this pre-check does not model
-    (a smaller NAME_MAX, name-inflating filesystems like eCryptfs, a too-long parent component).
+    name — a Cyrillic filename plus its extension plus ``.ots`` — can still exceed it. Checking only
+    the final component is not enough: the proof path mirrors the file's *relpath*, so an overlong
+    **directory** component (a deep Cyrillic folder name) is equally un-writable — ``mkdir`` refuses
+    it with ENAMETOOLONG — and would otherwise slip past this pre-check and burn a batch calendar
+    round-trip plus a single-file retry before :func:`_place_proof` classified it.
+
+    Components above the proof store root are checked too; they are harmless to test, since a store
+    root that exists on disk necessarily has components the filesystem already accepted.
+
+    This is a cheap pre-check so an un-writable proof is skipped before a symlink or a calendar
+    round-trip is spent on it; :func:`_place_proof` remains the authoritative backstop for any limit
+    this pre-check does not model (a smaller NAME_MAX, name-inflating filesystems like eCryptfs).
     """
     try:
-        return len(os.fsencode(out_ots_path.name)) <= _NAME_MAX_BYTES
+        parts = out_ots_path.parts
+        if out_ots_path.anchor:
+            parts = parts[1:]  # skip the root anchor ('/'), which is not a name
+        return all(len(os.fsencode(part)) <= _NAME_MAX_BYTES for part in parts)
     except (ValueError, TypeError):  # pragma: no cover - defensive
         return False
+
+
+def _staging_link_error(exc: OSError, real_path: Path) -> OtsError:
+    """Classify a failure to create a staging symlink for ``real_path``.
+
+    ENAMETOOLONG is permanent **for this file** (the OS refuses to record a link to a path this
+    long), so it becomes :class:`OtsPathError` and the caller skips the one file. Every other
+    ``OSError`` — a read-only or full proof store, a permissions problem on the staging dir — is
+    transient and must stay retryable, so the file is left ``pending``.
+    """
+    msg = f"cannot create the stamp staging link for {real_path}: {exc}"
+    if exc.errno == errno.ENAMETOOLONG:
+        return OtsPathError(msg)
+    return OtsError(msg)
+
+
+def _prepare_staging_dir(staging_dir: Path) -> None:
+    """Create the shared staging dir, mapping any failure to a **transient** :class:`OtsError`.
+
+    The staging dir is shared by every file in the store, so a failure here says nothing about any
+    individual file's path: classifying it permanent would drop the whole pending set to ``none``
+    over an un-writable (but fixable) proof volume. Transient ⇒ everything stays ``pending``.
+    """
+    try:
+        staging_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise OtsError(f"cannot prepare the stamp staging dir {str(staging_dir)!r}: {exc}") from exc
 
 
 def _place_proof(staged_ots: Path, out_ots_path: Path) -> None:
@@ -231,12 +269,17 @@ def stamp_via_symlink(
             f"proof output name too long to store "
             f"({len(os.fsencode(out_ots_path.name))} bytes > {_NAME_MAX_BYTES}): {out_ots_path!r}"
         )
-    staging_dir.mkdir(parents=True, exist_ok=True)
+    _prepare_staging_dir(staging_dir)
 
     link = staging_dir / uuid.uuid4().hex
     staged_ots = link.with_name(link.name + ".ots")
     try:
-        link.symlink_to(real_path)
+        try:
+            link.symlink_to(real_path)
+        except OSError as exc:
+            # Never let a raw OSError out: the caller classifies stamp failures by exception type,
+            # and a raw PermissionError would escape its per-file handling and abort the whole pass.
+            raise _staging_link_error(exc, real_path) from exc
         args = ["stamp"]
         for cal in calendars:
             args += ["-c", cal]
@@ -279,7 +322,9 @@ def stamp_batch_via_symlink(
     if not pairs:
         return []
     staging_dir = Path(staging_dir)
-    staging_dir.mkdir(parents=True, exist_ok=True)
+    # A staging dir we cannot create fails the whole call transiently (OtsError): no member is
+    # symlinked, nothing is submitted, and the caller leaves every file `pending` for retry.
+    _prepare_staging_dir(staging_dir)
 
     # Parallel to ``pairs``: (symlink, staged .ots) for a member we submit, or ``None`` for one whose
     # proof output name can't be written — it is neither symlinked nor sent to the calendar. Such a
@@ -293,7 +338,15 @@ def stamp_batch_via_symlink(
                 links.append(None)
                 continue
             link = staging_dir / uuid.uuid4().hex
-            link.symlink_to(real)
+            try:
+                link.symlink_to(real)
+            except OSError:
+                # One member we could not stage (an un-writable staging dir, a path the OS refuses).
+                # Drop it from the submission and leave its result ``False`` — the caller's
+                # single-file fallback re-raises the properly classified error for this one file.
+                # A raw OSError here would abort the batch AND the caller's whole stamp pass.
+                links.append(None)
+                continue
             links.append((link, link.with_name(link.name + ".ots")))
 
         submit = [entry for entry in links if entry is not None]

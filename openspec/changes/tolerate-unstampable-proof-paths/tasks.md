@@ -3,9 +3,10 @@
 ## 1. Guard the proof write (ots.py)
 - [x] 1.1 Add `OtsPathError(OtsError)` — the proof output path cannot be written (ENAMETOOLONG /
   un-writable destination); a *permanent* condition, distinct from a transient calendar failure.
-- [x] 1.2 Add `_proof_output_writable(out_ots_path) -> bool` — the final component's `os.fsencode`
-  byte length must be `<= _NAME_MAX_BYTES` (255). A cheap pre-check so an un-writable proof is
-  skipped before a symlink or calendar round-trip is spent.
+- [x] 1.2 Add `_proof_output_writable(out_ots_path) -> bool` — **every** component's `os.fsencode`
+  byte length must be `<= _NAME_MAX_BYTES` (255), not just the final `.ots` name: an overlong parent
+  directory is equally un-writable. A cheap pre-check so an un-writable proof is skipped before a
+  symlink or calendar round-trip is spent.
 - [x] 1.3 Add `_place_proof(staged_ots, out_ots_path)` — `mkdir(parents=True)` + `os.replace`,
   raising `OtsPathError` **only** for `errno.ENAMETOOLONG` (permanent) and a generic `OtsError` for
   every other `OSError` (full/read-only store, cross-device, I/O — transient, left `pending`).
@@ -18,8 +19,9 @@
 ## 2. Permanent skip, not perpetual retry (proofs.py)
 - [x] 2.1 In `stamp_pending`, catch `ots.OtsPathError` from the single-file fallback *before* the
   generic `ots.OtsError`: warn, count it, set `entry.ots_state = 'none'` and clear `entry.ots_path`
-  so a normal scan does not re-queue and re-fail it every pass. A generic `OtsError` still leaves the
-  file `pending`.
+  **and `entry.ots_stamped_at`** (no stamp time may survive without a proof) so a normal scan does
+  not re-queue and re-fail it every pass, and the panel claims nothing it cannot back. The monitored
+  `status` is untouched. A generic `OtsError` still leaves the file `pending`.
 - [x] 2.2 Emit one summary `WARNING` naming the count of skipped-unwritable files per collection.
 
 ## 3. Tests & verification
@@ -35,6 +37,37 @@
 - [x] 3.5 Unit: `_place_proof` on a non-ENAMETOOLONG `OSError` (EROFS) raises a plain `OtsError`,
   NOT `OtsPathError`; and `stamp_pending` under a read-only store leaves every file `pending`, never
   `none` (guards against silently dropping recoverable proofs).
-- [x] 3.6 `PYTHONPATH=. .venv/bin/pytest tests/test_ots.py -q` — 38 passed, 2 skipped.
-- [x] 3.7 Full suite `PYTHONPATH=. .venv/bin/pytest -q` — 143 passed, 2 skipped; `ruff check` clean.
+- [x] 3.6 `PYTHONPATH=. .venv/bin/pytest tests/test_ots.py -q` — 43 passed, 2 skipped.
+- [x] 3.7 Full suite `PYTHONPATH=. .venv/bin/pytest -q` — 262 passed, 2 skipped; `ruff check src tests` clean.
 - [x] 3.8 `openspec validate tolerate-unstampable-proof-paths --strict` passes.
+
+## 4. Post-audit hardening (adversarial review of the implementation)
+- [x] 4.1 `ots.py`: guard the staging-dir `mkdir` (`_prepare_staging_dir`) and the staging-symlink
+  creation in **both** `stamp_via_symlink` and `stamp_batch_via_symlink`. A raw `PermissionError` /
+  `OSError` from an un-writable or full proof store escaped `stamp_pending`'s per-file handling and
+  aborted the whole pass, later chunks included. A staging-dir failure is always transient
+  (`OtsError`, everything stays `pending` — it says nothing about any one file); a symlink failure is
+  transient too except `ENAMETOOLONG`, which is permanent for that one file (`OtsPathError`). In the
+  batch API a per-member symlink failure leaves that member `False` and the rest proceed.
+- [x] 4.2 `proofs.py`: wrap the batched `stamp_batch_via_symlink` call so a batch-level `OtsError`
+  degrades to the per-file fallback loop (`outcomes = [False] * len(chunk)`) instead of aborting the
+  remaining chunks or propagating to the scan.
+- [x] 4.3 `proofs.py`: the permanent-skip branch also clears `entry.ots_stamped_at` — a file renamed
+  onto an un-writable path after an earlier stamp kept the old content's stamp time with no proof,
+  which the panel renders as trust metadata.
+- [x] 4.4 `ots.py`: `_proof_output_writable` checks every component of the output path, so an
+  overlong **parent directory** is skipped up front instead of burning a batch calendar round-trip
+  plus a single-file retry before `_place_proof` classifies it. `_place_proof` stays the backstop.
+- [x] 4.5 Regression: `test_stamp_pending_symlink_failure_leaves_files_pending` — `os.symlink`
+  raising `PermissionError` never escapes `stamp_pending`; every file stays `pending` (never `none`),
+  nothing is submitted to a calendar.
+- [x] 4.6 Regression: `test_stamp_pending_staging_dir_failure_does_not_abort_later_chunks` — an
+  un-creatable staging dir over 3 chunks still walks all 5 files (one single-file fallback each) and
+  leaves them all `pending`, without raising.
+- [x] 4.7 Regression: `test_permanent_skip_clears_stamp_time_and_keeps_status` — a row with a
+  populated `ots_stamped_at` that takes the permanent skip ends `ots_state='none'`, `ots_path=None`,
+  `ots_stamped_at=None`, and its monitored `status` unchanged.
+- [x] 4.8 Regression: `test_proof_output_writable_rejects_overlong_parent_component` and
+  `test_stamp_batch_skips_overlong_parent_dir_before_any_symlink` — an overlong parent component
+  (short final name) is skipped before any symlink or calendar submission; peers still stamp.
+- [x] 4.9 All five new tests verified failing against the pre-fix code, passing after.
