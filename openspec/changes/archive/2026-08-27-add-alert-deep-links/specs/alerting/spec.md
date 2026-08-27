@@ -87,6 +87,37 @@ it properly means per-collection sharing or recipient-to-user mapping, which is 
 - **WHEN** an operator configures email recipients for a collection in `multi` mode
 - **THEN** the panel SHALL indicate that the review link is actionable only by the collection's owner
 
+### Requirement: Untrusted alert content SHALL be escaped for the context it is rendered into
+
+An alert's collection name, summary, and affected paths SHALL be escaped for the context each
+channel renders them into, and the link SHALL be attribute-escaped where it is emitted as an HTML
+`href`. **File paths are attacker-influenced**: anyone able to create a file inside a watched
+directory chooses a string that Cairn then places in an outbound message. A path is data, never
+markup.
+
+#### Scenario: A path containing HTML metacharacters is escaped
+
+- **WHEN** an alert's paths include a filename containing `<`, `>`, `&`, or `"` (for example
+  `<img src=x onerror=alert(1)>.txt`)
+- **THEN** the HTML part of the email SHALL render it as literal text, not as markup
+
+#### Scenario: The link is attribute-escaped in the href
+
+- **WHEN** the HTML part emits the review link as an anchor
+- **THEN** the URL SHALL be escaped for an HTML attribute context
+
+#### Scenario: A URL that cannot be encoded into a header does not lose the channel
+
+- **WHEN** a channel would place the link in an HTTP header
+- **THEN** the URL SHALL already be ASCII-normalized, and if it still cannot be encoded the header
+  SHALL be omitted and the alert SHALL still be sent
+
+#### Scenario: Header-bound values cannot inject headers
+
+- **WHEN** a link or collection name is placed in a message header or an ntfy `Click` header
+- **THEN** the resulting message SHALL contain no injected header, and a value that cannot be
+  safely represented SHALL be omitted rather than emitted
+
 ## MODIFIED Requirements
 
 ### Requirement: Pluggable channels with email active, others scaffolded
@@ -135,34 +166,3 @@ information.
 
 - **WHEN** a corpus's `alert_json` enables some channels and disables others
 - **THEN** the dispatch SHALL send only to the enabled channels
-
-### Requirement: Untrusted alert content SHALL be escaped for the context it is rendered into
-
-An alert's collection name, summary, and affected paths SHALL be escaped for the context each
-channel renders them into, and the link SHALL be attribute-escaped where it is emitted as an HTML
-`href`. **File paths are attacker-influenced**: anyone able to create a file inside a watched
-directory chooses a string that Cairn then places in an outbound message. A path is data, never
-markup.
-
-#### Scenario: A path containing HTML metacharacters is escaped
-
-- **WHEN** an alert's paths include a filename containing `<`, `>`, `&`, or `"` (for example
-  `<img src=x onerror=alert(1)>.txt`)
-- **THEN** the HTML part of the email SHALL render it as literal text, not as markup
-
-#### Scenario: The link is attribute-escaped in the href
-
-- **WHEN** the HTML part emits the review link as an anchor
-- **THEN** the URL SHALL be escaped for an HTML attribute context
-
-#### Scenario: A URL that cannot be encoded into a header does not lose the channel
-
-- **WHEN** a channel would place the link in an HTTP header
-- **THEN** the URL SHALL already be ASCII-normalized, and if it still cannot be encoded the header
-  SHALL be omitted and the alert SHALL still be sent
-
-#### Scenario: Header-bound values cannot inject headers
-
-- **WHEN** a link or collection name is placed in a message header or an ntfy `Click` header
-- **THEN** the resulting message SHALL contain no injected header, and a value that cannot be
-  safely represented SHALL be omitted rather than emitted
