@@ -102,6 +102,53 @@ def test_normalize_rejects(raw):
 
 @pytest.mark.parametrize(
     "raw",
+    [
+        "https://exa%mple.com",     # a percent-escape is not legal in a host
+        "https://%0d%0a.example",   # percent-encoded CR/LF smuggled past the literal-control check
+        "https://-",                # a label may not start or end with a hyphen
+        "https://.",                # empty labels
+        "https://.example.com",     # leading empty label
+        "https://example.com.",     # trailing dot
+        "https://exam ple.com",     # (whitespace — caught earlier, asserted here for completeness)
+        "https://a..b",
+        "https://" + "a" * 64 + ".com",  # label longer than 63 characters
+        "https://[::zz]:8000",      # not a valid IPv6 literal
+    ],
+)
+def test_normalize_rejects_malformed_hosts(raw):
+    """A malformed host is a dead link, and a dead link is a silently useless alert.
+
+    Nothing dereferences this URL, so these are not security holes — they are typos that used to
+    sail through the panel-save boundary whose entire job is to catch a typo while a human is
+    watching, then surface months later as a "review your missing files" link that goes nowhere.
+    """
+    from src.services.panel_url import normalize_public_url
+
+    with pytest.raises(ValueError):
+        normalize_public_url(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("http://localhost:8000", "http://localhost:8000"),  # single-label: the spec requires it
+        ("http://cairn", "http://cairn"),
+        ("http://127.0.0.1", "http://127.0.0.1"),
+        ("http://[::1]:8000", "http://[::1]:8000"),
+        ("http://[2001:db8::1]", "http://[2001:db8::1]"),
+        ("https://cairn.example.com", "https://cairn.example.com"),
+        ("https://my-panel.example.co.uk/cairn", "https://my-panel.example.co.uk/cairn"),
+    ],
+)
+def test_normalize_still_accepts_every_legitimate_host_shape(raw, expected):
+    """Host validation must not narrow what the spec says is valid — LAN addresses included."""
+    from src.services.panel_url import normalize_public_url
+
+    assert normalize_public_url(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
     ["https://cäirn.example.com", "https://cairn.example.com/é", "https://例え.テスト/x"],
 )
 def test_normalize_result_is_pure_ascii(raw):

@@ -546,23 +546,39 @@ async def scan_collection(
             if summary.modified:
                 parts.append(f"{summary.modified} modified")
 
-            # The deep link is a convenience; being told at all is the product. So resolving the
-            # effective settings and building the review URL sit in their OWN guard: whatever goes
-            # wrong here (a broken session, a corrupt stored public_url, a link-builder bug) yields
-            # a link-free alert that is still constructed and still dispatched, with env-derived
-            # settings as the transport fallback. The enclosing block protects the *scan*; this one
-            # protects the *alert*.
+            # The deep link is a convenience; being told at all is the product. So the two things
+            # on the way to it — resolving the effective settings, then building the URL — get
+            # SEPARATE guards, and neither may take the other down with it. The enclosing block
+            # protects the *scan*; these two protect the *alert*.
+            #
+            # Guard 1 — the settings overlay. What it returns is the alert's *transport* config,
+            # not just the link's address: a deployment that configures SMTP from the panel keeps
+            # host/user/password in `app_settings`, and the env-only fallback has no smtp_host at
+            # all. So the fallback is used only when the overlay itself fails; a successful overlay
+            # must survive anything that goes wrong afterwards, or a cosmetic link bug would
+            # downgrade the settings until SmtpNotifier raises "SMTP host is not configured" and
+            # the one channel actually in production silently sends nothing.
             eff_settings = get_settings()
+            try:
+                # Rebound only on success, so a raise leaves the env-derived value standing.
+                eff_settings = await app_settings.effective_settings(session, eff_settings)
+            except Exception:
+                logging.getLogger("cairn.scanner").exception(
+                    "resolving effective settings failed for collection %s; "
+                    "falling back to environment settings",
+                    collection.id,
+                )
+
+            # Guard 2 — the link itself, around the synchronous builder only. A corrupt stored
+            # public_url or a builder bug costs a click, never the alert.
             review_url: str | None = None
             try:
                 from .panel_url import panel_link
 
-                eff_settings = await app_settings.effective_settings(session, eff_settings)
                 review_url = panel_link(
                     eff_settings.public_url, f"/collection/{collection.id}/review"
                 )
             except Exception:
-                eff_settings = get_settings()
                 review_url = None
                 logging.getLogger("cairn.scanner").exception(
                     "building the alert review link failed for collection %s; "

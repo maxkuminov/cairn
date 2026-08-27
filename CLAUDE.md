@@ -127,8 +127,9 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > Notifications → Panel address**, admin-only, stored in `app_settings` with the usual DB-wins-over-env
 > overlay; saving empty *deletes* the row so the env value reappears). The grammar and the single link
 > builder live in `src/services/panel_url.py` (`normalize_public_url` / `panel_link`) — never
-> string-concatenate a URL at a call site; the value is normalized to pure ASCII because it goes
-> verbatim into ntfy's `Click` header. Unset ⇒ `url=None` and every channel emits byte-identical
+> string-concatenate a URL at a call site; the value is normalized to pure ASCII (IDNA host,
+> percent-encoded path, RFC-1123 host syntax) so it is safe in an HTML `href` and in ntfy's `click`
+> field. Unset ⇒ `url=None` and every channel emits byte-identical
 > output to before. **Validation is fail-soft at load, fail-loud on save:** a bad `CAIRN_PUBLIC_URL`
 > is logged and treated as unset (raising in `get_settings()` would stop startup, scanning and every
 > alert over a cosmetic setting), while the panel refuses it inline; a stored override is
@@ -142,6 +143,22 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > disclosing existence) and alert recipients are arbitrary addresses, not Cairn users — so in `multi`
 > mode a non-owner recipient reaches "not found". Hinted in the collection alert-routing form;
 > mapping recipients to users is Phase-2 auth work, and weakening the scoping is the wrong trade.
+> **Post-audit hardening** (adversarial review of the implementation found four live
+> false-negative paths, all in the same shape — a detected incident committed, then the notification
+> silently swallowed by `dispatch`'s blanket `except`): (1) the settings-overlay load and the link
+> build now sit in **two separate** guards, because a deployment that configures SMTP *from the
+> panel* keeps host/user/password in `app_settings` — collapsing to env settings on a link failure
+> left `smtp_host=None` and the live email channel sent nothing. A successful overlay now survives a
+> link failure. (2) **ntfy now publishes a JSON body** (`{topic,title,message,priority,tags,click}`)
+> instead of HTTP headers: httpx ASCII-encodes header values, so an ordinary collection name like
+> `Café` raised `UnicodeEncodeError` — not an `httpx.HTTPError`, so it escaped `send()` and the
+> notification was never sent. No user-influenced value rides in a header any more, so the encode
+> failure *and* the newline-injection vector are gone by construction, not by filter. (3) mail
+> headers (`Subject`/`From`/`To`) are control-character-sanitized — a CR/LF in a collection name or
+> a pasted recipient made `EmailMessage` raise and killed the mail on the active channel; non-ASCII
+> is left alone (RFC 2047 handles it). (4) `normalize_public_url` validates host syntax (RFC-1123
+> labels or an IP literal), so `https://exa%mple.com`, `https://-` and `https://.` no longer pass as
+> valid and become dead links.
 > Deploy auth caveat: DESIGN says "app owns its own auth, no OAuth proxy" — that only holds in
 > `multi` mode (Phase 2). In **single mode the panel has no login wall**, so the homelab deploy
 > fronts it with Traefik `chain-oauth@file` (Google OAuth), with `/healthz` kept public on a

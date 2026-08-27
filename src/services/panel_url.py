@@ -17,6 +17,8 @@ This module imports nothing from the rest of the app: it is a leaf, safe to impo
 
 from __future__ import annotations
 
+import ipaddress
+import re
 from urllib.parse import quote, urlsplit
 
 # Characters that are never legal in a URI *and* that break the contexts we embed the URL into:
@@ -29,6 +31,23 @@ _FORBIDDEN_CHARS = frozenset('"\'<>`\\^{}|')
 # Sub-delims + unreserved + "/:@", plus "%" so existing percent-escapes are not double-encoded.
 _PATH_SAFE = "/%:@-._~!$&()*+,;="
 
+# One DNS label: 1-63 LDH characters that neither start nor end with a hyphen (RFC 1123).
+_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z", re.ASCII)
+
+
+def _is_dns_name(host: str) -> bool:
+    """True when ``host`` is a syntactically valid DNS reg-name.
+
+    Single-label names are valid on purpose: ``http://localhost:8000`` or ``http://cairn:8000`` is
+    genuinely the address some operators reach the panel at, and the spec requires those. An IPv4
+    literal is a special case of this grammar (every octet is a legal label), so it needs no
+    separate branch. A trailing dot, a leading dot, or any empty label yields an empty label and is
+    rejected.
+    """
+    if not host or len(host) > 253:
+        return False
+    return all(_LABEL_RE.fullmatch(label) for label in host.split("."))
+
 
 def normalize_public_url(value: str | None) -> str | None:
     """Validate and canonicalize the panel's public base URL.
@@ -37,9 +56,11 @@ def normalize_public_url(value: str | None) -> str | None:
     error). Otherwise returns a pure-ASCII, trailing-slash-free base URL, or raises ``ValueError``
     with a short human-readable reason — the panel shows that reason to an admin verbatim.
 
-    Accepts ``http``/``https``, a non-empty host, an optional port, and an optional path prefix
-    (``https://example.com/cairn`` for a sub-path reverse proxy). Rejects any other scheme,
-    userinfo, a query string, a fragment, and ASCII control characters or whitespace.
+    Accepts ``http``/``https``, a syntactically valid host (a DNS name — single-label names such
+    as ``localhost`` included — an IPv4 literal, or a bracketed IPv6 literal), an optional port,
+    and an optional path prefix (``https://example.com/cairn`` for a sub-path reverse proxy).
+    Rejects any other scheme, userinfo, a query string, a fragment, a malformed host, and ASCII
+    control characters or whitespace.
     """
     if value is None:
         return None
@@ -84,6 +105,19 @@ def normalize_public_url(value: str | None) -> str | None:
             host = host.encode("idna").decode("ascii")
         except (UnicodeError, ValueError) as exc:
             raise ValueError(f"host cannot be IDNA-encoded to ASCII ({exc})") from exc
+
+    # Nothing dereferences this URL, so a malformed host is not a security hole — it is a dead
+    # link that silently sends the operator nowhere. Checking the syntax is what makes the
+    # fail-loud panel-save boundary earn its keep: a typo like "https://exa%mple.com" or
+    # "https://-" is refused while a human is watching, instead of surfacing months later as an
+    # alert whose one-click review link goes nowhere.
+    if ":" in host:  # urlsplit strips the brackets off an IPv6 literal, so a colon identifies one
+        try:
+            ipaddress.ip_address(host)
+        except ValueError as exc:
+            raise ValueError(f"invalid IPv6 address in brackets ({exc})") from exc
+    elif not _is_dns_name(host):
+        raise ValueError("host must be a domain name, an IPv4 address, or a bracketed IPv6 address")
 
     host_part = f"[{host}]" if ":" in host else host  # re-bracket an IPv6 literal
     netloc = host_part if port is None else f"{host_part}:{port}"

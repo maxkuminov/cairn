@@ -602,8 +602,32 @@ def test_smtp_with_link_is_multipart_with_anchor(cairn_env, monkeypatch):
     assert "Review in Cairn" in html_part
 
 
-def test_smtp_without_link_is_single_plaintext_part(cairn_env, monkeypatch):
-    """The byte-identical-when-unconfigured guarantee: no multipart, previous wording."""
+# The complete wire form of a link-free alert, pinned byte for byte. Every part of it is
+# deterministic: the fixture fixes From/To, the alert fixes the Subject and body, and this code
+# sets no Date or Message-ID (smtplib.send_message adds those to a *copy* it serializes, leaving
+# the message object we capture untouched). Asserting on substrings let wording, line endings,
+# structure and transfer encoding all drift while the test kept passing — and "byte-identical to
+# what deployments that never configure public_url receive today" is a guarantee only a byte
+# comparison can actually make.
+_LINK_FREE_MESSAGE = (
+    b"Subject: Cairn: 1 missing in Photos\n"
+    b"From: cairn@example.com\n"
+    b"To: ops@example.com\n"
+    b'Content-Type: text/plain; charset="utf-8"\n'
+    b"Content-Transfer-Encoding: 7bit\n"
+    b"MIME-Version: 1.0\n"
+    b"\n"
+    b"Cairn detected 1 missing in collection 'Photos'.\n"
+    b"\n"
+    b"Affected files:\n"
+    b"  - a/lost.jpg\n"
+    b"\n"
+    b"Review and acknowledge in the Cairn panel.\n"
+)
+
+
+def test_smtp_without_link_is_byte_identical_to_the_pre_link_message(cairn_env, monkeypatch):
+    """The byte-identical-when-unconfigured guarantee, asserted as bytes rather than vibes."""
     from src.notify.base import Alert
 
     msg = _send_email(
@@ -611,11 +635,51 @@ def test_smtp_without_link_is_single_plaintext_part(cairn_env, monkeypatch):
         Alert(collection_name="Photos", summary="1 missing", paths=["a/lost.jpg"]),
     )
 
+    assert msg.as_bytes() == _LINK_FREE_MESSAGE
+    # Spelled out too, so a future failure reads as "the shape changed", not just a byte diff.
     assert not msg.is_multipart()
     assert msg.get_content_type() == "text/plain"
-    body = msg.get_content()
-    assert "Review and acknowledge in the Cairn panel." in body
-    assert "http" not in body
+    assert msg.get_content_charset() == "utf-8"
+    assert msg["Content-Transfer-Encoding"] == "7bit"
+
+
+def test_smtp_crlf_in_collection_name_still_sends(cairn_env, monkeypatch):
+    """A newline in a name must cost a tidy subject line, never the alert.
+
+    ``EmailMessage`` raises ``ValueError`` on a header value containing CR/LF, and ``_build_message``
+    runs outside ``send()``'s try — so that escaped the notifier, dispatch swallowed it, and the
+    email about the operator's missing files was never sent. ``create_collection`` only ``.strip()``s
+    a name, so a CLI-created one can carry a newline.
+    """
+    from src.notify.base import Alert
+
+    msg = _send_email(
+        monkeypatch,
+        Alert(
+            collection_name="Photos\r\nBcc: attacker@example.com",
+            summary="1 missing",
+            paths=["a/lost.jpg"],
+        ),
+    )
+
+    assert msg is not None  # it was actually handed to smtplib
+    subject = msg["Subject"]
+    assert "\r" not in subject and "\n" not in subject
+    assert subject == "Cairn: 1 missing in Photos Bcc: attacker@example.com"
+    assert msg["Bcc"] is None  # collapsed into the subject, never a header of its own
+
+
+def test_smtp_non_ascii_collection_name_survives_intact(cairn_env, monkeypatch):
+    """Sanitizing controls must not mangle a legitimate name — Python RFC 2047-encodes it."""
+    from src.notify.base import Alert
+
+    msg = _send_email(
+        monkeypatch,
+        Alert(collection_name="Café", summary="1 missing", paths=["a/lost.jpg"]),
+    )
+
+    assert msg["Subject"] == "Cairn: 1 missing in Café"
+    assert "Caf=C3=A9" in msg.as_string() or "?utf-8?" in msg.as_string().lower()
 
 
 def test_smtp_escapes_paths_and_name_in_html_only(cairn_env, monkeypatch):
@@ -704,31 +768,73 @@ def test_webhook_includes_url_only_when_linked(http_calls):
     assert "url" not in payload
 
 
-def test_ntfy_click_header_only_when_linked(http_calls):
+def test_ntfy_click_target_only_when_linked(http_calls):
+    """The link is published as ntfy's ``click`` field (JSON body, not an HTTP header)."""
     from src.notify.ntfy import NtfyNotifier
 
     notifier = NtfyNotifier(topic="cairn", server="https://ntfy.sh")
 
     asyncio.run(notifier.send(_alert(_REVIEW_URL)))
-    _, _, kwargs = http_calls[0]
-    assert kwargs["headers"]["Click"] == _REVIEW_URL
-    assert _REVIEW_URL.encode("utf-8") in kwargs["content"]
+    _, url, kwargs = http_calls[0]
+    assert url == "https://ntfy.sh"  # JSON publishing posts to the server root
+    payload = kwargs["json"]
+    assert payload["topic"] == "cairn"
+    assert payload["click"] == _REVIEW_URL
+    assert _REVIEW_URL in payload["message"]
+    # No user-influenced value goes anywhere near a header any more.
+    assert not kwargs.get("headers")
 
     asyncio.run(notifier.send(_alert()))
-    assert "Click" not in http_calls[1][2]["headers"]
+    assert "click" not in http_calls[1][2]["json"]
 
 
-def test_ntfy_non_ascii_url_still_sends_without_click_header(http_calls):
+def test_ntfy_non_ascii_url_still_sends_without_click_target(http_calls):
     """Regression for the ntfy-only operator: an unencodable URL must not cost the whole alert."""
     from src.notify.ntfy import NtfyNotifier
 
     notifier = NtfyNotifier(topic="cairn", server="https://ntfy.sh")
-    # normalize_public_url would never produce this, but the header must not be the thing that
-    # raises if one ever reaches here.
+    # normalize_public_url would never produce this, but nothing on the send path may raise on it.
     asyncio.run(notifier.send(_alert("https://exämple.com/collection/7/review")))
 
     assert len(http_calls) == 1  # the notification was still attempted
-    assert "Click" not in http_calls[0][2]["headers"]
+    assert "click" not in http_calls[0][2]["json"]
+
+
+def test_ntfy_unicode_collection_name_still_sends(http_calls):
+    """``Café`` is an ordinary collection name, not an attack.
+
+    With the title in an HTTP header, httpx's ASCII encode raised ``UnicodeEncodeError`` — not an
+    ``httpx.HTTPError``, so it escaped ``send()`` and dispatch swallowed it: no notification at all.
+    """
+    from src.notify.base import Alert
+    from src.notify.ntfy import NtfyNotifier
+
+    notifier = NtfyNotifier(topic="cairn", server="https://ntfy.sh")
+    asyncio.run(
+        notifier.send(Alert(collection_name="Café", summary="1 missing", paths=["a/lost.jpg"]))
+    )
+
+    assert len(http_calls) == 1, "the notification must still be sent"
+    # And the name survives intact rather than being degraded to ASCII.
+    assert http_calls[0][2]["json"]["title"] == "Cairn: 1 missing in Café"
+
+
+def test_ntfy_newline_in_collection_name_cannot_inject_a_header(http_calls):
+    """A CR/LF in the name lands in a JSON string, where it is data and can inject nothing."""
+    from src.notify.base import Alert
+    from src.notify.ntfy import NtfyNotifier
+
+    notifier = NtfyNotifier(topic="cairn", server="https://ntfy.sh")
+    asyncio.run(
+        notifier.send(
+            Alert(collection_name="Photos\r\nPriority: 1", summary="1 missing", paths=["x"])
+        )
+    )
+
+    assert len(http_calls) == 1
+    _, _, kwargs = http_calls[0]
+    assert not kwargs.get("headers")  # nothing user-influenced is a header, so nothing to inject
+    assert kwargs["json"]["priority"] == 4  # unchanged by the smuggled "Priority: 1"
 
 
 def test_signal_appends_link_when_present(http_calls):

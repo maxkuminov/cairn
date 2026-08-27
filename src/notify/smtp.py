@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import re
 import smtplib
 from email.message import EmailMessage
 from typing import TYPE_CHECKING
@@ -45,6 +46,25 @@ _BUTTON_STYLE = (
 )
 _PATH_STYLE = "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px"
 _MUTED_STYLE = "color:#71717a;font-size:13px"
+
+# A run of C0 controls or DEL. `EmailMessage` refuses a header value containing CR or LF outright
+# ("Header values may not contain linefeed or carriage return characters") — and it raises
+# ValueError, not NotifierError, from `_build_message`, which sits OUTSIDE send()'s try. That
+# escapes the notifier and is swallowed by dispatch's blanket except: logged at WARNING, email
+# never sent, on the one channel actually in production. Collection names are operator-supplied
+# and only `.strip()`ed on creation, so a stray newline in a name is reachable, and it would cost
+# the operator the alert about their missing files. Collapse instead of refuse: a slightly odd
+# subject line delivers, a raised header does not.
+_HEADER_CONTROLS = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _header_value(value: str) -> str:
+    """Make ``value`` safe to interpolate into a mail header.
+
+    Non-ASCII is deliberately left intact — ``EmailMessage`` RFC 2047-encodes it correctly, and
+    mangling it would corrupt a legitimate collection name like ``Fotos Föhr``.
+    """
+    return _HEADER_CONTROLS.sub(" ", value).strip()
 
 
 class SmtpNotifier:
@@ -114,9 +134,13 @@ class SmtpNotifier:
 
     def _build_message(self, alert: Alert) -> EmailMessage:
         msg = EmailMessage()
-        msg["Subject"] = f"Cairn: {alert.summary} in {alert.collection_name}"
-        msg["From"] = self.settings.smtp_from or "cairn@localhost"
-        msg["To"] = ", ".join(self.recipients)
+        # Every interpolated value here is operator- or scanner-supplied and unvalidated, so all of
+        # them go through _header_value: a header that cannot be built is a mail that is not sent.
+        summary = _header_value(alert.summary)
+        name = _header_value(alert.collection_name)
+        msg["Subject"] = f"Cairn: {summary} in {name}"
+        msg["From"] = _header_value(self.settings.smtp_from or "cairn@localhost")
+        msg["To"] = ", ".join(_header_value(r) for r in self.recipients)
 
         msg.set_content(self._plaintext(alert))
         if alert.url:

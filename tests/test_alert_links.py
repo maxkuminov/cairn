@@ -164,11 +164,16 @@ async def test_stored_override_wins_for_the_alert_link(cairn_env, monkeypatch):
 
 @pytest.mark.parametrize("target", ["panel_link", "effective_settings"])
 async def test_link_failure_still_dispatches_a_link_free_alert(cairn_env, monkeypatch, target):
-    """Blow up the link path; the alert must still go out exactly once, with ``url=None``.
+    """Blow up the link path; the alert must still go out exactly once.
 
     Both halves of that path are exercised: the link builder itself and the settings overlay it
     reads the address from. Either failing is a bug in a convenience feature — it must never
     degrade into "the operator was never told a file went missing".
+
+    The two halves now degrade *independently*, which is the whole point of the split guards, so
+    they degrade differently: a raising builder leaves no link at all, while a raising overlay
+    falls back to the env-derived settings and still produces a correct link from
+    ``CAIRN_PUBLIC_URL``. Neither ever produces a guessed or relative address.
     """
     from src.services import app_settings, panel_url
 
@@ -193,7 +198,11 @@ async def test_link_failure_still_dispatches_a_link_free_alert(cairn_env, monkey
     summary = await _scan(cid)
 
     assert len(calls) == 1, "a failing link must not suppress the alert"
-    assert calls[0].url is None
+    if target == "panel_link":
+        assert calls[0].url is None
+    else:
+        # The overlay is the only casualty; the env value is still a configured, correct address.
+        assert calls[0].url == f"{PUBLIC_URL}/collection/{cid}/review"
     assert calls[0].paths == ["drop.txt"]
     # The run still reaches a terminal state and reports the detection accurately.
     assert summary.result in ("ok", "partial")
@@ -205,6 +214,66 @@ async def test_link_failure_still_dispatches_a_link_free_alert(cairn_env, monkey
     async with get_sessionmaker()() as s:
         results = list(await s.scalars(select(Run.result).order_by(Run.id)))
     assert results and all(r in ("ok", "partial") for r in results)
+
+
+async def test_link_failure_keeps_the_db_derived_transport_settings(cairn_env, monkeypatch):
+    """A link failure must not downgrade the settings the alert is *sent with*.
+
+    This deployment configures SMTP from the panel: host/user/password live in ``app_settings``,
+    and the env fallback has no ``smtp_host`` at all. When one guard covered both the overlay and
+    the link, a raising ``panel_link`` reset ``eff_settings`` back to ``get_settings()`` — so
+    ``SmtpNotifier.send`` raised "SMTP host is not configured", dispatch swallowed it, and a
+    cosmetic link bug silently suppressed the email on the only channel in production. The overlay
+    succeeded; its result must survive.
+    """
+    from src.database import get_sessionmaker
+    from src.notify import dispatch as dispatch_mod
+    from src.services import app_settings, panel_url
+
+    monkeypatch.delenv("CAIRN_SMTP_HOST", raising=False)
+
+    async with get_sessionmaker()() as s:
+        await app_settings.save_smtp(
+            s,
+            host="mail.db.example.com",
+            port=2525,
+            starttls=False,
+            user="cairn",
+            from_="cairn@db.example.com",
+            provider="local",
+            password="s3cret",
+        )
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("link builder exploded")
+
+    monkeypatch.setattr(panel_url, "panel_link", boom)
+
+    calls: list = []
+
+    async def fake_dispatch(alert, collection, settings):
+        calls.append((alert, settings))
+        return {}
+
+    monkeypatch.setattr(dispatch_mod, "dispatch", fake_dispatch)
+
+    root = cairn_env / "dbsmtp"
+    root.mkdir()
+    (root / "keep.txt").write_text("keep")
+    (root / "drop.txt").write_text("bye")
+    cid = await _make_alerting_collection(root)
+    await _scan(cid)
+
+    (root / "drop.txt").unlink()
+    await _scan(cid)
+
+    assert len(calls) == 1, "a failing link must not suppress the alert"
+    alert, settings = calls[0]
+    assert alert.url is None
+    # The DB-derived transport config reached dispatch — not the env-only fallback, which has none.
+    assert settings.smtp_host == "mail.db.example.com"
+    assert settings.smtp_port == 2525
+    assert settings.smtp_password == "s3cret"
 
 
 # --- 8.13 POST /settings/panel-url ----------------------------------------------------------
