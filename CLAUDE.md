@@ -284,6 +284,23 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > only the status pill + button affordance changed. **No schema change.** Regression test in
 > `tests/test_panel.py`.
 
+> Un-writable proof paths (tolerate-unstampable-proof-paths): a proof filename that the store's
+> filesystem refuses (ext4 caps one path component at 255 **bytes**; multi-byte UTF-8 names + the
+> `.ots` suffix can exceed it — the 2026-07-07 Skate crash-loop) is **skipped per-file, never
+> batch-fatal**: the file is warned, counted, and dropped to `ots_state='none'` (`ots_path` and
+> `ots_stamped_at` cleared) so a normal scan never re-queues it; `stamp --all` may retry it cheaply.
+> Governing rule (module docstring, `src/services/ots.py`): **only a failure on the final proof
+> output path may be classified permanent (`OtsPathError`)** — every staging-side failure
+> (mkdir/symlink, any errno) is a transient `OtsError` that leaves files `pending` for the next
+> pass, cleanup only touches paths actually created and is `suppress(OSError)`-ed, and the
+> `_NAME_MAX_BYTES` pre-check measures only components Cairn creates below the proof-store root
+> (`store_root` threaded from `stamp_pending`), never the store root's own components — so an
+> over-limit component in an existing store root can't silently drop a whole collection to `none`.
+> A batch-level failure degrades to the per-file fallback and later chunks still run. Hardened over
+> three adversarial review rounds (commits 8d77a49, 31fed5b, 83097d3); the known follow-up — a
+> re-stamp can overwrite an existing proof for a *different* digest (`_place_proof` has no existence
+> check) — is GitHub #15, queued with the restore-digest fix (#21).
+
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
   Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).
