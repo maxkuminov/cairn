@@ -15,10 +15,13 @@ acknowledge every event belonging to the file: an open WORM `modified` event on 
 describes a different, still-unresolved condition, and clearing it would be a silent false negative
 on a change the operator has not seen.
 
-The acknowledgement SHALL be part of the scan's own transaction, so a failure to write it fails the
-scan's run in the ordinary way rather than leaving the datastore half-updated. It SHALL be issued in
-bounded batches rather than one statement per restored file, so a mass restore does not degrade the
-scan.
+The acknowledgement SHALL be written in the **same committed transaction as the restoration it
+follows from**: it SHALL be applied before the commit that persists that batch of restored files and
+their `restored` events, so no commit can ever leave a file recorded healthy while the alert that
+its absence raised is still open. A failure to write it SHALL therefore fail that batch too, and the
+scan's run SHALL finalize in the error state in the ordinary way rather than leaving the datastore
+half-updated. It SHALL be issued in bounded batches rather than one statement per restored file, so
+a mass restore does not degrade the scan.
 
 #### Scenario: A restored file's missing alert is closed
 
@@ -37,9 +40,16 @@ scan.
 - **THEN** only the restored file's `missing` events SHALL be acknowledged, and the other file's
   open `missing` event SHALL remain unacknowledged
 
+#### Scenario: A failed acknowledgement does not leave a committed half-update
+
+- **WHEN** the acknowledgement write fails for a batch of restored files
+- **THEN** that batch's restorations SHALL NOT be committed either — no file from it SHALL be left
+  recorded healthy with its `missing` alert still open — and the scan's run SHALL finalize in the
+  error state
+
 #### Scenario: A mass restore is acknowledged in batches
 
 - **WHEN** a scan restores more files than the datastore's bound-parameter limit allows in one
   statement
-- **THEN** the acknowledgement SHALL still be applied to all of them, in bounded batches, within the
-  scan's transaction
+- **THEN** the acknowledgement SHALL still be applied to all of them, in bounded batches, each batch
+  applied before the commit that persists the restorations it covers

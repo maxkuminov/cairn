@@ -13,9 +13,11 @@ that claim being over-stated by the UI in ways the backend never intended (root 
 - **`/verify` tells the operator a changed file's proof is "pending confirmation"** (#13). The
   route branches on the proof's `state` *before* asking why verification failed, so the exact event
   this product exists to detect — bytes no longer matching the notarized digest — is rendered as
-  "usually settles within a few hours". The same branch swallows the `OtsError` fallback, so an
-  unreachable block explorer is also reported as a young proof. This is the single most dangerous
-  string in the panel.
+  "usually settles within a few hours". The same branch catches an unreachable **Bitcoin node**,
+  which the CLI backend reports as an ordinary non-success return carrying the proof's own state; an
+  unreachable **explorer** takes the other wrong exit and renders a generic red "Could not verify".
+  Neither the backends nor the route distinguish *why*, and the same false negative is live in
+  `cairn verify` on the command line. This is the single most dangerous string in the panel.
 - **`/verify`'s "Recently anchored" list hardcodes the green "Anchored" badge on every row** (#19).
   The real per-file state is fetched and then discarded. The list is newest-first, so the
   *least*-confirmed proofs sit on top wearing a green pill. Observed live: every row green while
@@ -54,17 +56,37 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
 ## What Changes
 
 ### Verify path (#13, #19, #23, #34-part, #32-part)
-- **`VerifyResult` gains `digest_mismatch: bool = False`**, set at both mismatch sites in
-  `src/services/ots.py` (the file-digest-vs-proof mismatch and the Bitcoin merkle-root mismatch).
-- **`verify_run` tests `digest_mismatch` *before* the pending branch** and renders a failure card
-  whose copy states plainly that the bytes no longer match the notarized digest.
-- **The `OtsError` fallback stops inheriting `fe.ots_state`.** A transport failure (explorer or node
-  unreachable) is reported as *verification unavailable* — never as a proof that is merely young,
-  and never as a green verdict.
+- **`VerifyResult` gains four typed outcome fields** — `digest_mismatch` (the live digest is not the
+  one the proof commits to: *the file changed*), `proof_mismatch` (a Bitcoin attestation's
+  commitment is not the block's merkle root: *the proof or the block data is wrong*, which is not
+  evidence about the file), `transport_error` (the backend could not be reached: nothing was
+  established) and `inconclusive` (this backend cannot tell those apart). Reason and blame are
+  separate signals, so they are separate fields with separate copy.
+- **Every point where a backend swallows a network or subprocess failure now populates
+  `transport_error`.** The route's `except OtsError` was never the main path: `_verify_via_explorer`
+  returns an unreachable explorer as `verified=False, state="complete"`, and `_verify_via_cli`
+  returns a dead Bitcoin node as `state=<the proof's own state>` — which is how an unreachable node
+  renders as "pending confirmation" today.
+- **`verify_run` chooses the verdict by reason, in order**: live file unavailable → digest mismatch
+  → proof mismatch → verified → transport failure → inconclusive → genuinely pending → other.
+  Mismatch is tested *before* transport, so a mismatch established before the network failed is not
+  thrown away.
+- **A transport failure gets a fourth, neutral verdict style** ("Couldn't check right now"), not
+  red: an unreachable explorer is not evidence against the file, and crying wolf in red teaches the
+  operator to dismiss the red card that means a real mismatch.
+- **The node backend stops reading as "pending".** It cannot distinguish a mismatch from an
+  unanchored proof, so instead of guessing (a false alarm on the core signal) it returns
+  `inconclusive` and the panel names both possibilities.
+- **`src/cli.py`'s `verify` command branches in the same order.** `VerifyResult` has two consumers;
+  fixing only the panel leaves the identical false negative live on the command line.
 - **`partials/verify_results.html` renders `m.ots_badge(f.state, "sm")`** instead of the literal
   `"complete"`. (`state` is already in the row dict from `_anchored_view`.)
-- **`ots_badge`'s `"Incomplete"` becomes `"Pending confirmation"`**, so the badge, the tiles, the
-  `/verify` verdict and `/learn` all use the same two words for the same two states.
+- **The two not-yet-confirmed proof states get two names**: `pending` (queued locally, not yet
+  submitted) becomes **"Queued to stamp"** and `incomplete` (submitted, waiting on Bitcoin) becomes
+  **"Pending confirmation"**. Today the badge calls them "Pending" and "Incomplete" while every tile
+  *sums* them and calls the total "pending confirmation" — so a file that was never submitted is
+  reported as awaiting confirmation and a stuck queue hides behind the wording for a healthy young
+  proof. No summary adds them together any more.
 - **`verify_result.html` derives its closing "verified via" sentence from `verified_via`** rather
   than asserting "Verified by explorer lookup" regardless of the configured backend.
 - **`/verify` gets a real empty state** when nothing is anchored yet (today the empty state only
@@ -80,19 +102,31 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
 - **A fourth "New — watched, not yet baselined" tile**, so `Total ≠ OK + issues` stops being
   unexplained; **"Verified OK" is renamed "Matching baseline"**; **`attention` and `alert` get
   distinct icons** (they currently share one).
-- **The proof coverage claim becomes a ratio, not an assertion.** "all confirmed" is emitted only
-  when there is something to confirm (`complete > 0`) *and* nothing outstanding (`pending`,
-  `incomplete` and unstamped all zero). Otherwise the tile shows `complete / stampable` plus an
-  amber "N not stamped — Stamp all" line. The unstamped count **excludes `status='missing'`** —
-  that is what `mark_unstamped_pending` actually queues, so counting missing files would ship a
-  permanent, un-clearable warning.
-- **A zero-file collection reads "No files indexed yet"**, on the card legend and on the detail
-  tiles, instead of "All files verified · all confirmed".
+- **The proof coverage claim becomes a ratio, not an assertion — over one population.** Every
+  component (confirmed, queued, awaiting-confirmation, unstamped) is counted over
+  `status != 'missing'`, which is what `mark_unstamped_pending` actually queues, and "all confirmed"
+  requires `complete_active == stampable > 0`. Counting confirmed proofs over all files while
+  dividing by a missing-free denominator is how one missing file with a proof reports `1 / 1`
+  coverage of a collection where nothing present is confirmed. Otherwise the tile shows the ratio
+  plus an amber "N not stamped — Stamp all" line.
+- **Fleet-wide proof coverage counts only per-file-notarized collections**, numerator and
+  denominator both. Tripwire collections stamp nothing and their stamp route refuses them, so
+  including their files ships a "not stamped" count no control can clear; excluding them from one
+  half only would restore a false "all confirmed".
+- **A zero-file collection reads "No files indexed yet" on every surface** — the card legend, the
+  detail tiles *and* the shared status pill (`_collection_status` gains an `empty` state, so the
+  dashboard card, the detail header and the `op_status` fragment stop rendering the green "All
+  clear" they share).
 - **The collection-detail header stops offering Accept while there are issues.** When `issues > 0`,
   **Review issues** is the `btn--primary` and Accept is not in the header at all — the destructive
   path is reachable only from the page that explains it. When `issues == 0 and new > 0`, the
   harmless **Baseline new files** button stays, with a light confirm. Any remaining Accept form
   carries a confirm.
+- **The detail-page accept route re-checks at submit time.** Render-time visibility cannot protect
+  against a scan landing between GET and POST, which would turn a confirmed "baseline 40 new files"
+  into the deletion of `missing` records the operator never saw. The route re-counts
+  modified + missing (and refuses while an operation is in flight) and sends the operator to the
+  review view instead of re-baselining.
 - **`collection_detail` honours `view` and `filter` query parameters**, threading `status_filter`
   into the *initial* `query_files` call and templating the Tree/List `is-active` class, so a deep
   link into the filtered list actually lands filtered.
@@ -107,7 +141,10 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
 - **The scanner's restore branch system-acknowledges the file's open `missing` events**
   (`kind="missing"`, `acknowledged_by=NULL`, matching the born-acked convention). Scoped to that
   kind — never a blanket `WHERE file_id = …`, which would also clear an open WORM `modified` event
-  on the same file.
+  on the same file. The acknowledgement is applied **inside `_drain`, before the commit that
+  persists that batch's restores**: `_drain` commits during the walk, so acknowledging afterwards
+  would leave a failed ack showing a healthy file with an open `missing` alert that nothing can
+  clear.
 - **The review page renders the "Clear these alerts" half whenever `review_open > 0`**,
   independently of `total_issues`, with copy naming the case ("N alerts from files that have since
   been restored"). **Accept is not surfaced in that branch** — from an otherwise-empty page it would
@@ -132,7 +169,9 @@ Sprint 1 is deliberately bounded. Out of scope, each tracked by its own issue:
 
 - **The `accept_collection` scope-split and the full vocabulary rewrite** (#16, #17's deeper half).
   Sprint 1 does the renames, counts, confirms and button styles only; it does not add a scope
-  parameter, a per-file variant, or new verbs.
+  parameter, a per-file variant, or new verbs. The detail-page route's submit-time refusal *is* in
+  scope — it is a guard that makes the unscoped verb safe to expose in the one state it is offered
+  in, not the scoping itself.
 - **A fleet-wide `/review` page** (#27). `GET /review` is a 404 today; nothing here links to it.
   The multi-collection case of the "Open issues" tile points at `/collections` until #27 lands.
 - **The proof-overwrite and restored-file-digest guards** (#15, #21) — the only two places where
@@ -187,15 +226,16 @@ Sprint 1 is deliberately bounded. Out of scope, each tracked by its own issue:
 - **Affected specs:** `web-panel` (the verify verdict, the proof-state vocabulary, the dashboard
   tile/badge, the coverage claim, the collection-detail action hierarchy, the review page's
   restored-only branch, the deep-link parameters, `/learn`'s verification instructions, the
-  Verification settings tab), `ots-notarization` (`VerifyResult.digest_mismatch` — a digest mismatch
-  is reportable, not merely "not verified"), `integrity-scanning` (a restore closes the file's open
-  `missing` events).
-- **Affected code:** `src/services/ots.py`, `src/services/scanner.py`,
+  Verification settings tab), `ots-notarization` (a verification result reports *why* it did not
+  succeed — digest mismatch, proof mismatch, transport failure, inconclusive — and the CLI reads
+  those reasons), `integrity-scanning` (a restore closes the file's open `missing` events, inside
+  the transaction that commits the restore).
+- **Affected code:** `src/services/ots.py`, `src/cli.py` (`verify`), `src/services/scanner.py`,
   `src/control_panel/routes.py`, `src/control_panel/templates/` (`base.html`, `dashboard.html`,
   `collection_detail.html`, `collection_review.html`, `learn.html`, `settings.html`,
   `_macros.html`, and the partials `_collection_card.html`, `_event_row.html`,
-  `_events_controls.html`, `event_ack.html`, `events_feed.html`, `review_ack_row.html`,
-  `review_row.html`, `verify_result.html`, `verify_results.html`),
+  `_events_controls.html`, `event_ack.html`, `events_feed.html`, `op_status.html`,
+  `review_ack_row.html`, `review_row.html`, `verify_result.html`, `verify_results.html`),
   `src/control_panel/static/css/panel.css`, `tests/`.
 - **Data migration:** none. Zero schema changes, zero Alembic revisions — so no `make migrate` step
   after deploy.
@@ -205,16 +245,16 @@ Sprint 1 is deliberately bounded. Out of scope, each tracked by its own issue:
 ## Issue index
 | Issue | Audit ref | Slice | Tasks |
 |---|---|---|---|
-| #13 verify says "pending" for a digest mismatch | A1 | A | 2.1–2.6 |
-| #14 collection-detail Accept is primary + unconfirmed | A2 | B | 3.7–3.9 |
+| #13 verify says "pending" for a digest mismatch (panel **and** CLI) | A1 | A | 2.1–2.10 |
+| #14 collection-detail Accept is primary + unconfirmed (+ the stale-form race) | A2 | B | 3.9–3.12 |
 | #17 rename Acknowledge → Mark reviewed; scope/confirm bulk acks; un-invert row colours | A5 | C | 4.1–4.5 |
 | #18 inert "Open issues" tile; unlabelled sidebar badge | A6 | B | 3.1–3.4 |
-| #19 `/verify` hardcodes the green Anchored badge | A7 | A | 2.7 |
-| #20 proof tiles claim "all confirmed" with no proofs | A8 | B | 3.5–3.6 |
-| #22 restored file leaves its missing alert open | A10 | C | 4.6–4.8 |
-| #23 "Incomplete" vs "pending" — three words for two states | A11 | A (badge) + D (learn) | 2.8, 5.3 |
+| #19 `/verify` hardcodes the green Anchored badge | A7 | A | 2.11 |
+| #20 proof tiles claim "all confirmed" with no proofs | A8 | B | 3.5–3.7 |
+| #22 restored file leaves its missing alert open | A10 | C | 4.6–4.9 |
+| #23 "Incomplete" vs "pending" — three words, two states, one name each | A11 | A (badge) + D (learn) | 2.12, 5.3 |
 | #26 `/learn` teaches an `ots verify` that needs a node | A14 | D | 5.1–5.2 |
-| #31 zero-file collections report "All clear / All files verified" | A19 | B | 3.6 |
-| #32 copy and deep-link batch (7 items) | A20 | A/B/C/D | 2.9, 3.10–3.12, 4.9–4.11 |
+| #31 zero-file collections report "All clear / All files verified" | A19 | B | 3.6, 3.8 |
+| #32 copy and deep-link batch (7 items) | A20 | A/B/C/D | 2.13, 3.13–3.15, 4.10–4.12 |
 | #33 mobile: op badge squeezes the collection name to zero width | A21 | D | 5.6 |
-| #34 Settings → Verification renders dead radio cards | A22 | D (settings) + A (verify_result) | 5.4–5.5, 2.10 |
+| #34 Settings → Verification renders dead radio cards | A22 | D (settings) + A (verify_result) | 5.4–5.5, 2.14 |

@@ -11,17 +11,38 @@ Bitcoin block, plus an option to export the portable bundle. A complete "Anchore
 SHALL deep-link here and verify immediately.
 
 The verdict SHALL be chosen by *why* verification did not succeed, not by the proof's stored state.
-Specifically, the panel SHALL evaluate the outcomes in this order: the live file being unavailable,
-then a **digest mismatch**, then a proof that is genuinely not yet confirmed, then anything else. A
-file whose bytes no longer match the digest its proof commits to SHALL be rendered as a failure that
-names that fact — it SHALL NOT be rendered as a proof awaiting confirmation, and SHALL NOT be
+The panel SHALL evaluate the outcomes in this order: the live file being unavailable, then a
+**digest mismatch**, then a **proof mismatch**, then a verified result, then a **transport
+failure**, then an **inconclusive** result, then a proof that is genuinely not yet confirmed, then
+anything else. Mismatch SHALL be evaluated before transport: a mismatch that was established before
+the backend became unreachable is knowledge, and SHALL NOT be discarded in favour of the transport
+outcome.
+
+A file whose bytes no longer match the digest its proof commits to SHALL be rendered as a failure
+that names that fact — it SHALL NOT be rendered as a proof awaiting confirmation, and SHALL NOT be
 accompanied by copy telling the operator to wait. This is the product's core detection; presenting
 it as a young proof is a false negative on the one claim Cairn exists to make.
 
+A **proof mismatch** SHALL be rendered as a failure of the *proof*, with copy stating that the
+proof's chain attestation does not check out and that this is not evidence the file changed. It
+SHALL NOT reuse the digest-mismatch copy: the file's bytes may be exactly what was stamped, and
+telling an operator their file changed when it did not is a false alarm on the same signal the
+product exists to make trustworthy.
+
 A failure to *reach* the verification backend (block explorer or Bitcoin node) SHALL be reported as
-verification being unavailable, with copy stating that Cairn could not check and that this says
+verification being **unavailable**, with copy stating that Cairn could not check and that this says
 nothing about the file. Such a failure SHALL NOT inherit the file's stored proof state, and SHALL
-NOT be reported as a pending proof or as a verified one.
+NOT be reported as a pending proof or as a verified one. It SHALL be presented in a neutral style —
+neither the pending style nor the failure style used for a mismatch: an unreachable network is not
+evidence against the file, and rendering it as a failure teaches the operator to dismiss the styling
+that means a real mismatch. The panel SHALL derive this outcome from the verification result itself,
+not only from a raised error, because the backends report most unreachability as an ordinary
+returned result.
+
+Where the configured backend cannot distinguish "not yet confirmed" from "the file no longer
+matches", the panel SHALL render an **inconclusive** verdict that names both possibilities and says
+which backend cannot separate them. It SHALL NOT present such a result as a proof awaiting
+confirmation.
 
 Every list of already-anchored files SHALL render each row's **actual** notarization state. A row
 SHALL NOT be given a fixed "Anchored" badge: the badge is what an operator reads to decide whether a
@@ -40,15 +61,32 @@ asserting a fixed backend.
 
 #### Scenario: A changed file is never reported as pending
 
-- **WHEN** the user verifies a stamped file whose bytes have changed since it was stamped
+- **WHEN** the user verifies, through the default explorer backend, a stamped file whose bytes have
+  changed since it was stamped
 - **THEN** the panel SHALL render a failure verdict naming the mismatch, and SHALL NOT render a
   "pending confirmation" title or any copy suggesting the result will settle on its own
 
+#### Scenario: The node backend's unverified result reads inconclusive, not pending
+
+- **WHEN** the node backend returns a not-verified, not-yet-anchored result, which on that backend
+  may equally mean the file no longer matches or that the node was unreachable
+- **THEN** the panel SHALL render an inconclusive verdict naming both possibilities and stating that
+  the Bitcoin-node backend cannot tell them apart, and SHALL NOT render a "pending confirmation"
+  title or copy suggesting the result will settle on its own
+
+#### Scenario: A proof mismatch does not blame the file
+
+- **WHEN** verification fails because a Bitcoin attestation's commitment does not match the block's
+  merkle root, while the file's digest is still the one the proof commits to
+- **THEN** the panel SHALL render a failure naming the proof as what does not check out, and SHALL
+  NOT state that the file's bytes changed
+
 #### Scenario: An unreachable verification backend is not a pending proof
 
-- **WHEN** verification fails because the block explorer or node cannot be reached
-- **THEN** the panel SHALL report that verification is unavailable, with the transport reason, and
-  SHALL NOT present the file's stored proof state as the verdict
+- **WHEN** verification does not succeed because the block explorer or node could not be reached —
+  whether that is raised as an error or returned as an ordinary result carrying the transport reason
+- **THEN** the panel SHALL report that verification is unavailable, in the neutral style, with the
+  transport reason, and SHALL NOT present the file's stored proof state as the verdict
 
 #### Scenario: A missing live file still refuses to fall back to the stored digest
 
@@ -175,6 +213,17 @@ modified files but does have files that are merely not yet baselined, the page M
 harmless baseline action directly, and it SHALL require a confirmation naming what it will do. Any
 re-baseline form rendered on this page SHALL carry a confirmation.
 
+Choosing what to render is not sufficient, because the collection can change between the page being
+rendered and the form being submitted. The collection-detail re-baseline endpoint SHALL therefore
+**re-check at submit time** that the collection is still in the harmless state the form was rendered
+for: it SHALL re-count the collection's modified and missing files inside the request and, if any
+exist — or if an operation is in flight that could still change that population — it SHALL refuse,
+SHALL NOT re-baseline anything, and SHALL tell the operator that the collection changed since the
+page loaded and direct them to the review view. Without that check, a scan that detects a deletion
+between render and submit turns a button confirmed as baselining new files into the deletion of
+records the operator has never seen, under a confirmation that described something else. The review
+view's own accept is unaffected: it lists the issues it is about to adopt on the same page.
+
 "Scan now" SHALL run the scan **asynchronously** — it SHALL start the scan in the background and
 return immediately rather than blocking the request until the scan completes, so the panel can show
 live operation status. A scan SHALL NOT be started for a collection that already has an operation in
@@ -193,6 +242,20 @@ one.
   baselined
 - **THEN** the page MAY offer a baseline action, which SHALL require a confirmation before
   submitting
+
+#### Scenario: A stale baseline form is refused after the collection changes
+
+- **WHEN** the user opens a collection whose only non-baselined files are new, a scan then records a
+  file missing, and the user submits the already-rendered baseline form
+- **THEN** the endpoint SHALL refuse, SHALL NOT re-baseline or remove any file record, and SHALL
+  report that the collection changed since the page loaded, pointing at the review view
+
+#### Scenario: A re-baseline is refused while an operation is in flight
+
+- **WHEN** the user submits the collection-detail re-baseline form while a scan or stamp operation
+  is running on that collection
+- **THEN** the endpoint SHALL refuse rather than re-baseline against a population that is still
+  changing
 
 #### Scenario: Accept changes from the review view
 
@@ -309,7 +372,7 @@ SHALL report the failure rather than silently appearing to succeed.
 ### Requirement: Proof coverage is reported as a ratio, never as an unearned completeness claim
 
 The panel SHALL NOT state or imply that a collection's proofs are all confirmed unless there is at
-least one confirmed proof and nothing outstanding — no proof awaiting submission, none awaiting
+least one confirmed proof and nothing outstanding — no proof queued for stamping, none awaiting
 Bitcoin confirmation, and no file eligible for stamping that has not been stamped. Every
 completeness claim in this product is read as a statement about the collection, so one computed over
 only the files that happen to have been stamped is a false assurance about the rest.
@@ -318,13 +381,31 @@ Where a collection has files eligible for stamping that carry no proof, the pane
 coverage as a ratio of confirmed proofs to stampable files, together with a distinct warning line
 naming how many files are not stamped, next to the control that stamps them.
 
-The count of unstamped files SHALL exclude files whose status is `missing`, matching the population
-the stamp-all operation actually queues. Including missing files would produce a warning that no
-operator action can ever clear.
+**Every component of a coverage claim SHALL be counted over the same population**: files whose
+status is not `missing`, which is the population the stamp-all operation actually queues. Confirmed,
+queued, awaiting-confirmation and unstamped counts SHALL all carry that predicate, and the
+completeness claim SHALL require the confirmed count to equal a **positive** stampable count.
+Counting confirmed proofs over one population and stampable files over another produces a ratio
+whose halves describe different sets: a single missing file with a confirmed proof would otherwise
+report full coverage of a collection where nothing stampable is confirmed. Excluding missing files
+from the unstamped warning is the same rule seen from the other side — including them would produce
+a warning that no operator action can ever clear.
+
+**Fleet-wide (dashboard) proof coverage SHALL be computed strictly over collections whose
+notarization mode is per-file.** Tripwire-only collections stamp nothing and their stamp operation
+refuses them, so their files SHALL appear in neither the numerator nor the denominator of any proof
+coverage figure, and the fleet-wide figure SHALL name the population it summarises. Including them
+would show an un-clearable "not stamped" count for files no control can act on; removing them from
+only one half of the ratio would restore a false completeness claim.
 
 A collection with no indexed files SHALL say so, and SHALL NOT report "all clear", "all files
 verified" or "all confirmed". A root that is a typo or a failed mount scans clean forever; a
-zero-file collection is a configuration failure to surface, not a healthy state to celebrate.
+zero-file collection is a configuration failure to surface, not a healthy state to celebrate. This
+SHALL hold on **every** surface that renders the collection's status, including the shared status
+indicator used by the dashboard card, the collection detail header and the live-operation fragment:
+a zero-file collection SHALL render a distinct, non-green "no files indexed" state there rather than
+the healthy label. Fixing only the tiles leaves the reassurance where the operator actually looks
+first.
 
 #### Scenario: Unstamped files defeat the completeness claim
 
@@ -343,16 +424,32 @@ zero-file collection is a configuration failure to surface, not a healthy state 
 - **THEN** the unstamped warning SHALL NOT be shown, because the stamp-all operation would not act
   on them
 
+#### Scenario: A confirmed proof on a missing file does not fill the ratio
+
+- **WHEN** a collection's only confirmed proof belongs to a file recorded `missing`, while a present
+  file has no confirmed proof
+- **THEN** the panel SHALL NOT say "all confirmed", and the ratio SHALL report zero confirmed of the
+  present, stampable files
+
 #### Scenario: Everything stamped and confirmed
 
-- **WHEN** every stampable file in a collection has a confirmed proof and none are pending
+- **WHEN** every stampable file in a collection has a confirmed proof and none are queued or
+  awaiting confirmation
 - **THEN** the panel MAY state that all proofs are confirmed
+
+#### Scenario: Tripwire collections are outside the fleet-wide proof figures
+
+- **WHEN** a user has a tripwire-only collection with many present files and a per-file-notarized
+  collection whose stampable files are all confirmed
+- **THEN** the dashboard's proof coverage SHALL count only the notarized collection, SHALL name the
+  population it covers, and SHALL NOT report the tripwire collection's files as unstamped
 
 #### Scenario: A collection with no files
 
 - **WHEN** a collection has no indexed files
-- **THEN** the card and the collection view SHALL report that no files are indexed yet, and SHALL
-  NOT report that all files are verified or all proofs confirmed
+- **THEN** the card, the collection view and the shared status indicator SHALL report that no files
+  are indexed yet, in a non-green state, and no surface SHALL report "all clear", that all files are
+  verified, or that all proofs are confirmed
 
 ### Requirement: The collection file browser honours view and filter deep links
 
@@ -388,9 +485,18 @@ to the defaults, which SHALL reproduce the view rendered when no parameters are 
 
 The panel SHALL use one name per notarization state across every surface — badge, tiles, dashboard,
 verify verdict and the explanatory documentation — so that a single state is never described by two
-different words. In particular the not-yet-confirmed state SHALL be worded identically wherever it
-appears, and the documentation SHALL name both that state and the confirmed state as the interface
-words them.
+different words, and two different states are never described by one.
+
+There are two states before a proof is confirmed and they SHALL be named distinctly: a proof that is
+**queued for stamping and not yet submitted** to a calendar, and a proof that has been **submitted
+and is awaiting Bitcoin confirmation**. Only the second is waiting on Bitcoin; describing the first
+as awaiting confirmation tells an operator to wait for something that has not been started, and
+hides a stalled queue behind the wording for a healthy young proof. No surface SHALL apply the
+awaiting-confirmation wording to the queued state.
+
+Summaries SHALL NOT add the two together under one label. Where both are non-zero the summary SHALL
+name each with its own count; where one is zero it MAY be omitted. The documentation SHALL name each
+state as the interface words it.
 
 The documentation SHALL describe only verification paths an operator can actually complete. It SHALL
 lead with the public drag-and-drop verifier, SHALL state that verifying requires **both** the file
@@ -401,8 +507,15 @@ command that exits without having verified anything.
 
 #### Scenario: One name per state
 
-- **WHEN** a not-yet-confirmed proof is displayed anywhere in the panel
-- **THEN** it SHALL be described with the same wording as the documentation uses for that state
+- **WHEN** a proof in either not-yet-confirmed state is displayed anywhere in the panel
+- **THEN** it SHALL be described with the wording that state's name uses everywhere else, including
+  in the documentation, and the queued state SHALL NOT be described as awaiting confirmation
+
+#### Scenario: A summary does not merge the two not-yet-confirmed states
+
+- **WHEN** a collection has both proofs queued for stamping and proofs awaiting Bitcoin confirmation
+- **THEN** the summary SHALL report the two counts under their own names rather than one combined
+  "awaiting confirmation" total
 
 #### Scenario: Verification instructions are completable
 
