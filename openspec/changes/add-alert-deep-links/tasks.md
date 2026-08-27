@@ -4,8 +4,11 @@
 - [ ] 1.1 New `src/services/panel_url.py` (or an equivalent single module) with
   `normalize_public_url(value) -> str | None` implementing the canonical grammar: scheme
   `http`/`https`, non-empty host, optional port, optional path prefix; **reject** userinfo, query,
-  fragment, and any ASCII control character or whitespace; strip trailing slashes. Returns `None`
-  for empty/`None`. Raises `ValueError` with a human-readable reason for an invalid non-empty value.
+  fragment, and any ASCII control character or whitespace; strip trailing slashes. The result MUST
+  be pure ASCII — IDNA-encode a non-ASCII host, percent-encode a non-ASCII path, or reject (a
+  non-ASCII URL raises when encoded into ntfy's `Click` header, which would kill that channel).
+  Returns `None` for empty/`None`. Raises `ValueError` with a human-readable reason for an invalid
+  non-empty value.
 - [ ] 1.2 `panel_link(public_url, path) -> str | None` — `None` when `public_url` is falsy, else the
   base joined to `path` with exactly one slash. The **only** place links are built.
 - [ ] 1.3 `src/config.py`: add `public_url: str | None = None`. Its validator is **fail-soft** —
@@ -42,7 +45,9 @@
   is header-safe (no control characters — the grammar already excludes them; assert, don't trust);
   append the link to the body.
 - [ ] 4.4 `src/notify/signal_callmebot.py`: append the link to the message text when present.
-- [ ] 4.5 `src/notify/kuma_push.py`: unchanged (heartbeat, no body) — confirm and leave alone.
+- [ ] 4.5 `src/notify/kuma_push.py`: its `msg` query parameter already carries human-readable text
+  (`"{summary} in {collection_name}"`), so append the link there when present. (The earlier "no
+  message body" premise was wrong.)
 
 ## 5. Dispatch sites
 - [ ] 5.1 `src/services/scanner.py` (~line 548): build the link in **its own** `try/except` that
@@ -65,7 +70,9 @@
 - [ ] 7.1 Document `CAIRN_PUBLIC_URL` in `config.example.yaml`, `docker-compose.example.yml`, and
   `DEPLOYMENT.md` — it must be the address a *human* reaches (the reverse-proxy URL), and it is
   optional.
-- [ ] 7.2 Add a line to the alerting note in `CLAUDE.md`.
+- [ ] 7.2 Add a line to the alerting note in `CLAUDE.md`, including the owner-scoping limitation.
+- [ ] 7.3 Collection alert-routing UI: a hint that the review link is actionable only by the
+  collection's owner (relevant in `multi` mode; harmless in `single`).
 
 ## 8. Tests
 ### Validation & config
@@ -89,6 +96,10 @@
 - [ ] 8.8 Webhook: payload contains `url` when linked, and the key is **absent** (not null) when not.
 - [ ] 8.9 ntfy: `Click` header set when linked, header **absent** when not.
 - [ ] 8.10 Signal: link appended when present, text unchanged when absent.
+- [ ] 8.10a Kuma: `msg` param includes the link when present, unchanged when absent.
+- [ ] 8.10b A non-ASCII `public_url` is either ASCII-normalized or rejected, and every channel that
+  puts the URL in a header can encode what it is handed (regression for the ntfy-only operator who
+  would otherwise silently receive nothing).
 ### Dispatch
 - [ ] 8.11 A scan that triggers an alert dispatches an `Alert` whose `url` is
   `{public_url}/collection/{id}/review` (stubbed dispatch).

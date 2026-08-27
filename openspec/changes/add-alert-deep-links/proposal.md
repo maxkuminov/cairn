@@ -37,7 +37,7 @@ setting for it. (The same gap is why the Settings page currently prints a hardco
   - **ntfy** — the native `Click` header (tap the notification, land on the review page) plus the
     link in the body.
   - **Signal (CallMeBot)** — the URL appended to the message text.
-  - **Kuma push** is a heartbeat ping with no message body; it is unchanged.
+  - **Kuma push** — appended to the `msg` query parameter it already sends.
 - **Graceful when unset:** with no `public_url` configured, `Alert.url` is `None` and every channel
   produces **byte-identical output to today** — the email stays a single `text/plain` part (no
   multipart), and the webhook omits the `url` key rather than sending `null` (a strict consumer
@@ -70,6 +70,13 @@ setting for it. (The same gap is why the Settings page currently prints a hardco
   whatever auth the deployment fronts the panel with (Traefik OAuth today). No tokenized
   acknowledge-by-email, no bearer links in mail — that is a security surface, not a convenience, and
   is out of scope.
+- **Making the link work for non-owner recipients.** The review page is owner-scoped and answers
+  "not found" to everyone else, deliberately not disclosing whether a collection exists. Alert
+  recipients are arbitrary addresses, not Cairn users, so in `multi` mode a recipient who is not the
+  owner reaches that "not found" page. Weakening the scoping to fix this is exactly the wrong trade
+  for a security tool; mapping recipients to users is Phase-2 auth work. Recorded as an accepted
+  limitation with a hint in the routing UI. Unconditionally fine in `single` mode, which is what
+  ships today.
 - **Deriving the public URL from request headers.** Alerts are dispatched from the scanner and the
   scheduler, where there is no request. The address is configuration, explicitly set once.
 - **A full HTML email template system.** One small, inline-styled HTML part for the alert; no
@@ -104,3 +111,11 @@ while the alerting delta forbade it, and permitted query/fragment/userinfo/contr
 DB overrides bypassed validation entirely; unconditional multipart contradicted the byte-identical
 claim; `"url": null` did the same for webhooks; the clear-override storage contract was undefined;
 and the test plan covered almost none of the per-channel contracts.
+
+A second, independent review of the same draft added four more, also folded in: the review page is
+owner-scoped so the link is a dead end for a non-owner recipient in `multi` mode (now an explicit,
+documented limitation rather than a surprise); a non-ASCII URL passes a naive absolute-URL check but
+raises when encoded into ntfy's `Click` header, silently costing an ntfy-only operator every alert
+(the grammar is now ASCII-normalized or reject); the YAML overlay is also a configuration source and
+the scenarios ignored it; and Kuma does carry human-readable text in its `msg` parameter, so
+excluding it as "no message body" rested on a false premise.

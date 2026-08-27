@@ -32,7 +32,8 @@ address is the configured setting. An alert SHALL contain either a correct absol
 - **THEN** the email SHALL include it as a plaintext line and as a link in the HTML part,
   the webhook JSON payload SHALL include it as a `url` field, the ntfy notification SHALL set it as
   the notification's click target, and the Signal message SHALL append it to the text
-- **AND** the Kuma push heartbeat, which carries no message body, SHALL be unaffected
+- **AND** the Kuma push, whose `msg` query parameter already carries human-readable alert text,
+  SHALL include the link in that text
 
 ### Requirement: Building the link SHALL NOT be able to suppress an alert
 
@@ -51,6 +52,40 @@ may be placed on the path that decides whether the operator is told at all.
 - **THEN** the alert SHALL still be dispatched to every enabled channel, carrying no link
 - **AND** the failure SHALL be logged
 - **AND** the scan SHALL still complete and record its run
+
+### Requirement: A review link is only actionable by the collection's owner
+
+A review link SHALL be actionable by the collection's owner, and the system SHALL NOT weaken the
+review page's owner scoping in order to serve any other recipient.
+
+The review page answers "not found" for any user who does not own the collection, and deliberately
+does not distinguish "not yours" from "does not exist" so that collection existence is not
+disclosed. Alert recipients, by contrast, are arbitrary email addresses in a collection's
+`alert_json` and are not tied to Cairn users at all.
+
+In `single` auth
+mode this is unconditional — there is one user, who owns everything. In `multi` mode a recipient who
+is not the owner will reach a "not found" page. The routing UI SHALL make that expectation visible
+rather than let the link silently disappoint a recipient.
+
+This is an accepted limitation, recorded so it is a known property rather than a surprise: solving
+it properly means per-collection sharing or recipient-to-user mapping, which is Phase-2 auth work.
+
+#### Scenario: The owner follows the link
+
+- **WHEN** the collection's owner opens the review link while authenticated
+- **THEN** they SHALL land on that collection's review page
+
+#### Scenario: A non-owner following the link is not disclosed anything
+
+- **WHEN** an authenticated user who does not own the collection opens the review link
+- **THEN** the response SHALL remain the existing owner-scoped "not found", disclosing nothing about
+  whether the collection exists
+
+#### Scenario: The routing UI states the expectation
+
+- **WHEN** an operator configures email recipients for a collection in `multi` mode
+- **THEN** the panel SHALL indicate that the review link is actionable only by the collection's owner
 
 ## MODIFIED Requirements
 
@@ -119,6 +154,12 @@ markup.
 
 - **WHEN** the HTML part emits the review link as an anchor
 - **THEN** the URL SHALL be escaped for an HTML attribute context
+
+#### Scenario: A URL that cannot be encoded into a header does not lose the channel
+
+- **WHEN** a channel would place the link in an HTTP header
+- **THEN** the URL SHALL already be ASCII-normalized, and if it still cannot be encoded the header
+  SHALL be omitted and the alert SHALL still be sent
 
 #### Scenario: Header-bound values cannot inject headers
 

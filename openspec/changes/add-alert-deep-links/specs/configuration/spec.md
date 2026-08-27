@@ -12,8 +12,13 @@ A valid value SHALL be an absolute URL with scheme `http` or `https`, a non-empt
 port, and an optional path prefix (so a panel served under a reverse-proxy sub-path is
 expressible). It SHALL NOT contain userinfo (`user:pass@`), a query string, a fragment, or any
 ASCII control character or whitespace — each of those either changes where the link points or
-corrupts the contexts the URL is embedded in (an HTML attribute, an HTTP header). Trailing slashes
-SHALL be stripped on normalization.
+corrupts the contexts the URL is embedded in (an HTML attribute, an HTTP header).
+
+The normalized value SHALL be **pure ASCII**: a non-ASCII host SHALL be IDNA-encoded and a
+non-ASCII path SHALL be percent-encoded, or the value SHALL be rejected. A URL is placed verbatim
+into HTTP headers (ntfy's `Click`), and a non-ASCII header value raises at encoding time — which
+would take out that channel's delivery entirely. Trailing slashes SHALL be stripped on
+normalization.
 
 The host is the operator's to choose: a private or LAN address such as `http://localhost:8000` or
 `http://192.168.1.10:8000` SHALL be accepted, because for some deployments that *is* the address a
@@ -21,8 +26,22 @@ human reaches. What the system SHALL NOT do is **infer** an address it was not g
 
 #### Scenario: Unset by default
 
-- **WHEN** the application starts with no `CAIRN_PUBLIC_URL` and no stored override
+- **WHEN** the application starts with no `CAIRN_PUBLIC_URL`, no `public_url` in the YAML overlay,
+  and no stored override
 - **THEN** `public_url` SHALL be unset and no feature that depends on it SHALL emit a link
+
+#### Scenario: The YAML overlay can supply it, below env
+
+- **WHEN** `public_url` is set in the `CAIRN_CONFIG_FILE` overlay and `CAIRN_PUBLIC_URL` is also set
+- **THEN** the environment value SHALL win, consistent with every other setting
+
+#### Scenario: A non-ASCII URL is normalized or rejected, never emitted raw
+
+- **WHEN** `public_url` is set to a value with a non-ASCII host or path (for example
+  `https://cairn.example.com/é`)
+- **THEN** the stored/normalized value SHALL be pure ASCII (IDNA host, percent-encoded path), or the
+  value SHALL be rejected
+- **AND** no channel SHALL ever be handed a URL that raises when encoded into an HTTP header
 
 #### Scenario: A private address is accepted when explicitly configured
 
