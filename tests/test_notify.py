@@ -864,3 +864,45 @@ def test_kuma_msg_includes_link_when_present(http_calls):
     msg = http_calls[1][2]["params"]["msg"]
     assert msg.startswith("1 missing in Photos")
     assert _REVIEW_URL in msg
+
+
+def _build_alert_message(*, recipients):
+    """Build (not send) an alert message for ``recipients`` with a minimal valid settings object."""
+    from src.config import Settings
+    from src.notify.base import Alert
+    from src.notify.smtp import SmtpNotifier
+
+    alert = Alert(
+        collection_name="Photos",
+        summary="1 missing",
+        paths=["a.jpg"],
+        detected_at=datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc),
+    )
+    settings = Settings(smtp_host="mail.example.com", smtp_from="cairn@example.com")
+    return SmtpNotifier(recipients=recipients, settings=settings)._build_message(alert)
+
+def test_smtp_smuggled_newline_in_a_recipient_yields_two_valid_addresses():
+    """A pasted recipient carrying a newline must not fuse into one malformed address.
+
+    Recipients come from the panel-editable ``alert_json``. Sanitizing the string and joining would
+    produce ``"ops@example.com backup@example.com"`` — a single unparseable address. Since
+    ``send_message`` derives the SMTP envelope from the To header, that mail could go nowhere while
+    looking sent. Both addresses must survive, intact and separate.
+    """
+    msg = _build_alert_message(recipients=["ops@example.com\r\nbackup@example.com"])
+    assert str(msg["To"]) == "ops@example.com, backup@example.com"
+    assert "\r" not in str(msg["To"]) and "\n" not in str(msg["To"])
+
+
+def test_smtp_one_bad_recipient_does_not_cost_the_others_their_alert():
+    """A single mistyped address is dropped; the valid recipients are still mailed."""
+    msg = _build_alert_message(recipients=["garbage", "good@example.com"])
+    assert str(msg["To"]) == "good@example.com"
+
+
+def test_smtp_no_usable_recipient_raises_rather_than_sending_nowhere():
+    """An empty To is not a delivered alert — dispatch must see it as the failure it is."""
+    from src.notify.base import NotifierError
+
+    with pytest.raises(NotifierError):
+        _build_alert_message(recipients=["not-an-address"])

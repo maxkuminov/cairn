@@ -41,10 +41,16 @@ def _is_dns_name(host: str) -> bool:
     Single-label names are valid on purpose: ``http://localhost:8000`` or ``http://cairn:8000`` is
     genuinely the address some operators reach the panel at, and the spec requires those. An IPv4
     literal is a special case of this grammar (every octet is a legal label), so it needs no
-    separate branch. A trailing dot, a leading dot, or any empty label yields an empty label and is
-    rejected.
+    separate branch.
+
+    One *trailing* dot is allowed and canonicalized away by the caller: ``example.com.`` is a
+    legitimate fully-qualified name (the explicit DNS root), and rejecting it would silently strip
+    a working review link. A leading dot or an interior empty label (``a..b``) stays rejected.
     """
     if not host or len(host) > 253:
+        return False
+    host = host[:-1] if host.endswith(".") else host  # drop the DNS root dot before splitting
+    if not host:  # the host was just "."
         return False
     return all(_LABEL_RE.fullmatch(label) for label in host.split("."))
 
@@ -118,6 +124,10 @@ def normalize_public_url(value: str | None) -> str | None:
             raise ValueError(f"invalid IPv6 address in brackets ({exc})") from exc
     elif not _is_dns_name(host):
         raise ValueError("host must be a domain name, an IPv4 address, or a bracketed IPv6 address")
+    else:
+        # Canonicalize away the DNS root dot accepted above, so "example.com." and "example.com"
+        # cannot produce two different-looking links to the same panel.
+        host = host.rstrip(".")
 
     host_part = f"[{host}]" if ":" in host else host  # re-bracket an IPv6 literal
     netloc = host_part if port is None else f"{host_part}:{port}"

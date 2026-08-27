@@ -19,12 +19,17 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import re
 import smtplib
+from email.headerregistry import Address
 from email.message import EmailMessage
+from email.utils import getaddresses
 from typing import TYPE_CHECKING
 
 from .base import Alert, NotifierError
+
+_log = logging.getLogger("cairn.notify.smtp")
 
 if TYPE_CHECKING:
     from ..config import Settings
@@ -56,6 +61,9 @@ _MUTED_STYLE = "color:#71717a;font-size:13px"
 # the operator the alert about their missing files. Collapse instead of refuse: a slightly odd
 # subject line delivers, a raised header does not.
 _HEADER_CONTROLS = re.compile(r"[\x00-\x1f\x7f]+")
+# Separators a human might paste between addresses. Splitting on these BEFORE sanitizing keeps a
+# smuggled newline from fusing two addresses into one malformed one.
+_RECIPIENT_SPLIT = re.compile(r"[\r\n,;]+")
 
 
 def _header_value(value: str) -> str:
@@ -65,6 +73,42 @@ def _header_value(value: str) -> str:
     mangling it would corrupt a legitimate collection name like ``Fotos Föhr``.
     """
     return _HEADER_CONTROLS.sub(" ", value).strip()
+
+
+def _addresses(recipients: list[str]) -> list[Address]:
+    """Parse ``recipients`` into real address objects, dropping anything unusable.
+
+    Sanitizing each string and joining with ", " is not enough: recipients come from a
+    panel-editable field, and a pasted value like ``"ops@example.com\\r\\nbackup@example.com"``
+    would collapse into the single malformed ``"ops@example.com backup@example.com"``. The header
+    would then be ambiguous, and since ``send_message`` derives the SMTP envelope from it, the mail
+    could go nowhere while appearing to have been sent.
+
+    So a recipient is first *split* on the separators a human might paste (CR, LF, comma,
+    semicolon) and each piece is then parsed and kept only if it looks like a real
+    ``local@domain``. A bad piece is dropped with a warning rather than poisoning the whole header
+    — one mistyped address must not cost the other recipients their alert.
+    """
+    candidates: list[str] = []
+    for raw in recipients:
+        for piece in _RECIPIENT_SPLIT.split(raw):
+            cleaned = _header_value(piece)
+            if cleaned:
+                candidates.append(cleaned)
+
+    out: list[Address] = []
+    for display, addr in getaddresses(candidates):
+        addr = addr.strip()
+        local, sep, domain = addr.partition("@")
+        if not sep or not local or not domain or addr.count("@") != 1:
+            _log.warning("dropping unusable alert recipient %r", addr)
+            continue
+        if any(ch.isspace() for ch in addr):
+            _log.warning("dropping unusable alert recipient %r", addr)
+            continue
+        # Address quotes the display name properly, so keeping it is safe and friendlier.
+        out.append(Address(display_name=_header_value(display), username=local, domain=domain))
+    return out
 
 
 class SmtpNotifier:
@@ -140,7 +184,12 @@ class SmtpNotifier:
         name = _header_value(alert.collection_name)
         msg["Subject"] = f"Cairn: {summary} in {name}"
         msg["From"] = _header_value(self.settings.smtp_from or "cairn@localhost")
-        msg["To"] = ", ".join(_header_value(r) for r in self.recipients)
+        recipients = _addresses(self.recipients)
+        if not recipients:
+            # Nobody left to send to. Raise rather than hand smtplib an empty To: a mail with no
+            # recipient is not a delivered alert, and dispatch must log it as the failure it is.
+            raise NotifierError("no usable email recipients after validation")
+        msg["To"] = recipients
 
         msg.set_content(self._plaintext(alert))
         if alert.url:

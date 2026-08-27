@@ -108,7 +108,6 @@ def test_normalize_rejects(raw):
         "https://-",                # a label may not start or end with a hyphen
         "https://.",                # empty labels
         "https://.example.com",     # leading empty label
-        "https://example.com.",     # trailing dot
         "https://exam ple.com",     # (whitespace — caught earlier, asserted here for completeness)
         "https://a..b",
         "https://" + "a" * 64 + ".com",  # label longer than 63 characters
@@ -335,3 +334,19 @@ async def test_overlay_leaves_smtp_behaviour_alone(cairn_env, monkeypatch):
 
     assert "public_url" not in smtp_only  # get_smtp_overrides still means *SMTP* fields
     assert eff.smtp_host == "db-host.example.com"
+
+
+def test_normalize_accepts_and_canonicalizes_a_trailing_dot_fqdn():
+    """``example.com.`` is a legitimate fully-qualified name (the explicit DNS root).
+
+    Rejecting it would silently strip a working review link. It is canonicalized to the dotless
+    form so the same panel cannot yield two different-looking links.
+    """
+    from src.services.panel_url import normalize_public_url
+
+    assert normalize_public_url("https://example.com.") == "https://example.com"
+    assert normalize_public_url("http://localhost.:8000") == "http://localhost:8000"
+    # A leading dot, a bare dot, and interior empty labels stay rejected.
+    for bad in ("https://.example.com", "https://.", "https://a..b"):
+        with pytest.raises(ValueError):
+            normalize_public_url(bad)
