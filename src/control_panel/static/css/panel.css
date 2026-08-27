@@ -858,8 +858,11 @@
 .review-row__action { flex-shrink: 0; }
 
 @media (max-width: 768px) {
-  .review-row { flex-wrap: wrap; }
+  .review-row { flex-wrap: wrap; align-items: flex-start; }
   .review-row__action { width: 100%; padding-left: 45px; }
+  /* Real paths run 110-150 chars; one clipped line makes every row in a deep folder look alike,
+     and touch has no hover to fall back on. Wrap the whole path instead. */
+  .review-row__path { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.45; }
 }
 
 /* --- resolve choices: Acknowledge vs Accept, each shown next to its consequence --- */

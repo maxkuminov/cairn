@@ -374,7 +374,11 @@ def test_panel_url_invalid_is_refused_and_leaves_the_stored_value(cairn_env):
         assert "Not saved" in page
         # The reason from normalize_public_url is surfaced verbatim, not a generic "invalid".
         assert "must start with" in page
-        assert f'value="{PUBLIC_URL}"' in page  # the good value survives
+        # The rejected input is redisplayed so a one-character typo in a long URL can be fixed in
+        # place rather than retyped — HTML-escaped, and never written to the stored value.
+        assert 'value="javascript:alert(1)"' in page
+        # ...while the stored (still effective) address is the one shown as the current source.
+        assert PUBLIC_URL in page
 
     assert _stored_public_url() == PUBLIC_URL
 
@@ -428,3 +432,83 @@ def test_settings_labels_the_example_health_url_when_unconfigured(cairn_env, mon
         page = client.get("/settings?tab=notifications").text
         assert "https://cairn.example.com/healthz" in page
         assert "That is an illustrative address" in page
+
+
+# --- where the address came from (env fallback vs saved override) ---------------------------
+
+
+def test_settings_names_the_env_as_the_source_before_any_override(cairn_env):
+    """With no stored row the field is prefilled from env — say so, and warn what Save does.
+
+    "Set" alone is indistinguishable from a real override, so an operator can convert the env
+    fallback into a DB override by opening the card and clicking Save without editing anything,
+    after which changing CAIRN_PUBLIC_URL has no effect and nothing on screen explains why.
+    """
+    with _make_client(cairn_env, lambda: _seed_user(True)) as client:
+        page = client.get("/settings?tab=notifications").text
+        assert "from <span class=\"mono\">CAIRN_PUBLIC_URL</span>" in page
+        assert "override saved" not in page
+        assert "Saving here writes an override that takes precedence" in page
+
+    assert _stored_public_url() is None
+
+
+def test_settings_names_the_override_once_one_is_saved(cairn_env):
+    with _make_client(cairn_env, lambda: _seed_user(True)) as client:
+        token = _csrf_token(client)
+        client.post(
+            "/settings/panel-url",
+            data={"csrf_token": token, "public_url": "https://panel.example.org"},
+            follow_redirects=False,
+        )
+        page = client.get("/settings?tab=notifications").text
+        assert "override saved" in page
+        assert "Saving here writes an override" not in page
+        # And it names the env value it is shadowing, so the precedence is visible.
+        assert PUBLIC_URL in page
+
+
+def test_clearing_the_override_says_what_it_fell_back_to(cairn_env):
+    """"Panel address saved." plus a repopulated field reads as "I cleared it and it came back"."""
+    with _make_client(cairn_env, lambda: _seed_user(True)) as client:
+        token = _csrf_token(client)
+        client.post(
+            "/settings/panel-url",
+            data={"csrf_token": token, "public_url": "https://panel.example.org"},
+            follow_redirects=False,
+        )
+        r = client.post(
+            "/settings/panel-url",
+            data={"csrf_token": token, "public_url": ""},
+            follow_redirects=False,
+        )
+        page = client.get(r.headers["location"]).text
+        assert "Override cleared" in page
+        assert PUBLIC_URL in page
+        assert "Panel address saved." not in page
+
+    assert _stored_public_url() is None
+
+
+def test_clearing_with_no_env_value_says_alerts_lose_their_link(cairn_env, monkeypatch):
+    from src.config import get_settings
+
+    monkeypatch.delenv("CAIRN_PUBLIC_URL", raising=False)
+    get_settings.cache_clear()
+
+    with _make_client(cairn_env, lambda: _seed_user(True)) as client:
+        token = _csrf_token(client)
+        client.post(
+            "/settings/panel-url",
+            data={"csrf_token": token, "public_url": "https://panel.example.org"},
+            follow_redirects=False,
+        )
+        r = client.post(
+            "/settings/panel-url",
+            data={"csrf_token": token, "public_url": ""},
+            follow_redirects=False,
+        )
+        page = client.get(r.headers["location"]).text
+        assert "no panel address configured" in page
+
+    assert _stored_public_url() is None

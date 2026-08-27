@@ -124,6 +124,21 @@ async def smtp_password_is_set(session: AsyncSession) -> bool:
     return bool(obj and obj.value)
 
 
+async def public_url_override_is_set(session: AsyncSession) -> bool:
+    """True when a *usable* ``public_url`` row is stored, i.e. the DB — not env — is the source.
+
+    Mirrors what :func:`get_overrides` actually applies: a stored value that fails validation is
+    dropped on read, so the env value is genuinely in effect and the UI must not claim otherwise.
+    """
+    obj = await session.get(AppSetting, "public_url")
+    if obj is None or not obj.value:
+        return False
+    try:
+        return normalize_public_url(obj.value) is not None
+    except ValueError:
+        return False
+
+
 async def save_smtp(
     session: AsyncSession,
     *,

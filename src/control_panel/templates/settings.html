@@ -28,9 +28,12 @@
             <div class="icon-tile icon-tile--muted">{{ m.icon("link", size=19) }}</div>
             <div class="channel-head__body">
               <div class="channel-title-row">
-                <span class="channel-title">Public URL</span>
-                {% if public_url %}
+                <span class="channel-title">Panel address</span>
+                {% if public_url_effective %}
                   <span class="pill pill--soft pill--ok pill--sm">{{ m.icon("checkCircle", size=11.5, stroke=2) }}Set</span>
+                  {# "Set" alone cannot be acted on: an env value and a saved override look identical
+                     but behave differently when the compose environment changes. #}
+                  <span class="pill pill--soft pill--muted pill--sm">{% if public_url_is_override %}override saved{% else %}from <span class="mono">CAIRN_PUBLIC_URL</span>{% endif %}</span>
                 {% else %}
                   <span class="pill pill--soft pill--muted pill--sm">Not set</span>
                 {% endif %}
@@ -42,6 +45,12 @@
           {% if public_url_saved %}
             <div class="info-strip" style="margin-bottom:12px">{{ m.icon("checkCircle", size=15) }}<span>Panel address saved.</span></div>
           {% endif %}
+          {% if public_url_cleared %}
+            <div class="info-strip" style="margin-bottom:12px">{{ m.icon("checkCircle", size=15) }}<span>
+              {%- if public_url_env %}Override cleared — using <span class="mono">CAIRN_PUBLIC_URL</span> (<span class="mono">{{ public_url_env }}</span>).
+              {%- else %}Override cleared — no panel address configured, so alerts will be sent without a link.{% endif -%}
+            </span></div>
+          {% endif %}
           {% if public_url_error %}
             <div class="info-strip" style="margin-bottom:12px;color:var(--danger)">{{ m.icon("alert", size=15) }}<span>Not saved — the address {{ public_url_error }}. The previous value is still in effect.</span></div>
           {% endif %}
@@ -50,9 +59,16 @@
             <form method="post" action="/settings/panel-url" class="form-stack" style="gap:14px">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
               <label class="field">
-                <div class="field__label-row"><span class="field__label">Base URL</span></div>
+                <div class="field__label-row"><span class="field__label">Panel address</span></div>
                 <input class="input" name="public_url" type="text" value="{{ public_url }}" placeholder="https://cairn.example.com" />
                 <div class="field__hint">http:// or https://, host, optional port and path prefix — no query string or fragment. A LAN address such as <span class="mono">http://192.168.1.10:8000</span> is fine if that is what you open. Clear the field to fall back to <span class="mono">CAIRN_PUBLIC_URL</span>.</div>
+                {% if public_url_is_override %}
+                  <div class="field__hint">This value is an <strong>override saved in the panel</strong>; it wins over <span class="mono">CAIRN_PUBLIC_URL</span>{% if public_url_env %} (<span class="mono">{{ public_url_env }}</span>){% endif %}.</div>
+                {% elif public_url_effective %}
+                  <div class="field__hint">This value comes <strong>from <span class="mono">CAIRN_PUBLIC_URL</span></strong> in the environment — nothing is stored in the database yet. Saving here writes an override that takes precedence, after which changing the environment variable will have no effect until you clear the field again.</div>
+                {% else %}
+                  <div class="field__hint">Nothing is set here or in <span class="mono">CAIRN_PUBLIC_URL</span>, so alerts are sent without a link.</div>
+                {% endif %}
               </label>
               <div class="flex" style="gap:10px">
                 <button type="submit" class="btn btn--primary">Save panel address</button>
@@ -60,7 +76,7 @@
             </form>
           {% else %}
             <div class="config-preview">
-              <div class="config-row"><span class="config-row__key">Base URL</span><span class="config-row__val mono">{{ public_url or "(not configured)" }}</span></div>
+              <div class="config-row"><span class="config-row__key">Panel address</span><span class="config-row__val mono">{{ public_url_effective or "(not configured)" }}</span></div>
             </div>
             <div style="font-size:12px;color:var(--text-3);margin-top:10px">The panel address is managed by an administrator.</div>
           {% endif %}

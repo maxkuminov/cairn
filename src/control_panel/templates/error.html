@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}{{ status_code }} · Cairn{% endblock %}
+{% block content %}
+<div class="page-header">
+  <div>
+    <h1>{{ heading }}</h1>
+    <div class="page-header__sub">{{ explanation }}</div>
+  </div>
+</div>
+
+<div class="card empty-state" style="padding:48px 24px">
+  <div class="mono" style="font-size:34px;font-weight:600;color:var(--text-3)">{{ status_code }}</div>
+  {% if detail %}<div style="margin-top:8px">{{ detail }}</div>{% endif %}
+  <div style="margin-top:20px">
+    <a class="btn btn--primary" href="/">{{ m.icon("dashboard", size=15) }} Back to the dashboard</a>
+  </div>
+</div>
+{% endblock %}

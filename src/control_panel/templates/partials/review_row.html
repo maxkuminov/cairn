@@ -4,7 +4,9 @@
     {{ m.icon('minusCircle' if it.status == 'missing' else 'alert', size=16, stroke=2) }}
   </div>
   <div class="review-row__body">
-    <div class="review-row__path">
+    {# The full relpath is the only way to tell two same-named files apart; on desktop it is the
+       hover title, and under 768px the CSS lets it wrap instead of clipping. #}
+    <div class="review-row__path" title="{{ it.relpath }}">
       {% if it.dir %}<span class="review-row__dir mono">{{ it.dir }}/</span>{% endif %}
       <span class="review-row__name mono">{{ it.name }}</span>
     </div>

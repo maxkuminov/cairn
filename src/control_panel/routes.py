@@ -344,6 +344,9 @@ async def _base_context(
     return {
         "page": page,
         "mode": _mode(request),
+        # Copy that describes who can open a panel URL has to know which mode is running: in
+        # `single` there is no login wall at all, so a claim about owner-scoping would be false.
+        "auth_mode": get_settings().auth_mode,
         "username": user.username,
         "is_admin": user.is_admin,
         "user_email": f"{user.username}@localhost",
@@ -1453,6 +1456,7 @@ async def settings_page(
     saved: str | None = Query(None),
     test: str | None = Query(None),
     msg: str | None = Query(None),
+    val: str | None = Query(None),
 ):
     settings = get_settings()
     # Show the *effective* config (DB overrides env) so the form reflects what alerts would use.
@@ -1467,10 +1471,18 @@ async def settings_page(
             # The panel's own public address: what alert deep links are built from, and what the
             # health-monitoring URL below is derived from. Blank when unconfigured — in that case
             # the template shows an address labelled as an example, never as the real one.
-            "public_url": eff.public_url or "",
+            # A rejected submission comes back in `val` so the operator can fix the typo instead of
+            # retyping a long URL from scratch; the *stored* value is untouched either way.
+            "public_url": (val if saved == "urlerr" and val is not None else eff.public_url or ""),
             "healthz_url": panel_link(eff.public_url, "/healthz") or EXAMPLE_HEALTHZ_URL,
             "healthz_url_is_example": eff.public_url is None,
+            # The effective address alone cannot tell env from a saved override, and the difference
+            # decides whether editing CAIRN_PUBLIC_URL will still do anything. Name the source.
+            "public_url_effective": eff.public_url or "",
+            "public_url_is_override": await app_settings_svc.public_url_override_is_set(session),
+            "public_url_env": settings.public_url or "",
             "public_url_saved": saved == "url",
+            "public_url_cleared": saved == "urlcleared",
             "public_url_error": msg if saved == "urlerr" else "",
             "email_provider": eff.email_provider,
             # Editable form values (blank when unset, never a placeholder string).
@@ -1548,11 +1560,17 @@ async def settings_panel_url_save(
     try:
         await app_settings_svc.save_public_url(session, public_url)
     except ValueError as exc:
+        # Carry the rejected input back so it can be corrected in place (F4); it is re-escaped by
+        # the template, and it never reaches the stored value.
         return RedirectResponse(
-            "/settings?tab=notifications&saved=urlerr&msg=" + quote(str(exc)[:200]),
+            "/settings?tab=notifications&saved=urlerr"
+            f"&msg={quote(str(exc)[:200])}&val={quote(public_url[:300])}",
             status_code=303,
         )
-    return RedirectResponse("/settings?tab=notifications&saved=url", status_code=303)
+    # An empty save is a *clear*, not a set — and the field then repopulates from the environment,
+    # which reads as "it came back" unless the message says what it fell back to.
+    outcome = "url" if public_url.strip() else "urlcleared"
+    return RedirectResponse(f"/settings?tab=notifications&saved={outcome}", status_code=303)
 
 
 @router.post("/settings/smtp/test", dependencies=[Depends(verify_csrf)])

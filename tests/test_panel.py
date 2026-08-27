@@ -1131,3 +1131,78 @@ def test_auto_baseline_toggle_persists_through_form(cairn_env):
         return go()
 
     assert _run_check(check) is True
+
+
+# --- alert-link hint honesty + branded errors -------------------------------------------------
+
+
+def test_routing_hint_is_truthful_in_single_mode(cairn_env):
+    """Single mode has no login wall, so the hint must not claim Cairn scopes the link.
+
+    The old copy promised the review link "opens for this collection's owner — anyone else reaches
+    a not-found page". In single mode `current_user` returns the first user unconditionally, so
+    every visitor is the owner: an operator who forwarded an alert on the strength of that sentence
+    would be handing out the file listing.
+    """
+    root = cairn_env / "hintsingle"
+    root.mkdir()
+
+    with _make_client(cairn_env, lambda: _seed_collection(root)) as client:
+        html = client.get("/collection/new").text
+        assert "does not gate that link itself in single-user mode" in html
+        assert "owner-scoped" not in html
+
+
+def test_routing_hint_keeps_the_owner_scoping_wording_in_multi_mode(cairn_env, monkeypatch):
+    """In multi mode the scoping claim is true, so it stays."""
+    from src.config import get_settings
+
+    root = cairn_env / "hintmulti"
+    root.mkdir()
+
+    # Seed under single mode (multi mode does not bootstrap an implicit user), then flip the mode
+    # before rendering — `current_user` resolves the same row either way.
+    with _make_client(cairn_env, lambda: _seed_collection(root)) as client:
+        monkeypatch.setenv("CAIRN_AUTH_MODE", "multi")
+        monkeypatch.setenv("CAIRN_SECRET_KEY", "0" * 64)
+        get_settings.cache_clear()
+        try:
+            html = client.get("/collection/new").text
+            assert "owner-scoped" in html
+            assert "single-user mode" not in html
+        finally:
+            get_settings.cache_clear()
+
+
+def test_stale_collection_link_renders_a_branded_html_404(cairn_env):
+    """A tapped-from-email link to a deleted collection must land on a page, not a JSON blob."""
+    root = cairn_env / "stale"
+    root.mkdir()
+
+    with _make_client(cairn_env, lambda: _seed_collection(root)) as client:
+        r = client.get("/collection/999/review", headers={"Accept": "text/html"})
+        assert r.status_code == 404
+        assert "text/html" in r.headers["content-type"]
+        assert "cairn-app" in r.text  # the panel shell, i.e. sidebar + a way back
+        assert "This collection no longer exists" in r.text
+        assert 'href="/"' in r.text
+
+
+def test_json_clients_and_healthz_keep_their_json_errors(cairn_env):
+    """The HTML 404 is a browser affordance only — machine callers keep the JSON contract."""
+    root = cairn_env / "jsonerr"
+    root.mkdir()
+
+    with _make_client(cairn_env, lambda: _seed_collection(root)) as client:
+        # No text/html in Accept (htmx, fetch, curl) -> JSON, unchanged.
+        r = client.get("/collection/999/review", headers={"Accept": "*/*"})
+        assert r.status_code == 404
+        assert r.json() == {"detail": "collection not found"}
+        # An /api path stays JSON even for a browser-shaped Accept header.
+        r = client.get("/api/does-not-exist", headers={"Accept": "text/html"})
+        assert r.status_code == 404
+        assert r.json()["detail"] == "Not Found"
+        # /healthz is polled as a dead-man's switch; its body must stay parseable.
+        r = client.get("/healthz", headers={"Accept": "text/html"})
+        assert r.status_code in (200, 503)
+        assert r.json()["status"] in ("ok", "degraded", "error")

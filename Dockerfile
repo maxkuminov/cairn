@@ -41,6 +41,16 @@ COPY src/ src/
 COPY pyproject.toml README.md ./
 RUN pip install --no-cache-dir --no-deps .
 
+# Drop pip from the runtime image. It is a build-time tool, and the only HIGH CVEs the Trivy gate
+# found were in pip's own *vendored* bundle (pip/_vendor/msgpack, and the setuptools recorded in
+# its SBOM) — code no Cairn process ever executes. Removing it eliminates the vulnerable files
+# rather than suppressing the finding, and a running integrity monitor has no business being able
+# to install packages into itself. If pip is ever needed for debugging in the container:
+#   python -m ensurepip --upgrade
+RUN python -m pip uninstall -y pip \
+    && rm -rf /usr/local/lib/python3.12/site-packages/pip \
+              /usr/local/lib/python3.12/site-packages/pip-*.dist-info
+
 USER appuser
 
 EXPOSE 8000

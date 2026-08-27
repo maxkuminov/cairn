@@ -13,9 +13,11 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
@@ -157,5 +159,76 @@ async def healthz() -> JSONResponse:
 
 # Mount the control panel (dashboard at /, collection detail, add/edit, verify, settings).
 from .control_panel.routes import router as panel_router  # noqa: E402
+from .control_panel.routes import templates as panel_templates  # noqa: E402
 
 app.include_router(panel_router)
+
+
+# --- branded HTML errors for panel navigations ----------------------------------------------
+
+# Paths whose callers are machines, not browsers: they keep the JSON error body whatever the
+# request claims to accept. `/healthz` in particular is polled by an external dead-man's-switch
+# monitor that parses the body.
+_JSON_ONLY_PREFIXES = ("/api", "/healthz")
+
+_ERROR_HEADINGS = {
+    403: "Not allowed",
+    404: "Page not found",
+    409: "That could not be done",
+}
+
+# A stale alert deep link is the journey this handler exists for: an old email tapped on a phone,
+# pointing at a collection that has since been deleted (or at a different Cairn instance).
+_NOT_FOUND_EXPLANATION = (
+    "This collection no longer exists, or the link is from a different Cairn instance. "
+    "Nothing is wrong with your files — only the address is stale."
+)
+
+
+def _explanation(status_code: int, path: str) -> str:
+    if status_code != 404:
+        return "Cairn could not complete that request."
+    # Only a collection URL warrants the collection wording; a mistyped panel path is its own case.
+    if path.startswith("/collection"):
+        return _NOT_FOUND_EXPLANATION
+    return "That address does not exist in this Cairn panel."
+
+
+def _wants_html(request: Request) -> bool:
+    """True for a browser navigation. htmx/fetch/CLI callers send */* or JSON and keep JSON."""
+    return "text/html" in request.headers.get("accept", "")
+
+
+@app.exception_handler(StarletteHTTPException)
+async def panel_error_handler(request: Request, exc: StarletteHTTPException):
+    """Render panel errors as a branded page; leave the API/JSON contract untouched.
+
+    Without this a stale `/collection/{id}/review` link — exactly what alerts now hand out —
+    dead-ends in a raw `{"detail": ...}` blob with no branding and no way back.
+    """
+    path = request.url.path
+    is_json_client = path.startswith(_JSON_ONLY_PREFIXES) or not _wants_html(request)
+    if is_json_client:
+        return await http_exception_handler(request, exc)
+
+    detail = exc.detail if isinstance(exc.detail, str) else ""
+    ctx = {
+        "status_code": exc.status_code,
+        "heading": _ERROR_HEADINGS.get(exc.status_code, "Something went wrong"),
+        "explanation": _explanation(exc.status_code, path),
+        # Shell defaults: the error page must render without touching the datastore, since the
+        # datastore may be exactly what failed.
+        "page": "",
+        "mode": "dark" if request.cookies.get("cairn_mode") == "dark" else "light",
+        "auth_mode": get_settings().auth_mode,
+        "username": "",
+        "is_admin": False,
+        "user_email": "",
+        "sidebar_collections": [],
+        "alert_count": 0,
+        "csrf_token": "",
+        "detail": detail,
+    }
+    return panel_templates.TemplateResponse(
+        request, "error.html", ctx, status_code=exc.status_code, headers=exc.headers
+    )

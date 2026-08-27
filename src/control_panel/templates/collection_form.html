@@ -144,7 +144,15 @@
           <input class="input" name="email_to" id="email-to" type="text" style="margin-top:10px"
                  value="{{ ed.email_to if ed else '' }}" placeholder="alerts@example.com, you@example.com" />
           <div class="field__hint">Where to nag when this collection changes. Comma-separate multiple recipients.</div>
-          <div class="field__hint">Alerts carry a link to this collection’s review page (set the address under Settings → Notifications). The review page is owner-scoped, so the link opens for this collection’s owner — anyone else reaches a &ldquo;not found&rdquo; page.</div>
+          <div class="field__hint">Alerts carry a link to this collection’s review page (set the address under Settings → Notifications).</div>
+          {# Who can actually open that link depends on the auth mode, and getting this wrong is a
+             real disclosure risk: an operator who forwards an alert email trusts this sentence. In
+             `single` mode there is no login wall in Cairn at all — say so plainly. #}
+          {% if auth_mode == "multi" %}
+            <div class="field__hint">The review page is owner-scoped, so the link opens for this collection’s owner — anyone else reaches a &ldquo;not found&rdquo; page.</div>
+          {% else %}
+            <div class="field__hint">Cairn does not gate that link itself in single-user mode: anyone who can reach the panel’s address can open it and see these files. Whatever fronts the panel — your reverse proxy or SSO — is what controls access, so only forward an alert to someone you would give panel access.</div>
+          {% endif %}
         </label>
       </div>
     </div>
