@@ -545,13 +545,38 @@ async def scan_collection(
                 parts.append(f"{summary.missing} missing")
             if summary.modified:
                 parts.append(f"{summary.modified} modified")
+
+            # The deep link is a convenience; being told at all is the product. So resolving the
+            # effective settings and building the review URL sit in their OWN guard: whatever goes
+            # wrong here (a broken session, a corrupt stored public_url, a link-builder bug) yields
+            # a link-free alert that is still constructed and still dispatched, with env-derived
+            # settings as the transport fallback. The enclosing block protects the *scan*; this one
+            # protects the *alert*.
+            eff_settings = get_settings()
+            review_url: str | None = None
+            try:
+                from .panel_url import panel_link
+
+                eff_settings = await app_settings.effective_settings(session, eff_settings)
+                review_url = panel_link(
+                    eff_settings.public_url, f"/collection/{collection.id}/review"
+                )
+            except Exception:
+                eff_settings = get_settings()
+                review_url = None
+                logging.getLogger("cairn.scanner").exception(
+                    "building the alert review link failed for collection %s; "
+                    "sending a link-free alert",
+                    collection.id,
+                )
+
             alert = Alert(
                 collection_name=collection.name,
                 summary=", ".join(parts) or "changes detected",
                 paths=[rp for _kind, rp in summary.alarming],
                 detected_at=now,
+                url=review_url,
             )
-            eff_settings = await app_settings.effective_settings(session, get_settings())
             await notify_dispatch(alert, collection, eff_settings)
         except Exception:
             logging.getLogger("cairn.scanner").exception(

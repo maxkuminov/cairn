@@ -120,6 +120,28 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > bust. A "Send test email" button (`POST /settings/smtp/test`) verifies the config. The SMTP
 > password lives in the DB (homelab choice; a departure from "secrets via env only"). Follow-up:
 > source the scaffolded Signal CallMeBot key from env (not `alert_json`) before enabling that channel.
+> **Alert deep links (add-alert-deep-links):** an alert now carries `Alert.url` — a one-click link to
+> `{public_url}/collection/{id}/review`, so the reader lands on the missing/modified list with the
+> acknowledge/accept/copy-paths controls in reach instead of "review it in the panel" with no address.
+> The address is the new optional **`public_url`** setting (`CAIRN_PUBLIC_URL`, or **Settings →
+> Notifications → Panel address**, admin-only, stored in `app_settings` with the usual DB-wins-over-env
+> overlay; saving empty *deletes* the row so the env value reappears). The grammar and the single link
+> builder live in `src/services/panel_url.py` (`normalize_public_url` / `panel_link`) — never
+> string-concatenate a URL at a call site; the value is normalized to pure ASCII because it goes
+> verbatim into ntfy's `Click` header. Unset ⇒ `url=None` and every channel emits byte-identical
+> output to before. **Validation is fail-soft at load, fail-loud on save:** a bad `CAIRN_PUBLIC_URL`
+> is logged and treated as unset (raising in `get_settings()` would stop startup, scanning and every
+> alert over a cosmetic setting), while the panel refuses it inline; a stored override is
+> re-validated on *every* overlay read, since `model_copy(update=...)` skips validators. At the
+> scanner's dispatch site the settings lookup + link build sit in their **own nested `try/except`**
+> inside the existing best-effort block — any failure yields a link-free alert that is still
+> constructed and still dispatched (env settings as the transport fallback): a convenience must never
+> sit on the path deciding whether the operator is told. Settings' health-monitoring URL is derived
+> from the same setting, falling back to a visibly-labelled example. **Accepted limitation:** the
+> review page is owner-scoped (`_get_owned_collection` 404s for a non-owner, deliberately not
+> disclosing existence) and alert recipients are arbitrary addresses, not Cairn users — so in `multi`
+> mode a non-owner recipient reaches "not found". Hinted in the collection alert-routing form;
+> mapping recipients to users is Phase-2 auth work, and weakening the scoping is the wrong trade.
 > Deploy auth caveat: DESIGN says "app owns its own auth, no OAuth proxy" — that only holds in
 > `multi` mode (Phase 2). In **single mode the panel has no login wall**, so the homelab deploy
 > fronts it with Traefik `chain-oauth@file` (Google OAuth), with `/healthz` kept public on a

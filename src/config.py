@@ -7,18 +7,23 @@ host-specific paths are never hardcoded — they arrive via env or a referenced 
 
 from __future__ import annotations
 
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
+
+from .services.panel_url import normalize_public_url
+
+_log = logging.getLogger("cairn.config")
 
 # Default public OpenTimestamps calendars (the same set the ``ots`` CLI submits to).
 DEFAULT_OTS_CALENDARS = [
@@ -88,6 +93,9 @@ class Settings(BaseSettings):
     ots_stamp_batch_size: int = 256
 
     # --- Runtime ---
+    # Externally-reachable base URL of the panel (e.g. https://cairn.example.com), used to build
+    # the deep links in alerts. Optional, not a secret, never inferred — see services/panel_url.py.
+    public_url: str | None = None
     auto_migrate: bool = False
     host: str = "0.0.0.0"
     port: int = 8000
@@ -110,6 +118,25 @@ class Settings(BaseSettings):
 
     # --- Optional YAML overlay path (read in _YamlConfigSource) ---
     config_file: Path | None = None
+
+    @field_validator("public_url", mode="before")
+    @classmethod
+    def _coerce_public_url(cls, value: Any) -> str | None:
+        """Normalize ``public_url``, or fall back to unset — **never raise**.
+
+        ``get_settings()`` is ``@lru_cache``d and builds the whole model, so raising here would
+        take down startup, scanning, the scheduler and every alert over a cosmetic link setting.
+        For a tool whose job is noticing that files changed, that trades a missing hyperlink for
+        the exact failure it exists to prevent. Fail-soft at load; the panel-save boundary, where a
+        human is present to read the error, is where an invalid value is refused loudly.
+        """
+        if value is None:
+            return None
+        try:
+            return normalize_public_url(str(value))
+        except ValueError as exc:
+            _log.warning("CAIRN_PUBLIC_URL ignored (%s): %r", exc, value)
+            return None
 
     @model_validator(mode="after")
     def _validate(self) -> "Settings":

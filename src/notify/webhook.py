@@ -1,4 +1,10 @@
-"""Webhook channel: POST a JSON alert payload to a configured URL (httpx, short timeout)."""
+"""Webhook channel: POST a JSON alert payload to a configured URL (httpx, short timeout).
+
+The review link is added as a ``url`` key **only when one exists**. A ``"url": null`` would be a
+new field for every existing consumer, and a strict one that rejects unknown or null-valued
+fields would answer non-2xx — which ``dispatch`` only logs, so the operator would silently never
+learn a file went missing. Omission is the backward-compatible shape.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +29,8 @@ class WebhookNotifier:
             "severity": alert.severity,
             "detected_at": alert.detected_at.isoformat() if alert.detected_at else None,
         }
+        if alert.url:
+            payload["url"] = alert.url
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 resp = await client.post(self.url, json=payload)

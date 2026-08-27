@@ -101,6 +101,7 @@ annotated list. The ones that matter most for a deployment:
 | `CAIRN_AUTH_MODE` | `single` (no login wall — needs a proxy) or `multi` (Phase 2). |
 | `CAIRN_SECRET_KEY` | Session-cookie signing key. The app refuses to start if empty/placeholder. |
 | `CAIRN_HOSTNAME` | Public hostname your proxy routes to. |
+| `CAIRN_PUBLIC_URL` | Optional. The panel's full public base URL (`https://cairn.example.com`) — the address a **human** reaches through the proxy, not the container's bind address. Alert emails use it to link straight to the affected collection's review page. Unset = alerts carry no link. |
 | `CAIRN_DATABASE_URL` | SQLite path on the writable volume (default `sqlite+aiosqlite:////app/data/cairn.db`). |
 | `CAIRN_PROOF_STORE_PATH` | `.ots` proof store on the writable volume. |
 | `CAIRN_VERIFY_BACKEND` | `explorer` (works out of the box) or `node` (your own Bitcoin node, fully trustless). |
@@ -108,7 +109,15 @@ annotated list. The ones that matter most for a deployment:
 | `CAIRN_AUTO_MIGRATE` | `1` runs migrations on startup; `0` to manage them with `make migrate`. |
 
 SMTP alert settings can be set via `CAIRN_SMTP_*` env vars **or** in the panel (Settings →
-Notifications); panel values are stored in the DB and override the env defaults.
+Notifications); panel values are stored in the DB and override the env defaults. The same is true
+of `CAIRN_PUBLIC_URL`, which appears there as **Panel address** (admin-only) and also drives the
+health-monitoring URL that page shows.
+
+A malformed `CAIRN_PUBLIC_URL` is deliberately **not** fatal: it is logged, treated as unset, and
+startup, scanning, and alerting carry on without the link. A cosmetic setting must never cost you a
+scan. Saving one in the panel *is* refused with an inline error — there a human is present to fix
+it. Note the review page is owner-scoped, so in `multi` mode the link is actionable by the
+collection's owner; other recipients reach a "not found" page.
 
 ## Operations
 

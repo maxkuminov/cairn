@@ -21,6 +21,8 @@ class SignalCallMeBotNotifier:
         text = f"Cairn: {alert.summary} in {alert.collection_name}"
         if alert.paths:
             text += "\n" + "\n".join(alert.paths)
+        if alert.url:
+            text += f"\n\n{alert.url}"  # httpx percent-encodes it into the query string
         params = {"phone": self.phone, "apikey": self.apikey, "text": text}
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:

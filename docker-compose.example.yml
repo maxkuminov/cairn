@@ -9,6 +9,13 @@
 #
 # To adapt to your environment, set in `.env`:
 #   CAIRN_HOSTNAME    -- public hostname the reverse proxy routes to
+#   CAIRN_PUBLIC_URL  -- optional: the panel's full public base URL (e.g.
+#                        https://cairn.example.com), i.e. the address a human
+#                        opens in a browser through the proxy below -- NOT the
+#                        container's http://cairn:8000 bind address. Alerts use
+#                        it to link straight to the affected collection's review
+#                        page; unset means alerts carry no link. Overridable in
+#                        the panel (Settings -> Notifications).
 #   REGISTRY          -- image registry (default localhost:5000)
 #   DATA_HOST_PATH    -- host path for the SQLite DB (writable)
 #   PROOFS_HOST_PATH  -- host path for the .ots proof store (writable)

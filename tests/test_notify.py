@@ -537,3 +537,224 @@ def test_settings_smtp_save_and_render(cairn_env):
         # The password is never rendered back; the form shows an "unchanged" hint instead.
         assert "hunter2" not in page.text
         assert "unchanged" in page.text
+
+
+# --- review deep links: per-channel linked / link-free contracts -----------------------------
+#
+# The link is a convenience; the alert is the product. Every assertion below that looks fussy is
+# guarding the same thing: adding the link must not change, break, or silently drop a delivery for a
+# deployment that never configures `public_url`.
+
+_REVIEW_URL = "https://cairn.example.com/collection/7/review"
+
+
+def _smtp_settings():
+    from src.config import Settings
+
+    return Settings(
+        smtp_host="mail.example.com",
+        smtp_port=587,
+        smtp_starttls=False,
+        smtp_from="cairn@example.com",
+        email_provider="local",
+    )
+
+
+def _send_email(monkeypatch, alert):
+    """Send `alert` through a fake smtplib and return the composed EmailMessage."""
+    import smtplib
+
+    from src.notify.smtp import SmtpNotifier
+
+    _FakeSMTP.instances.clear()
+    monkeypatch.setattr(smtplib, "SMTP", _FakeSMTP)
+    notifier = SmtpNotifier(recipients=["ops@example.com"], settings=_smtp_settings())
+    asyncio.run(notifier.send(alert))
+    return _FakeSMTP.instances[0].sent
+
+
+def test_smtp_with_link_is_multipart_with_anchor(cairn_env, monkeypatch):
+    from src.notify.base import Alert
+
+    msg = _send_email(
+        monkeypatch,
+        Alert(
+            collection_name="Photos",
+            summary="1 missing",
+            paths=["a/lost.jpg"],
+            detected_at=datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc),
+            url=_REVIEW_URL,
+        ),
+    )
+
+    assert msg.is_multipart()
+    assert msg.get_content_type() == "multipart/alternative"
+
+    plain = msg.get_body(preferencelist=("plain",)).get_content()
+    # A plaintext-only client must lose nothing: collection, summary, time, paths, link.
+    assert "Photos" in plain and "1 missing" in plain
+    assert "2026-05-31T12:00:00+00:00" in plain
+    assert "a/lost.jpg" in plain
+    assert f"Review and acknowledge: {_REVIEW_URL}" in plain
+
+    html_part = msg.get_body(preferencelist=("html",)).get_content()
+    assert f'href="{_REVIEW_URL}"' in html_part
+    assert "Review in Cairn" in html_part
+
+
+def test_smtp_without_link_is_single_plaintext_part(cairn_env, monkeypatch):
+    """The byte-identical-when-unconfigured guarantee: no multipart, previous wording."""
+    from src.notify.base import Alert
+
+    msg = _send_email(
+        monkeypatch,
+        Alert(collection_name="Photos", summary="1 missing", paths=["a/lost.jpg"]),
+    )
+
+    assert not msg.is_multipart()
+    assert msg.get_content_type() == "text/plain"
+    body = msg.get_content()
+    assert "Review and acknowledge in the Cairn panel." in body
+    assert "http" not in body
+
+
+def test_smtp_escapes_paths_and_name_in_html_only(cairn_env, monkeypatch):
+    """Paths are attacker-influenced — a path is data in the HTML part, and raw text in plaintext."""
+    from src.notify.base import Alert
+
+    evil_path = "<img src=x onerror=alert(1)>.txt"
+    evil_name = "Tax & <Legal>"
+    msg = _send_email(
+        monkeypatch,
+        Alert(
+            collection_name=evil_name,
+            summary="1 missing",
+            paths=[evil_path],
+            url=_REVIEW_URL,
+        ),
+    )
+
+    html_part = msg.get_body(preferencelist=("html",)).get_content()
+    assert "<img" not in html_part  # never rendered as markup
+    assert "&lt;img src=x onerror=alert(1)&gt;.txt" in html_part
+    assert "Tax &amp; &lt;Legal&gt;" in html_part
+
+    plain = msg.get_body(preferencelist=("plain",)).get_content()
+    assert evil_path in plain  # plaintext is not HTML; escaping it there would corrupt the path
+    assert evil_name in plain
+
+
+# --- HTTP channels: a fake httpx client records what would go on the wire --------------------
+
+
+class _FakeResponse:
+    status_code = 200
+
+
+class _FakeAsyncClient:
+    """Stands in for ``httpx.AsyncClient``; records (method, url, kwargs) for every request."""
+
+    calls: list = []
+
+    def __init__(self, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, **kwargs):
+        _FakeAsyncClient.calls.append(("POST", url, kwargs))
+        return _FakeResponse()
+
+    async def get(self, url, **kwargs):
+        _FakeAsyncClient.calls.append(("GET", url, kwargs))
+        return _FakeResponse()
+
+
+@pytest.fixture
+def http_calls(monkeypatch):
+    import httpx
+
+    _FakeAsyncClient.calls = []
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+    return _FakeAsyncClient.calls
+
+
+def _alert(url=None):
+    from src.notify.base import Alert
+
+    return Alert(collection_name="Photos", summary="1 missing", paths=["a/lost.jpg"], url=url)
+
+
+def test_webhook_includes_url_only_when_linked(http_calls):
+    from src.notify.webhook import WebhookNotifier
+
+    notifier = WebhookNotifier(url="https://hooks.example.com/x")
+
+    asyncio.run(notifier.send(_alert(_REVIEW_URL)))
+    assert http_calls[0][2]["json"]["url"] == _REVIEW_URL
+
+    asyncio.run(notifier.send(_alert()))
+    payload = http_calls[1][2]["json"]
+    # Absent, not null: a strict consumer that rejects a null field would turn a cosmetic
+    # change into a silently missed alert.
+    assert "url" not in payload
+
+
+def test_ntfy_click_header_only_when_linked(http_calls):
+    from src.notify.ntfy import NtfyNotifier
+
+    notifier = NtfyNotifier(topic="cairn", server="https://ntfy.sh")
+
+    asyncio.run(notifier.send(_alert(_REVIEW_URL)))
+    _, _, kwargs = http_calls[0]
+    assert kwargs["headers"]["Click"] == _REVIEW_URL
+    assert _REVIEW_URL.encode("utf-8") in kwargs["content"]
+
+    asyncio.run(notifier.send(_alert()))
+    assert "Click" not in http_calls[1][2]["headers"]
+
+
+def test_ntfy_non_ascii_url_still_sends_without_click_header(http_calls):
+    """Regression for the ntfy-only operator: an unencodable URL must not cost the whole alert."""
+    from src.notify.ntfy import NtfyNotifier
+
+    notifier = NtfyNotifier(topic="cairn", server="https://ntfy.sh")
+    # normalize_public_url would never produce this, but the header must not be the thing that
+    # raises if one ever reaches here.
+    asyncio.run(notifier.send(_alert("https://exämple.com/collection/7/review")))
+
+    assert len(http_calls) == 1  # the notification was still attempted
+    assert "Click" not in http_calls[0][2]["headers"]
+
+
+def test_signal_appends_link_when_present(http_calls):
+    from src.notify.signal_callmebot import SignalCallMeBotNotifier
+
+    notifier = SignalCallMeBotNotifier(phone="+10000000000", apikey="k")
+
+    asyncio.run(notifier.send(_alert()))
+    baseline = http_calls[0][2]["params"]["text"]
+    assert _REVIEW_URL not in baseline
+
+    asyncio.run(notifier.send(_alert(_REVIEW_URL)))
+    linked = http_calls[1][2]["params"]["text"]
+    assert linked.startswith(baseline)
+    assert linked.endswith(_REVIEW_URL)
+
+
+def test_kuma_msg_includes_link_when_present(http_calls):
+    from src.notify.kuma_push import KumaPushNotifier
+
+    notifier = KumaPushNotifier(push_url="https://kuma.example.com/api/push/abc")
+
+    asyncio.run(notifier.send(_alert()))
+    assert http_calls[0][2]["params"]["msg"] == "1 missing in Photos"
+
+    asyncio.run(notifier.send(_alert(_REVIEW_URL)))
+    msg = http_calls[1][2]["params"]["msg"]
+    assert msg.startswith("1 missing in Photos")
+    assert _REVIEW_URL in msg

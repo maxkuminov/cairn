@@ -27,6 +27,9 @@ class Alert:
     paths: list[str] = field(default_factory=list)  # affected relpaths (already capped)
     detected_at: datetime | None = None
     severity: str = "alert"
+    # Absolute deep link to the collection's review page, or None when no public_url is configured.
+    # Channels omit it entirely when unset — Cairn never emits a relative or inferred link.
+    url: str | None = None
 
 
 class NotifierError(Exception):

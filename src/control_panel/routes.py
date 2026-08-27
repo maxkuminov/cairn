@@ -31,6 +31,7 @@ from ..services import app_settings as app_settings_svc
 from ..services import collections as collections_svc
 from ..services import proofs as proofs_svc
 from ..services import scanner as scanner_svc
+from ..services.panel_url import panel_link
 
 router = APIRouter(tags=["panel"])
 templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
@@ -1438,6 +1439,10 @@ async def verify_export(
 
 # --- settings -------------------------------------------------------------------------------
 
+# Shown (labelled as an example) only while no panel address is configured. Cairn never guesses its
+# own address: an address presented as real but wrong is worse than one openly marked illustrative.
+EXAMPLE_HEALTHZ_URL = "https://cairn.example.com/healthz"
+
 
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(
@@ -1459,7 +1464,14 @@ async def settings_page(
             "tab": tab if tab in ("notifications", "verify", "admin") else "notifications",
             "is_admin_tab_available": user.is_admin and settings.auth_mode == "multi",
             "can_edit_smtp": user.is_admin,
-            "healthz_url": "https://cairn.example.com/healthz",
+            # The panel's own public address: what alert deep links are built from, and what the
+            # health-monitoring URL below is derived from. Blank when unconfigured — in that case
+            # the template shows an address labelled as an example, never as the real one.
+            "public_url": eff.public_url or "",
+            "healthz_url": panel_link(eff.public_url, "/healthz") or EXAMPLE_HEALTHZ_URL,
+            "healthz_url_is_example": eff.public_url is None,
+            "public_url_saved": saved == "url",
+            "public_url_error": msg if saved == "urlerr" else "",
             "email_provider": eff.email_provider,
             # Editable form values (blank when unset, never a placeholder string).
             "smtp_host": eff.smtp_host or "",
@@ -1483,7 +1495,7 @@ async def settings_page(
 
 
 def _require_admin(user: User) -> None:
-    """Global SMTP config is app-wide: only admins may edit it (the sole user is admin in single mode)."""
+    """App-wide config (SMTP server, panel address) is admin-only (the sole user is admin in single mode)."""
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="admin only")
 
@@ -1515,6 +1527,34 @@ async def settings_smtp_save(
     return RedirectResponse("/settings?tab=notifications&saved=1", status_code=303)
 
 
+@router.post("/settings/panel-url", dependencies=[Depends(verify_csrf)])
+async def settings_panel_url_save(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(current_user),
+    public_url: str = Form(""),
+):
+    """Save the panel's externally-reachable base URL (admin-only, app-wide like the SMTP config).
+
+    This is the **fail-loud** half of the setting's validation: a human is present to read the
+    error, so a malformed address is refused here with the reason shown inline and the stored value
+    left untouched. (At config-load time the same value is fail-soft — a typo must never cost a
+    scan or an alert.) An empty value clears the override, which *deletes* the row so
+    ``CAIRN_PUBLIC_URL`` becomes visible again.
+    """
+    from urllib.parse import quote
+
+    _require_admin(user)
+    try:
+        await app_settings_svc.save_public_url(session, public_url)
+    except ValueError as exc:
+        return RedirectResponse(
+            "/settings?tab=notifications&saved=urlerr&msg=" + quote(str(exc)[:200]),
+            status_code=303,
+        )
+    return RedirectResponse("/settings?tab=notifications&saved=url", status_code=303)
+
+
 @router.post("/settings/smtp/test", dependencies=[Depends(verify_csrf)])
 async def settings_smtp_test(
     request: Request,
@@ -1540,6 +1580,11 @@ async def settings_smtp_test(
         summary="test alert",
         paths=["This is a test email from Cairn — your SMTP settings work."],
         detected_at=datetime.now(timezone.utc),
+        # No specific collection is involved, so point at the collections list. The test exists to
+        # prove the configured address is reachable *before* a real incident depends on it; with no
+        # panel address configured this stays None and the mail is link-free, exactly as an alert
+        # would be.
+        url=panel_link(eff.public_url, "/collections"),
     )
     try:
         await SmtpNotifier(recipients=[recipient], settings=eff).send(alert)

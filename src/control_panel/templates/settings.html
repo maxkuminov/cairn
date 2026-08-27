@@ -20,6 +20,53 @@
 
   {% if tab == "notifications" %}
     <div class="settings-stack">
+      {# Panel address — what every alert deep link is built from. Admin-only, app-wide. #}
+      <div>
+        <div class="section-label">Panel address</div>
+        <div class="card" style="margin-top:12px;padding:20px">
+          <div class="channel-head" style="margin-bottom:14px">
+            <div class="icon-tile icon-tile--muted">{{ m.icon("link", size=19) }}</div>
+            <div class="channel-head__body">
+              <div class="channel-title-row">
+                <span class="channel-title">Public URL</span>
+                {% if public_url %}
+                  <span class="pill pill--soft pill--ok pill--sm">{{ m.icon("checkCircle", size=11.5, stroke=2) }}Set</span>
+                {% else %}
+                  <span class="pill pill--soft pill--muted pill--sm">Not set</span>
+                {% endif %}
+              </div>
+              <div class="channel-sub">The address alert links point at — use the one a person actually reaches in a browser (your reverse proxy), not the container's bind address. Leave it blank and alerts are sent without a link.</div>
+            </div>
+          </div>
+
+          {% if public_url_saved %}
+            <div class="info-strip" style="margin-bottom:12px">{{ m.icon("checkCircle", size=15) }}<span>Panel address saved.</span></div>
+          {% endif %}
+          {% if public_url_error %}
+            <div class="info-strip" style="margin-bottom:12px;color:var(--danger)">{{ m.icon("alert", size=15) }}<span>Not saved — the address {{ public_url_error }}. The previous value is still in effect.</span></div>
+          {% endif %}
+
+          {% if can_edit_smtp %}
+            <form method="post" action="/settings/panel-url" class="form-stack" style="gap:14px">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+              <label class="field">
+                <div class="field__label-row"><span class="field__label">Base URL</span></div>
+                <input class="input" name="public_url" type="text" value="{{ public_url }}" placeholder="https://cairn.example.com" />
+                <div class="field__hint">http:// or https://, host, optional port and path prefix — no query string or fragment. A LAN address such as <span class="mono">http://192.168.1.10:8000</span> is fine if that is what you open. Clear the field to fall back to <span class="mono">CAIRN_PUBLIC_URL</span>.</div>
+              </label>
+              <div class="flex" style="gap:10px">
+                <button type="submit" class="btn btn--primary">Save panel address</button>
+              </div>
+            </form>
+          {% else %}
+            <div class="config-preview">
+              <div class="config-row"><span class="config-row__key">Base URL</span><span class="config-row__val mono">{{ public_url or "(not configured)" }}</span></div>
+            </div>
+            <div style="font-size:12px;color:var(--text-3);margin-top:10px">The panel address is managed by an administrator.</div>
+          {% endif %}
+        </div>
+      </div>
+
       {# Email channel #}
       <div>
         <div class="section-label">Alert channel</div>
@@ -148,8 +195,12 @@
           <div class="mono-row" style="margin-top:13px">
             <span style="color:var(--ok);font-weight:600">GET</span>
             <span class="text-2" id="healthz-url">{{ healthz_url }}</span>
+            {% if healthz_url_is_example %}<span class="pill pill--soft pill--muted pill--sm">Example</span>{% endif %}
             <button type="button" class="copy-btn" style="margin-left:auto" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('healthz-url').textContent.trim())">{{ m.icon("copy", size=15) }}</button>
           </div>
+          {% if healthz_url_is_example %}
+            <div class="field__hint" style="margin-top:10px">That is an illustrative address, not yours — set the panel address above and this becomes your real health URL.</div>
+          {% endif %}
         </div>
       </div>
 

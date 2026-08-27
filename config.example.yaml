@@ -10,6 +10,16 @@
 # ─── Core (same settings as .env, YAML form) ─────────────────────────────────
 auth_mode: single                                   # single | multi
 hostname: cairn.example.com
+# OPTIONAL — the panel's externally-reachable base URL: the address a HUMAN
+# opens in a browser (your reverse proxy), NOT the container's bind address.
+# Alerts use it to link straight to the affected collection's review page, and
+# Settings derives the health-monitoring URL from it. Unset = alerts carry no
+# link (Cairn never guesses an address it was not given).
+# Grammar: http/https, a host, an optional port and path prefix
+# (https://example.com/cairn); no query string, fragment, or credentials.
+# Also settable in the panel (Settings -> Notifications), which wins over both
+# this file and CAIRN_PUBLIC_URL.
+# public_url: https://cairn.example.com
 # secret_key: ""                                    # prefer setting via env, never commit
 database_url: sqlite+aiosqlite:////app/data/cairn.db
 proof_store_path: /app/proofs
