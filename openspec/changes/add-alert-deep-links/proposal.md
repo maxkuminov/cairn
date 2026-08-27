@@ -21,7 +21,9 @@ setting for it. (The same gap is why the Settings page currently prints a hardco
 
 ## What Changes
 - Add a **`public_url`** setting (`CAIRN_PUBLIC_URL`) — the externally-reachable base URL of the
-  panel, e.g. `https://cairn.example.com`. Optional, default unset, no secret content.
+  panel, e.g. `https://cairn.example.com`. Optional, default unset, no secret content. A private or
+  LAN address is fine if that is what a human actually reaches; a sub-path (`https://x/cairn`) is
+  supported.
 - Make it **editable from the panel** (Settings → Notifications, admin-only) using the existing
   `app_settings` key-value overlay, on the same **DB-wins-over-env** precedence as the SMTP config.
   No migration: `app_settings` already exists and is keyed by `Settings` field name.
@@ -37,10 +39,23 @@ setting for it. (The same gap is why the Settings page currently prints a hardco
   - **Signal (CallMeBot)** — the URL appended to the message text.
   - **Kuma push** is a heartbeat ping with no message body; it is unchanged.
 - **Graceful when unset:** with no `public_url` configured, `Alert.url` is `None` and every channel
-  falls back to today's wording. Cairn SHALL NOT emit a relative, `localhost`, or guessed link into
-  an outbound alert — a wrong link is worse than no link.
-- Validate on save: an absolute `http(s)://` URL only, trailing slash normalized away; anything else
-  is rejected with a form error rather than silently stored.
+  produces **byte-identical output to today** — the email stays a single `text/plain` part (no
+  multipart), and the webhook omits the `url` key rather than sending `null` (a strict consumer
+  rejecting an unknown field would turn a cosmetic change into a missed alert). Cairn never emits a
+  relative or inferred link — a wrong link is worse than no link.
+- **Validation is fail-soft at load, fail-loud on save.** A malformed `CAIRN_PUBLIC_URL` in the
+  environment is treated as unset and logged, never raised: `get_settings()` builds the whole cached
+  model, so raising there would stop startup, scanning, and every alert over a cosmetic setting. At
+  the panel-save boundary a human is present, so an invalid value is refused with an inline error.
+- **Stored overrides are validated on read.** The existing overlay applies DB values via
+  `model_copy(update=...)`, which does not re-run validators — so a preseeded, hand-edited, or
+  corrupt `app_settings.public_url` would otherwise sail straight into an outbound email. Every
+  overlay read re-validates and drops a bad value back to the env default.
+- **Escaping:** the collection name, summary, and every path are HTML-escaped in the new HTML part,
+  and the URL is attribute-escaped in its `href`. File paths are attacker-influenced — anyone who
+  can create a file in a watched directory chooses a string that Cairn then mails out.
+- **Link construction cannot suppress an alert.** It sits in its own guard, separate from alert
+  construction and dispatch: any failure yields a link-free alert that is still delivered.
 - Use the same setting for the Settings page's monitoring URL, replacing the hardcoded
   `https://cairn.example.com/healthz` placeholder (which stays as the shown example only while
   `public_url` is unset).
@@ -64,7 +79,8 @@ setting for it. (The same gap is why the Settings page currently prints a hardco
 - **Affected specs:** `alerting` (alerts carry a deep link to the review page; the fallback when
   unconfigured), `configuration` (the `public_url` setting and its validation), `web-panel` (the
   admin-editable Panel address field and its use for the monitoring URL).
-- **Affected code:** `src/config.py` (`public_url` field + validator),
+- **Affected code:** `src/services/panel_url.py` (new: URL grammar + link builder),
+  `src/config.py` (`public_url` field + fail-soft validator),
   `src/services/app_settings.py` (a `public_url` key in the overlay + a save function),
   `src/notify/base.py` (`Alert.url`), `src/notify/smtp.py` (plaintext line + HTML alternative part),
   `src/notify/webhook.py`, `src/notify/ntfy.py`, `src/notify/signal_callmebot.py`,
@@ -75,5 +91,16 @@ setting for it. (The same gap is why the Settings page currently prints a hardco
 - **Data migration:** none. `public_url` is a new *row* in the existing `app_settings` table,
   written only when an admin saves it; an absent row falls back to env, and an unset env falls back
   to today's link-free behavior.
-- **Backward compatibility:** total. Existing deploys that never set `public_url` send byte-identical
-  alerts to what they send now.
+- **Backward compatibility:** total, and specified as a testable requirement rather than an
+  aspiration. Existing deploys that never set `public_url` send byte-identical alerts on every
+  channel to what they send now.
+
+## Review history
+The first draft of this proposal was audited by an independent cross-family reviewer before any code
+was written, and returned FAIL with one blocker and five majors. All eight findings are folded in
+above: link-building could suppress dispatch (blocker); a strict env validator could stop the whole
+application; the URL grammar was underspecified and self-contradictory (it accepted `localhost`
+while the alerting delta forbade it, and permitted query/fragment/userinfo/control characters);
+DB overrides bypassed validation entirely; unconditional multipart contradicted the byte-identical
+claim; `"url": null` did the same for webhooks; the clear-override storage contract was undefined;
+and the test plan covered almost none of the per-channel contracts.

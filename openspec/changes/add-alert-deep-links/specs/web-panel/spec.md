@@ -9,9 +9,11 @@ externally-reachable base URL, saved to the app-settings overlay and used to bui
 carried by outbound alerts. Non-admin users SHALL see the configured value read-only, consistent
 with how the shared SMTP configuration is presented.
 
-Saving SHALL validate the value as an absolute `http`/`https` URL and SHALL report a clear inline
-error on rejection, leaving the stored value unchanged. Saving an empty value SHALL clear the
-override and fall back to the environment.
+Saving SHALL validate the value against the canonical base-URL grammar (see the `configuration`
+capability) and SHALL report a clear inline error on rejection, leaving the stored value unchanged.
+This is the fail-loud boundary: a human is present to read the error, so an invalid value is
+refused here rather than silently ignored. Saving an empty value SHALL **delete** the stored row,
+so the environment value becomes visible again.
 
 The page SHALL derive the health-monitoring URL it displays from this setting rather than a
 hardcoded address, showing an illustrative example only while the setting is unconfigured, labelled
@@ -32,8 +34,14 @@ as an example.
 #### Scenario: Clearing the field falls back to the environment
 
 - **WHEN** an admin saves an empty panel address
-- **THEN** the stored override SHALL be cleared and the effective value SHALL come from
+- **THEN** the stored row SHALL be deleted and the effective value SHALL come from
   `CAIRN_PUBLIC_URL`, or be unset if that is unset
+
+#### Scenario: The saved address is shown back, normalized
+
+- **WHEN** an admin saves `https://cairn.example.com/` and reloads the Settings page
+- **THEN** the field SHALL show the normalized `https://cairn.example.com`, so the operator sees
+  exactly what links will be built from
 
 #### Scenario: Non-admins cannot edit it
 
