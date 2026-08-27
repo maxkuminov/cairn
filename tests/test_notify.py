@@ -906,3 +906,34 @@ def test_smtp_no_usable_recipient_raises_rather_than_sending_nowhere():
 
     with pytest.raises(NotifierError):
         _build_alert_message(recipients=["not-an-address"])
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Legitimate shapes that MUST survive. Silently dropping one of these is the same failure
+        # as a lost alert: a person stops being told that their files changed.
+        (['"odd name"@example.com'], ['"odd name"@example.com']),
+        (['"Team, Ops" <ops@example.com>'], ['"Team, Ops" <ops@example.com>']),
+        (["ops+cairn@example.com"], ["ops+cairn@example.com"]),
+        (["Ops <ops@example.com>"], ["Ops <ops@example.com>"]),
+        (["a@mail.sub.example.co.uk"], ["a@mail.sub.example.co.uk"]),
+        (["a@x.com, b@y.com"], ["a@x.com", "b@y.com"]),  # comma-pasted
+        (["a@x.com; b@y.com"], ["a@x.com", "b@y.com"]),  # Outlook-style semicolon paste
+        # Malformed or smuggled shapes that must NOT reach the header.
+        (["a@x.com>\r\nBcc: evil@example.com"], []),
+        (["a@x.com b@y.com"], []),  # fused, unquoted
+        (["a@b@x.com"], []),
+        (["garbage"], []),
+    ],
+)
+def test_smtp_recipient_parsing_keeps_the_legitimate_and_drops_the_rest(raw, expected):
+    """A comma inside a quoted display name, and a quoted local part, are both legal.
+
+    An earlier version split on commas itself and rejected any whitespace, which tore
+    ``"Team, Ops" <ops@x>`` apart and threw away ``"odd name"@example.com`` — dropping real
+    recipients while trying to keep malformed ones out.
+    """
+    from src.notify.smtp import _addresses
+
+    assert [str(a) for a in _addresses(raw)] == expected

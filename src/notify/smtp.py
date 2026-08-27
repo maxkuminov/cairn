@@ -61,9 +61,12 @@ _MUTED_STYLE = "color:#71717a;font-size:13px"
 # the operator the alert about their missing files. Collapse instead of refuse: a slightly odd
 # subject line delivers, a raised header does not.
 _HEADER_CONTROLS = re.compile(r"[\x00-\x1f\x7f]+")
-# Separators a human might paste between addresses. Splitting on these BEFORE sanitizing keeps a
-# smuggled newline from fusing two addresses into one malformed one.
-_RECIPIENT_SPLIT = re.compile(r"[\r\n,;]+")
+# Only CR/LF. Splitting on these BEFORE sanitizing keeps a smuggled newline from fusing two
+# addresses into one malformed one. Commas are deliberately NOT split here — `getaddresses` is
+# RFC-aware and respects quoting, so it separates `a@x, b@y` correctly while keeping a quoted
+# display name like `"Team, Ops" <ops@x>` intact. Splitting on commas ourselves tore that apart and
+# silently dropped a legitimate recipient.
+_RECIPIENT_SPLIT = re.compile(r"[\r\n]+")
 
 
 def _header_value(value: str) -> str:
@@ -84,28 +87,55 @@ def _addresses(recipients: list[str]) -> list[Address]:
     would then be ambiguous, and since ``send_message`` derives the SMTP envelope from it, the mail
     could go nowhere while appearing to have been sent.
 
-    So a recipient is first *split* on the separators a human might paste (CR, LF, comma,
-    semicolon) and each piece is then parsed and kept only if it looks like a real
-    ``local@domain``. A bad piece is dropped with a warning rather than poisoning the whole header
-    — one mistyped address must not cost the other recipients their alert.
+    So a recipient is first *split* on CR/LF — the smuggling vector — and the pieces are then
+    parsed by ``getaddresses``, which handles comma separation and quoting per RFC. A piece is kept
+    only if it is a real ``local@domain``. A bad piece is dropped with a warning rather than
+    poisoning the whole header — one mistyped address must not cost the other recipients their
+    alert, and equally, a *legitimate* address must never be dropped: a recipient silently removed
+    here is a person who stops being told that their files changed.
     """
     candidates: list[str] = []
     for raw in recipients:
         for piece in _RECIPIENT_SPLIT.split(raw):
-            cleaned = _header_value(piece)
-            if cleaned:
-                candidates.append(cleaned)
+            # Semicolons separate addresses in Outlook-style pastes, but only split on them when
+            # no quoting is in play — a quoted display name may legitimately contain one, and
+            # tearing it apart would drop a real recipient.
+            subpieces = piece.split(";") if '"' not in piece else [piece]
+            for sub in subpieces:
+                cleaned = _header_value(sub)
+                if cleaned:
+                    candidates.append(cleaned)
 
     out: list[Address] = []
     for display, addr in getaddresses(candidates):
         addr = addr.strip()
-        local, sep, domain = addr.partition("@")
-        if not sep or not local or not domain or addr.count("@") != 1:
+        # rpartition, so a quoted local part containing "@" splits at the real separator.
+        local, sep, domain = addr.rpartition("@")
+        if not sep or not local or not domain:
             _log.warning("dropping unusable alert recipient %r", addr)
             continue
-        if any(ch.isspace() for ch in addr):
+
+        # A quoted local part is legal and may contain spaces and a second "@"
+        # (`"odd name"@example.com`). Note it *before* unquoting, because the quotes are what make
+        # the whitespace below legitimate.
+        quoted_local = len(local) > 1 and local.startswith('"') and local.endswith('"')
+        if quoted_local:
+            # getaddresses returns the quotes; Address re-quotes as needed, so leaving them would
+            # yield the double-quoted `""odd name""@example.com`.
+            local = local[1:-1]
+        elif local.count("@") or domain.count("@"):
             _log.warning("dropping unusable alert recipient %r", addr)
             continue
+
+        # Whitespace otherwise signals a fused address (`a@x.com b@y.com`), which would make the
+        # header ambiguous and the envelope wrong.
+        if not quoted_local and any(ch.isspace() for ch in addr):
+            _log.warning("dropping unusable alert recipient %r", addr)
+            continue
+        if any(ch.isspace() for ch in domain):
+            _log.warning("dropping unusable alert recipient %r", addr)
+            continue
+
         # Address quotes the display name properly, so keeping it is safe and friendlier.
         out.append(Address(display_name=_header_value(display), username=local, domain=domain))
     return out
