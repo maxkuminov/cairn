@@ -208,8 +208,11 @@ only).
     regardless of the cadence window (a live scan is fresh while it keeps heartbeating). Reuse the
     constant already imported at `scheduler.py:41` — the switch and the reaper MUST apply the same
     threshold, or a run is dead to one and alive to the other.
-  - neither leg → `pending` while `created_at` is within the threshold, else `stale`. An abandoned
-    `running` run (stale heartbeat) with no recent completion is **`stale`**, not fresh.
+  - neither leg → `pending` ONLY while `created_at` is within the threshold **and no `kind='scan'`
+    run exists at all for the collection** (grace covers never-scanned, nothing else); a terminal
+    `error`/`interrupted` first scan inside the grace window is therefore **`stale`**, matching the
+    normative requirement. An abandoned `running` run (stale heartbeat) with no recent completion
+    is **`stale`**, not fresh.
   - `last_scan_age_seconds` is the age of the newest **completed** scan, `None` when there is none —
     so a collection fresh only by leg (b) reports `fresh` with a `None` age.
   Comment the function with both legs and with why (b) cannot simply trust `result='running'`.
@@ -327,7 +330,9 @@ only).
   (c) a `running` scan whose `coalesce(heartbeat_at, started)` is older than
   `RUN_HEARTBEAT_TIMEOUT_SECONDS`, no completed scan → **`stale`** (an abandoned claim is not
   evidence of a scan);
-  (d) no completed and no running scan, past the startup grace → `stale`; inside it → `pending`;
+  (d) no scan run of any kind, past the startup grace → `stale`; inside it → `pending`; AND a
+  first scan that terminated `error`/`interrupted` **inside** the grace window → `stale` (grace is
+  gated on the absence of every `kind='scan'` run, per the normative requirement);
   (e) a recent `stamp`/`upgrade` run alone → still `stale`.
 - [ ] 3.26 **Panel health is owner-scoped, `/healthz` is not:** user B owns a stale collection and
   user A owns only fresh ones → A's `/health-pill` renders healthy and none of A's cards carry a
@@ -464,6 +469,7 @@ gap** — add the test, do not delete the row.
 | --- | --- |
 | Healthy and fresh | 3.25(a) |
 | A stale corpus trips the switch | 3.25(a) |
+| A failed first scan inside grace is stale, not pending | 3.25(d) |
 | A long scan that is still alive keeps its corpus fresh | 3.25(b) |
 | An abandoned in-flight scan confers no freshness | 3.25(c) |
 | No completed scan and no running scan is stale | 3.25(d) |
