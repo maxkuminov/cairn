@@ -30,6 +30,10 @@ from ..models.db import Collection, Event, FileEntry, Run
 
 CHUNK = 1 << 20  # 1 MiB streamed-hash chunk
 BATCH = 500  # files per DB commit
+# Ids per `WHERE id IN (...)` chunk when system-acknowledging a restored file's open
+# `missing` events (SQLite's bound-parameter ceiling is 999). Kept a module constant so a
+# test can drive the chunking without creating hundreds of files.
+ACK_CHUNK = 500
 ALARM_PATH_CAP = 20  # max relpaths carried into a batched alert
 
 
@@ -284,6 +288,9 @@ async def scan_collection(
     }
     seen: set[str] = set()
     added_buffer: list[FileEntry] = []
+    # Ids of files restored in this batch (missing → ok). `_drain` system-acknowledges their open
+    # `missing` events inside the same transaction that commits the restore (design D10).
+    restored_ids: list[int] = []
     # Every row this scan creates (status 'new'), retained across batch drains so the post-walk
     # move/rename pass can correlate them with files that went missing in the same run.
     new_rows: list[FileEntry] = []
@@ -300,7 +307,7 @@ async def scan_collection(
             summary.alarming.append((kind, relpath))
 
     async def _drain() -> None:
-        nonlocal added_buffer
+        nonlocal added_buffer, restored_ids
         await session.flush()  # assign ids to freshly-added FileEntry rows
         for obj in added_buffer:
             # `added` is informational, not a nag: born acknowledged (system ack, no user) so a
@@ -316,8 +323,33 @@ async def scan_collection(
                 )
             )
         added_buffer = []
+        # A restored file's own `missing` alert is closed by the same transaction that commits the
+        # restore. `_drain` commits every BATCH files *and* after the walk, so acknowledging later
+        # would already have persisted `status='ok'` + the `restored` event: a failing ack would
+        # then leave a healthy file wearing an open `missing` alert nothing can clear. Raising here
+        # instead takes the whole batch down with it — the exception reaches the scan body's
+        # `except`, the session is rolled back and the run finalizes `error` (design D10).
+        for i in range(0, len(restored_ids), ACK_CHUNK):
+            chunk = restored_ids[i : i + ACK_CHUNK]
+            # `kind == "missing"` is load-bearing: a blanket `WHERE file_id = ...` would also
+            # acknowledge an open WORM `modified` event on the same file, which is a different
+            # alert about a different thing and nothing here has resolved it (#12's rejected
+            # fix 7). `acknowledged_by=None` marks a *system* ack, matching the born-acked
+            # convention used for `added`/`restored`/`moved`.
+            await session.execute(
+                update(Event)
+                .where(
+                    Event.file_id.in_(chunk),
+                    Event.kind == "missing",
+                    Event.acknowledged_at.is_(None),
+                )
+                .values(acknowledged_at=now, acknowledged_by=None)
+            )
         run.processed = processed  # persist live progress for the status badge
         await session.commit()
+        # Cleared only once the commit has returned, so a rollback never drops an acknowledgement
+        # that was never persisted.
+        restored_ids = []
 
     try:
         for relpath in iter_relpaths(root, globs):
@@ -383,6 +415,9 @@ async def scan_collection(
                             acknowledged_by=None,
                         )
                     )
+                    # Close the file's own open `missing` alert(s) in the same transaction that
+                    # commits this restore — drained in `_drain` just below (design D10).
+                    restored_ids.append(row.id)
                     summary.restored += 1
                 elif deep or row.size != size or row.mtime != mtime or row.sha256 is None:
                     # Deep pass re-hashes every file; a normal pass only when size/mtime moved or

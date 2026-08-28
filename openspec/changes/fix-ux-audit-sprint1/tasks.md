@@ -370,23 +370,23 @@ Files owned: `src/services/scanner.py`, `templates/collection_review.html`,
 **No `routes.py` change is needed** — `review_open` and `total_issues` are already in the review
 context.
 
-- [ ] 4.1 Rename the per-file action to **"Mark reviewed"** in `partials/review_row.html` and
+- [x] 4.1 Rename the per-file action to **"Mark reviewed"** in `partials/review_row.html` and
   `partials/_event_row.html`; the acknowledged state becomes a muted **"Reviewed"** pill.
-- [ ] 4.2 Add the hint copy **verbatim** from #17 next to the per-file control: *"Notes that you've
+- [x] 4.2 Add the hint copy **verbatim** from #17 next to the per-file control: *"Notes that you've
   seen this. The file stays on record as missing or changed, keeps any existence proof, and the
   collection keeps its Alert status until you restore or retire it."*
-- [ ] 4.3 `collection_review.html`: the collection-scoped bulk action becomes **"Mark all N
+- [x] 4.3 `collection_review.html`: the collection-scoped bulk action becomes **"Mark all N
   reviewed"** with the hint *"Clears N alerts in this collection. Nothing about the files changes."*
   (`N` = `review_open`).
-- [ ] 4.4 `partials/_events_controls.html`: the dashboard bulk action becomes **"Mark all N reviewed
+- [x] 4.4 `partials/_events_controls.html`: the dashboard bulk action becomes **"Mark all N reviewed
   (all collections)"** with an `hx-confirm` and the hint *"Marks N alerts across all your collections
   as seen. The files stay missing or changed and the red counts stay — this only clears the
   notification."* It reaches events outside the 20-row feed, which is why it needs both the count and
   the confirm.
-- [ ] 4.5 Un-invert the styles (design D8): per-file Mark reviewed → `btn--subtle` unconditionally
+- [x] 4.5 Un-invert the styles (design D8): per-file Mark reviewed → `btn--subtle` unconditionally
   (drop the `btn--danger if missing` conditional, in both row templates); the review panel's **Accept
   all changes** → `btn--danger`.
-- [ ] 4.6 `collection_review.html`: render the two keys Slice B publishes for the D14 accept guard
+- [x] 4.6 `collection_review.html`: render the two keys Slice B publishes for the D14 accept guard
   (design D12 — this file stays single-owner, so the lines land here rather than in a B-owned
   partial). (a) A hidden `<input type="hidden" name="population_fp" value="{{ population_fp }}">`
   inside the **Accept all changes** form — the same hunk 4.5 already edits to give that button
@@ -395,9 +395,9 @@ context.
   refused by the guard lands (`?stale=1`), and without it the operator sees an ordinary review page
   with no account of why their click did nothing. Neither line invents state: both come from the
   route context.
-- [ ] 4.7 `src/services/scanner.py`: in the restore branch (`elif row.status == "missing":`) append
+- [x] 4.7 `src/services/scanner.py`: in the restore branch (`elif row.status == "missing":`) append
   `row.id` to a `restored_ids` buffer.
-- [ ] 4.8 `src/services/scanner.py::_drain`: drain `restored_ids` **inside `_drain`, before its own
+- [x] 4.8 `src/services/scanner.py::_drain`: drain `restored_ids` **inside `_drain`, before its own
   `await session.commit()`**, over the ids accumulated since the previous drain — one
   `update(Event)` per ≤500-id chunk setting `acknowledged_at=now, acknowledged_by=None` where
   `Event.file_id.in_(chunk) AND Event.kind == "missing" AND Event.acknowledged_at.is_(None)` — and
@@ -408,30 +408,30 @@ context.
   wearing an open `missing` alert that nothing can clear. Inside `_drain` a failing ack takes its
   own batch down with it — the exception reaches the scan body's `except`, the session is rolled
   back and the run finalizes `error`.
-- [ ] 4.9 **`kind == "missing"` is load-bearing.** A blanket `WHERE file_id = …` would also clear an
+- [x] 4.9 **`kind == "missing"` is load-bearing.** A blanket `WHERE file_id = …` would also clear an
   open WORM `modified` event on the same file (#12's rejected fix 7). Leave a comment saying so.
-- [ ] 4.10 `collection_review.html`: render the **Acknowledge half** of the resolve panel whenever
+- [x] 4.10 `collection_review.html`: render the **Acknowledge half** of the resolve panel whenever
   `review_open > 0`, independently of `total_issues`. In the `total_issues == 0 and review_open > 0`
   state, head it *"{n} alerts from files that have since been restored"* and **do not render
   Accept** — from an otherwise-empty page it would baseline every pending `new` file (design D9).
-- [ ] 4.11 `collection_review.html`: the truncation notice deep-links to
+- [x] 4.11 `collection_review.html`: the truncation notice deep-links to
   `/collection/{id}?view=list&filter=issues` (Slice B adds the parameter support; land this line
   regardless — it degrades to today's behaviour if merged first).
-- [ ] 4.12 Recovery step 3 copy → *"Run **Scan now** on the collection page"*.
-- [ ] 4.13 The Copy-paths buttons get a `.catch()` on `navigator.clipboard.writeText` **and** a
+- [x] 4.12 Recovery step 3 copy → *"Run **Scan now** on the collection page"*.
+- [x] 4.13 The Copy-paths buttons get a `.catch()` on `navigator.clipboard.writeText` **and** a
   hidden-textarea + `document.execCommand('copy')` fallback for non-secure contexts, with the
   failure path visibly reporting that the copy did not happen.
-- [ ] 4.14 `tests/test_scanner.py`: a file that goes missing (open `missing` event) and is then
+- [x] 4.14 `tests/test_scanner.py`: a file that goes missing (open `missing` event) and is then
   restored has that event acknowledged with `acknowledged_by IS NULL`; **an open WORM `modified`
   event on the same file is left untouched**; a `missing` event on a *different* file is untouched;
   more restored files than one chunk holds are all acknowledged (drive the chunk size, don't create
   500 files).
-- [ ] 4.15 `tests/test_scanner.py` — **failure injection**: make the acknowledgement UPDATE raise
+- [x] 4.15 `tests/test_scanner.py` — **failure injection**: make the acknowledgement UPDATE raise
   and assert the batch's restore did **not** commit either (the file is still `missing`, no
   `restored` event, its `missing` event still open) and the run finalized `error`. This is the
   scenario D10's placement exists for; without it a regression that moves the ack back after the
   walk passes every other test.
-- [ ] 4.16 `tests/test_ux_review.py` (new): a collection with `total_issues == 0` and
+- [x] 4.16 `tests/test_ux_review.py` (new): a collection with `total_issues == 0` and
   `review_open > 0` renders the Mark-all-reviewed control and **no Accept form**; the per-file
   control reads "Mark reviewed" and carries `btn--subtle`; the dashboard bulk control carries
   `hx-confirm` and its count; the review page's Accept form carries a non-empty `population_fp`

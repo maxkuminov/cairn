@@ -24,12 +24,17 @@
   </div>
   <div class="review-row__action">
     {% if it.acked %}
-      <span class="pill pill--soft pill--ok pill--sm">{{ m.icon('check', size=12, stroke=2) }} Acknowledged</span>
+      <span class="pill pill--soft pill--muted pill--sm">{{ m.icon('check', size=12, stroke=2) }} Reviewed</span>
     {% else %}
-      <button class="btn btn--sm {{ 'btn--danger' if it.status == 'missing' else 'btn--subtle' }}"
+      {# Style un-inverted (design D8): marking a row reviewed is a reading-log write that changes
+         nothing about the file, so it is never the loud button — the destructive Accept-all is.
+         The hint rides as this control's tooltip and is shown once in full above the list;
+         repeating the paragraph on up to 500 rows would bury it. #}
+      <button class="btn btn--sm btn--subtle"
+              title="Notes that you've seen this. The file stays on record as missing or changed, keeps any existence proof, and the collection keeps its Alert status until you restore or retire it."
               hx-post="/events/{{ it.event_id }}/ack?view=review"
               hx-target="#review-row-{{ it.id }}" hx-swap="outerHTML">
-        {{ m.icon('check', size=14, stroke=2) }} Acknowledge
+        {{ m.icon('check', size=14, stroke=2) }} Mark reviewed
       </button>
     {% endif %}
   </div>
