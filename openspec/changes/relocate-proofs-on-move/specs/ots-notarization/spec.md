@@ -164,7 +164,12 @@ commit, because the occupant's own publication may never have been made durable.
 entry SHALL be removed only after the pointer update is committed, and removal SHALL be
 loss-proof: the sweep SHALL first copy the source into the superseded archive, and after
 removal SHALL re-verify the destination still holds the proof, restoring from that archive copy
-if it does not (the defense against a filesystem whose identity reporting lies). Where source
+if it does not (the defense against a filesystem whose identity reporting lies). A restoration
+that itself fails SHALL raise so the per-row warning fires, and the state it leaves — a
+committed pointer naming an absent entry, with the archive holding the durable copy — is
+exactly the restore leg's admission shape and SHALL be repaired by the next sweep; removal and
+directory-sync failures after the pointer commit SHALL likewise surface as the post-commit
+warning, never a silent success. Where source
 and destination resolve to the **same directory entry** (a case-only rename on a
 case-insensitive filesystem, detected by filesystem identity AND confirmed by byte comparison —
 identity alone SHALL NOT be trusted), the sweep SHALL update the pointer to the canonical
@@ -319,6 +324,14 @@ there archives it under the never-destroy rules.
   naming an absent entry while the superseded archive holds the corroborated copy
 - **THEN** the next sweep SHALL select the row (absent recorded entry is an admission shape),
   republish the archived copy at the recorded path, and warn that a restore occurred
+
+#### Scenario: A failed restoration is loud and heals on the next sweep
+
+- **WHEN** loss-proof removal's re-verification finds the destination gone and the immediate
+  restoration from the archive copy itself fails (the store briefly refuses writes)
+- **THEN** the sweep SHALL warn for that row, the archive copy SHALL remain, and the next
+  sweep SHALL admit the row through the restore leg and republish the proof at the recorded
+  path
 
 #### Scenario: An absent proof with no corroborated copy is loud, not silent
 
