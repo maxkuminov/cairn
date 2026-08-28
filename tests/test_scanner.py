@@ -636,6 +636,56 @@ async def test_non_utf8_filename_does_not_churn(cairn_env):
 
 
 @pytest.mark.asyncio
+async def test_unreadable_entry_lstat_is_skipped_not_fatal(cairn_env, monkeypatch):
+    """An OSError from `is_symlink()` skips that one entry — it never aborts the scan."""
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry, Run
+    from src.services.scanner import scan_collection
+
+    root = cairn_env / "guarded"
+    root.mkdir()
+    (root / "a.txt").write_text("alpha")
+    (root / "b.txt").write_text("beta")
+    (root / "unreadable.txt").write_text("denied")
+    cid = await _make_collection(root, mode="worm")
+    sm = get_sessionmaker()
+
+    # `is_symlink()` lstats: a permission-denied or transiently unreachable directory entry raises
+    # here, before the guarded `stat()` the scanner reaches next.
+    real_is_symlink = Path.is_symlink
+
+    def denied(self):
+        if self.name == "unreadable.txt":
+            raise PermissionError(13, "Permission denied")
+        return real_is_symlink(self)
+
+    monkeypatch.setattr(Path, "is_symlink", denied)
+
+    async with sm() as s:
+        summ = await scan_collection(s, await s.get(Collection, cid))
+        # The readable peers are tracked; the failing entry is counted as an error → partial.
+        assert summ.added == 2
+        assert summ.errors == 1
+        assert summ.result == "partial"
+
+        files = list(await s.scalars(select(FileEntry).where(FileEntry.collection_id == cid)))
+        assert sorted(f.relpath for f in files) == ["a.txt", "b.txt"]  # no row for the skipped entry
+
+        run = await s.scalar(select(Run).where(Run.collection_id == cid).order_by(Run.id.desc()))
+        assert run.result == "partial" and run.finished is not None
+        assert run.errors == 1
+        assert "lstat" in run.error_sample and "unreadable.txt" in run.error_sample
+
+    async with sm() as s:
+        # Re-scanning is stable: the skipped entry never reads as missing or added.
+        summ = await scan_collection(s, await s.get(Collection, cid))
+        assert summ.added == 0 and summ.missing == 0 and summ.modified == 0
+        assert summ.errors == 1 and summ.result == "partial"
+        assert await _events(s, cid, kind="missing") == []
+        assert len(await _events(s, cid, kind="added")) == 2
+
+
+@pytest.mark.asyncio
 async def test_scan_failure_finalizes_run_not_left_running(cairn_env, monkeypatch):
     """An unexpected exception mid-scan finalizes the run to error — never left `running`."""
     from src.database import get_sessionmaker

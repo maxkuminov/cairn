@@ -402,11 +402,11 @@ async def scan_collection(
         # one summary WARNING so the operator can find them.
         skipped_unstorable = 0
         unstorable_sample: list[bytes] = []
-        # One bounded, ASCII-safe diagnostic rendering per skipped file, across ALL THREE causes
-        # (un-storable name, `stat` OSError, hash OSError), persisted to `runs.error_sample` and
-        # logged once at finalize. Capped here as well as at serialization so a pathological tree
-        # cannot grow this list without bound in memory either. `summary.errors` keeps the TRUE
-        # total; this list only ever holds the sample.
+        # One bounded, ASCII-safe diagnostic rendering per skipped file, across ALL FOUR causes
+        # (un-storable name, `is_symlink` OSError, `stat` OSError, hash OSError), persisted to
+        # `runs.error_sample` and logged once at finalize. Capped here as well as at serialization
+        # so a pathological tree cannot grow this list without bound in memory either.
+        # `summary.errors` keeps the TRUE total; this list only ever holds the sample.
         error_entries: list[str] = []
 
         def _record_alarm(kind: str, relpath: str) -> None:
@@ -489,7 +489,16 @@ async def scan_collection(
                         error_entries.append(_render_skip("unstorable-name", relpath))
                     continue
                 full = root / relpath
-                if full.is_symlink():
+                try:
+                    is_symlink = full.is_symlink()
+                except OSError:
+                    # `is_symlink()` lstats, so it fails for the same reasons the guarded `stat()`
+                    # below does; unguarded it aborts the whole scan instead of skipping one entry.
+                    summary.errors += 1
+                    if len(error_entries) < RUN_ERROR_SAMPLE_MAX:
+                        error_entries.append(_render_skip("lstat", relpath))
+                    continue
+                if is_symlink:
                     continue  # conservative: never follow symlinks out of the read-only jail
                 try:
                     st = full.stat()
