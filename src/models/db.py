@@ -119,6 +119,11 @@ class FileEntry(Base):
     ots_path: Mapped[str | None] = mapped_column(Text)
     ots_state: Mapped[str] = mapped_column(String(16), default="none", nullable=False)
     ots_stamped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The digest the proof Cairn placed at `ots_path` commits to — provenance for that proof, not
+    # a second copy of the file's hash. Written together with `ots_path`/`ots_state` and cleared
+    # together with them; NULL means "no proof, or a proof placed before provenance was recorded".
+    # Never filled from an uncorroborated read of the `.ots` (design D2).
+    ots_digest: Mapped[str | None] = mapped_column(String(64))
 
     __table_args__ = (
         UniqueConstraint("collection_id", "relpath", name="uq_files_collection_relpath"),
@@ -213,7 +218,7 @@ class Event(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "kind in ('added','modified','missing','restored','moved')",
+            "kind in ('added','modified','missing','restored','moved','restored_changed')",
             name="ck_events_kind",
         ),
     )

@@ -29,13 +29,13 @@ Standing guardrails for every slice:
 
 ## 1. Shared prep (once, on the base branch, before fan-out)
 
-- [ ] 1.1 Confirm the working tree is on the intended base: `src/services/ots.py` contains
+- [x] 1.1 Confirm the working tree is on the intended base: `src/services/ots.py` contains
   `_place_proof` **and** `_proof_output_writable`; `src/control_panel/routes.py` contains
   `mismatch_blame`; `openspec/changes/archive/2026-08-28-fix-ux-audit-sprint1/` exists. If any is
   missing, the branch is stale — stop.
-- [ ] 1.2 Confirm the Alembic head is `0010_auto_baseline_new` (`ls alembic/versions/`). This
+- [x] 1.2 Confirm the Alembic head is `0010_auto_baseline_new` (`ls alembic/versions/`). This
   change's revision is `0011`; if the head has moved, renumber before writing it.
-- [ ] 1.3 Write `alembic/versions/0011_proof_provenance_and_restored_changed.py`:
+- [x] 1.3 Write `alembic/versions/0011_proof_provenance_and_restored_changed.py`:
   - `files.ots_digest` — plain `op.add_column("files", sa.Column("ots_digest", sa.String(64),
     nullable=True))`. **No in-migration backfill** (design D3 — the backfill is the upgrade pass's,
     task 2.11a); no table rebuild.
@@ -46,18 +46,18 @@ Standing guardrails for every slice:
     message naming the kind and the count and telling the operator to export or deliberately
     re-classify those events before downgrading. It must NOT delete them and must NOT rewrite them to
     `modified` (design D4a). With no such rows it narrows the CHECK and drops `ots_digest` normally.
-- [ ] 1.4 `src/models/db.py`: add `FileEntry.ots_digest: Mapped[str | None] =
+- [x] 1.4 `src/models/db.py`: add `FileEntry.ots_digest: Mapped[str | None] =
   mapped_column(String(64))` with a docstring/comment stating it records **the digest the proof
   Cairn placed at `ots_path` commits to**, written with `ots_path`/`ots_state` and cleared with
   them; and extend `ck_events_kind` to `('added','modified','missing','restored','moved','restored_changed')`.
-- [ ] 1.4a Test the migration against a **populated** database: apply `0011`, insert a
+- [x] 1.4a Test the migration against a **populated** database: apply `0011`, insert a
   `restored_changed` event, run `alembic downgrade` and assert it **fails** with the count-naming
   error and that every table is untouched (no event deleted or re-kinded); then delete that event and
   assert the downgrade succeeds, restoring the old CHECK and dropping `files.ots_digest` while
   preserving every other row. Lives with shared prep because shared prep owns the migration.
-- [ ] 1.5 Baseline the gates so slice failures are attributable: `PYTHONPATH=. pytest -q` and
+- [x] 1.5 Baseline the gates so slice failures are attributable: `PYTHONPATH=. pytest -q` and
   `ruff check .` green, and `alembic upgrade head` clean against a scratch DB.
-- [ ] 1.6 Commit shared prep on the base branch **before** creating any worktree — agent worktrees
+- [x] 1.6 Commit shared prep on the base branch **before** creating any worktree — agent worktrees
   branch from the committed base, so an uncommitted migration is invisible to both slices.
 
 ## 2. Slice A — a stamp never destroys a proof, and each proof records its digest (#15, D1 IOU)
