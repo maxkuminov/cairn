@@ -967,3 +967,95 @@ def test_a_store_that_cannot_lock_warns_once_and_keeps_the_datastore_fence(
 
     asyncio.run(go())
     _dispose_engine()
+
+
+# --- 5.3o.1 coverage completion: the keepalive's failure branch --------------------------------
+#
+# The keepalive is a liveness signal, not part of the work, so a broken datastore must cost the
+# operation nothing: no exception into the block, and no unbounded WARNING loop for the life of a
+# multi-hour pass. Giving up is deliberately safe — the lease then ages out and the fence stops the
+# operation before it mutates anything — which is only true if giving up is also *quiet*.
+
+
+def test_a_failing_keepalive_gives_up_after_three_tries_and_never_touches_the_operation(
+    monkeypatch, caplog
+):
+    """A keepalive whose write always raises: the block completes, it is logged, and it stops at 3.
+
+    Three properties, all of which a naive implementation gets wrong in a different direction:
+
+    * **Nothing surfaces into the operation.** `run_keepalive` awaits its task on exit, so an
+      exception escaping `_keepalive_loop` would be re-raised there — a failed heartbeat would fail
+      the scan it was only supposed to be describing.
+    * **The counter is consecutive, not cumulative.** The scripted success in the middle must reset
+      it; otherwise a datastore that hiccups twice an hour apart retires the keepalive on an
+      operation that is perfectly healthy.
+    * **It stops.** After the third failure in a row there are no further attempts at all — not a
+      slower loop, not a quieter one.
+    """
+    import logging
+    import sqlite3
+
+    from sqlalchemy.exc import OperationalError
+
+    from src.services import collections as coll
+
+    # `alembic`'s `fileConfig` (run by other modules' `cairn_env`) applies
+    # `disable_existing_loggers`, which leaves an already-created `cairn.*` logger disabled — the
+    # caplog assertions below would then pass or fail for reasons unrelated to the keepalive.
+    coll_log = logging.getLogger("cairn.collections")
+    coll_log.disabled = False
+    coll_log.propagate = True
+
+    calls: list[int] = []
+    # fail, fail, SUCCEED (the counter resets here), then fail three in a row -> give up at six.
+    script = [False, False, True, False, False, False]
+
+    async def flaky_touch(run_id):
+        calls.append(run_id)
+        i = len(calls) - 1
+        if i < len(script) and script[i]:
+            return True
+        raise OperationalError(
+            "UPDATE runs SET heartbeat_at", {}, sqlite3.OperationalError("database is locked")
+        )
+
+    monkeypatch.setattr(coll, "touch_heartbeat", flaky_touch)
+
+    body_finished: list[str] = []
+
+    async def go():
+        # The production interval is five minutes; only the timer is shrunk, not the mechanism.
+        async with coll.run_keepalive(4242, interval=0.01):
+            for _ in range(500):
+                await asyncio.sleep(0.01)
+                if len(calls) >= len(script):
+                    break
+            # Room for a seventh attempt, if the loop is going to make one.
+            await asyncio.sleep(0.25)
+            body_finished.append("the operation body ran to completion")
+
+    with caplog.at_level(logging.WARNING, logger="cairn.collections"):
+        asyncio.run(go())  # a keepalive failure re-raised on exit would fail HERE
+
+    assert body_finished == ["the operation body ran to completion"], (
+        "the operation did not complete: a keepalive failure reached the block it was wrapping"
+    )
+    assert calls == [4242] * 6, (
+        f"expected exactly 6 heartbeat attempts (2 fail, 1 succeed and reset, 3 fail and give up), "
+        f"got {len(calls)} — the keepalive either kept retrying a broken datastore or counted "
+        f"failures cumulatively"
+    )
+
+    messages = [r.getMessage() for r in caplog.records if r.name == "cairn.collections"]
+    failures = [m for m in messages if "keepalive heartbeat failed" in m]
+    assert len(failures) == 5, f"every failed attempt is reported once: {messages}"
+    assert "(1 in a row)" in failures[0] and "(1 in a row)" in failures[2], (
+        "the run of failures restarts after the successful heartbeat"
+    )
+    assert any("giving up after 3 consecutive failures" in m for m in messages), (
+        "the operator is told the lease is no longer being refreshed, and why"
+    )
+    assert any(r.exc_info for r in caplog.records if "keepalive heartbeat failed" in r.getMessage()), (
+        "the first failure of a run carries its traceback — a bare message cannot be diagnosed"
+    )

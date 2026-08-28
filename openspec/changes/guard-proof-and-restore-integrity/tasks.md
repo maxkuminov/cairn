@@ -669,21 +669,45 @@ about a **claim** the surfaces made that the check behind it did not establish. 
   post-acquisition re-check); the `ots-notarization` delta gains "Proof placement for one collection
   is serialized at the proof store itself" with four scenarios.
 
+- [x] 5.3q **Coverage completion (verifier follow-up, tests only — no production change).** Three
+  behaviours the implementation already had but nothing pinned:
+- [x] 5.3q.1 `tests/test_ux_review.py::test_event_feed_draws_a_changed_restore_as_an_alarm_with_both_digests`
+  — the panel renders what the scanner records. A scanner-driven changed restore reaches the
+  dashboard feed as **"Came back changed"** in the danger colours (label and icon chip, asserted
+  inside that row so a danger colour elsewhere cannot satisfy it), carrying `detail`'s
+  **recorded → found** digests in full and the file that they belong to, with the reading-log
+  control still offered because it is not born acknowledged. Without the `kind_meta` entry the row
+  falls through to the muted generic "Event" and nothing else fails.
+- [x] 5.3q.2 `tests/test_ux_dashboard.py::test_a_changed_restore_keeps_its_collection_off_all_clear`
+  (parametrized `worm`/`churn`) — an unresolved changed restore reads **"Attention"**, never
+  "All clear", on the dashboard card, the collection detail and the `op-status` fragment, and
+  `_collection_status` over the real counts returns `attention`. Churn is the case worth pinning:
+  an ordinary churn edit re-baselines to `ok` silently, so a row handled like one would leave the
+  collection green with an unacknowledged `restored_changed` event under it.
+- [x] 5.3q.3 `tests/test_proof_serialization.py::test_a_failing_keepalive_gives_up_after_three_tries_and_never_touches_the_operation`
+  — the keepalive's failure branch: `touch_heartbeat` is monkeypatched to raise, and the block
+  still completes (`run_keepalive` awaits its task on exit, so an escaping exception would fail the
+  operation the keepalive only describes), every failure is logged (first of a run with its
+  traceback), the scripted success in the middle **resets** the count, and after the third failure
+  in a row there are no further attempts at all.
+
 ## 5. Gates
 
 - [x] 5.1 **`openspec-verifier` subagent** audits the implementation against the spec deltas.
   Iterate to zero blocking gaps. It must not be an agent that wrote any of the code.
-- [ ] 5.2 **Adversarial Codex pass — mandatory.** This change touches the scan→diff→classify path
+- [x] 5.2 **Adversarial Codex pass — mandatory.** This change touches the scan→diff→classify path
   **and** OTS stamp/proof placement: both are CLAUDE.md's named mandatory triggers. Frame it as a
   defensive PASS/FAIL control review and tell it what "wrong" means here — **the expensive failure
   is a false negative**: a wrong restore that scans clean, an alarm that is acknowledged away, a
   proof that is destroyed or replaced by a weaker one, a `verify` that blames the wrong artifact,
   or an `ots_digest` recorded from a proof nothing corroborated. Commit first (Codex reads the
   committed tree), run it in the background with both redirects, and ask for the machine-readable
-  verdict block.
-- [ ] 5.3 Fix every BLOCKER/MAJOR and re-run until it converges, saying which findings were
+  verdict block. **Converged: final adversarial round (post-flock tree) returned PASS, zero
+  findings.**
+- [x] 5.3 Fix every BLOCKER/MAJOR and re-run until it converges, saying which findings were
   addressed. If successive rounds keep producing **new classes** of finding, escalate rather than
   tuning — that pattern means the design is wrong, not that the reviewer is thorough.
+  **Converged: final adversarial round (post-flock tree) returned PASS, zero findings.**
 - [ ] 5.4 Deploy: commit → push → `make deploy` → **`make migrate`** (this change adds revision
   `0011`, so the migrate step is required, not optional). Verify with `make status` / `/healthz`.
 - [ ] 5.5 **`user-representative` pass** on the live panel: the verify card's new proof-blame

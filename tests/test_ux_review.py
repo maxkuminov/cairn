@@ -482,3 +482,84 @@ def test_the_recovery_copy_buttons_go_through_the_one_shared_clipboard_helper(ca
     # The implementation ships once, from base.html, with the fallback and the visible result.
     assert body.count("function legacyCopy") == 1
     assert "execCommand" in body and ".catch(" in body and "Couldn't copy" in body
+
+
+# --- #21 coverage completion: the panel renders the alarm the scanner raises -------------------
+
+
+async def _scan_a_changed_restore(root, *, mode: str = "worm") -> tuple[int, str, str]:
+    """Drive the REAL scanner through present → absent → back-with-different-bytes.
+
+    Seeding the event by hand would prove the template renders a string a test wrote; this proves
+    the panel renders what the scanner actually records, `detail` digests included.
+
+    Returns ``(collection_id, recorded_digest, found_digest)``.
+    """
+    import hashlib
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection
+    from src.services.scanner import scan_collection
+
+    original, impostor = "the real deed", "a different document entirely"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "deed.pdf").write_text(original)
+    # `ots_mode="none"`: this is about the rendered row, and a `perfile` collection would send the
+    # post-scan stamp pass at a calendar.
+    cid = await seed_collection(root, ots_mode="none", mode=mode)
+
+    async def scan():
+        async with get_sessionmaker()() as s:
+            return await scan_collection(s, await s.get(Collection, cid))
+
+    await scan()
+    (root / "deed.pdf").unlink()
+    await scan()
+    (root / "deed.pdf").write_text(impostor)
+    summary = await scan()
+    assert summary.restored_changed == 1, "the fixture did not produce a changed restore"
+    return (
+        cid,
+        hashlib.sha256(original.encode()).hexdigest(),
+        hashlib.sha256(impostor.encode()).hexdigest(),
+    )
+
+
+def test_event_feed_draws_a_changed_restore_as_an_alarm_with_both_digests(cairn_env):
+    """`restored_changed` renders as "Came back changed", in danger colours, carrying both digests.
+
+    The kind is new, so the feed's `kind_meta` lookup could fall through to the muted generic
+    "Event" row and nothing would fail — a scanner alarm silently drawn as a grey informational
+    line, one step from the `restored` row it exists to be distinguished from. Asserted inside the
+    row itself so a danger colour elsewhere on the dashboard cannot satisfy it.
+    """
+    root = cairn_env / "photos"
+    captured: dict[str, str] = {}
+
+    async def seed():
+        _cid, recorded, found = await _scan_a_changed_restore(root)
+        captured.update(recorded=recorded, found=found)
+
+    with _make_client(cairn_env, seed) as client:
+        html = client.get("/").text
+
+    rows = html.split('<div class="event-row" id="event-row-')
+    matching = [r for r in rows if "Came back changed" in r]
+    assert len(matching) == 1, "exactly one changed-restore row belongs in the feed"
+    row = matching[0]
+
+    assert 'style="color:var(--danger)">Came back changed' in row, (
+        "the label must carry the danger colour, not the muted fallback"
+    )
+    assert "background:var(--danger-soft);color:var(--danger)" in row, (
+        "the icon chip is drawn with the alarming kinds"
+    )
+    assert "Restored" not in row, "it is never dressed up as the benign reappearance"
+
+    assert f"recorded {captured['recorded']} → found {captured['found']}" in row, (
+        "both digests in full: truncating either costs the operator the ability to identify what "
+        "actually came back"
+    )
+    assert "deed.pdf" in row, "an alarm is useless without the file it names"
+    # It alarms, so it is not born acknowledged: the row still offers the reading-log control.
+    assert "Mark reviewed" in row

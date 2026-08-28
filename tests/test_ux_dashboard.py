@@ -1070,3 +1070,67 @@ def test_a_non_lock_operational_error_is_not_reported_as_staleness(cairn_env, mo
             _post(client, "/collection/1/review/accept", fp, token)
 
     assert ("missing", "gone") in _aside(lambda s: _statuses(s, 1))
+
+
+# --- #21 coverage completion: a changed restore is never "All clear" --------------------------
+
+
+async def _scan_a_changed_restore(root, *, mode: str) -> int:
+    """Drive the REAL scanner through present → absent → back-with-different-bytes."""
+    from src.database import get_sessionmaker
+    from src.models.db import Collection
+    from src.services.scanner import scan_collection
+
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "deed.pdf").write_text("the real deed")
+    # `ots_mode="none"`: the status pill is the subject, and `perfile` would send the post-scan
+    # stamp pass at a calendar.
+    cid = await seed_collection(root, ots_mode="none", mode=mode)
+
+    async def scan():
+        async with get_sessionmaker()() as s:
+            return await scan_collection(s, await s.get(Collection, cid))
+
+    await scan()
+    (root / "deed.pdf").unlink()
+    await scan()
+    (root / "deed.pdf").write_text("a different document entirely")
+    summary = await scan()
+    assert summary.restored_changed == 1, "the fixture did not produce a changed restore"
+    return cid
+
+
+@pytest.mark.parametrize("mode", ["worm", "churn"])
+def test_a_changed_restore_keeps_its_collection_off_all_clear(cairn_env, mode):
+    """An unresolved changed restore reads "Attention" on every surface, in BOTH modes.
+
+    `_collection_status` derives the pill from `files.status` alone, and churn is the case worth
+    pinning: an ordinary churn edit re-baselines to `ok` silently, so if the changed-restore row
+    were ever handled like one, the collection would go on reading green while an unacknowledged
+    `restored_changed` event sat under it — the alarm raised and the operator never shown it.
+    """
+    root = cairn_env / f"{mode}-restore"
+    observed: dict = {}
+
+    async def seed():
+        from src.control_panel.routes import _collection_counts, _collection_status
+        from src.database import get_sessionmaker
+
+        cid = await _scan_a_changed_restore(root, mode=mode)
+        async with get_sessionmaker()() as s:
+            counts = await _collection_counts(s, cid)
+        observed["counts"] = counts
+        observed["status"] = _collection_status(counts)
+
+    with _make_client(cairn_env, seed) as client:
+        dash = client.get("/").text
+        detail = client.get("/collection/1").text
+        frag = client.get("/collection/1/op-status").text
+
+    assert observed["counts"]["modified"] == 1, "the restored row is still on record as changed"
+    assert observed["status"] == "attention", (
+        f"{mode}: a file that came back with different bytes leaves the collection needing a look"
+    )
+    for name, body in (("dashboard", dash), ("detail", detail), ("op-status", frag)):
+        assert "All clear" not in body, name
+        assert "Attention" in body, name
