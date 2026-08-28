@@ -54,6 +54,11 @@ The box gains `<form action="/verify" method="get">` + `name="q"`. `verify_page`
 partial uses and passes the results + query into `verify.html`, which seeds the existing search
 input and results region (the htmx live search then takes over for refinement).
 
+The placeholder / aria-label change from "Search files, paths, hashes…" to a wording that
+promises only what the backend does (file names and paths — e.g. "Search files and paths…"):
+advertising hash search over a relpath-LIKE backend teaches an operator that a pasted digest
+"isn't tracked" when it was simply never looked up. A bounded digest lookup is future work.
+
 *Why not htmx from the topbar?* The topbar exists on every page; a live-search dropdown there is
 a new component with focus/keyboard/empty-state semantics — real design work for another change.
 A GET navigation is honest, bookmarkable, and lands the user on the page whose whole purpose is
@@ -70,9 +75,25 @@ all"). Search (both `verify_search` and D1's initial results) drops the state fi
 searches all tracked files owned by the user; each result row shows its proof-state badge
 (reusing the existing badge macro), so an unstamped row is visibly unstamped in the list. The
 recent list keeps the anchored filter — its meaning is unchanged. Result rows stay clickable to
-the same per-file verify flow for every state (consistent with D3). Ordering: anchored-recency
-ordering (`ots_stamped_at DESC NULLS LAST`) is kept, so never-stamped rows sort last within the
-bounded result — search is for *finding*, and a determinate order matters more than which order.
+the same per-file verify flow for every state (consistent with D3).
+
+Three properties close the holes the first spec round left open:
+
+- **Blank stays default.** A blank or whitespace-only query (`GET /verify/search?q=` included)
+  renders the anchored-only recent listing, never the widened search — the widened population is
+  reachable only via a non-blank query, so clearing the input restores the page's default state
+  instead of leaking unstamped rows under the "Recent proofs" heading.
+- **Deterministic path order + disclosed truncation.** Search orders by `relpath ASC` (with a
+  collection tiebreaker), not `ots_stamped_at DESC` — a recency order plus a silent 50-row cap
+  makes an unstamped file that shares a searchable name with ≥50 stamped files unreachable by
+  any query. The result partial states the true total (`COUNT(*)` alongside the capped page):
+  "showing 50 of N matches — narrow your search" whenever total > cap. No pagination; a bounded
+  search whose truncation is disclosed and whose order is path-deterministic makes every target
+  reachable by refining, which is this page's job (finding one file to verify, not browsing).
+- **State-neutral search copy on both render paths.** The searchable-count line, search heading,
+  and no-match copy in `verify.html` + `partials/verify_results.html` describe *tracked files*,
+  not anchored files/proofs — an operator whose files are all unstamped must not read "0 files
+  with proofs" over a working search. Anchored wording survives only on the recent list.
 
 *Alternative considered*: a second "include unstamped" toggle — rejected; the operator doesn't
 know the distinction exists (that's the bug), so a toggle re-hides the same files behind a
@@ -103,6 +124,12 @@ receives it — it is one `len()` of an already-fetched list, never a new query 
 same confirm mechanism the baseline button already uses, so no new JS pattern. Behavior of
 `POST /scan` is unchanged.
 
+The count is explicitly a **render-time snapshot**, not a binding: the POST scans the
+collections owned at execution time, and no drift check is added. Binding the confirmed set to
+the submission (a fingerprint, as the accept family does) would be ceremony without a hazard —
+scans are read-only detection, so scanning a collection added since render is exactly what the
+operator wants. The spec states this weakening so it is a decision, not an oversight.
+
 ### D6 — The segbar is labelled; the anchor ratio names its denominator
 
 - The segbar `<div class="segbar">` gains `role="img"` + an `aria-label`/`title` of the form
@@ -115,6 +142,11 @@ same confirm mechanism the baseline button already uses, so no new JS pattern. B
 - No second segbar (per Non-goals): the misread is "unlabelled bar adjacent to a ratio";
   labelling the bar and the ratio's denominator removes the ambiguity without adding a second
   visual channel to maintain.
+- **A nonzero count always gets pixels**: segments get a CSS `min-width` (~3px) so a status
+  whose share rounds to 0.00% (one modified file in 200k) still shows a sliver. Without it the
+  new label and the bar can contradict each other — a fully-green bar whose own aria-label
+  admits a missing file. Widths already only approximate proportions (2-dp rounding), so a
+  minimum width changes nothing semantic.
 
 ## Risks / Trade-offs
 

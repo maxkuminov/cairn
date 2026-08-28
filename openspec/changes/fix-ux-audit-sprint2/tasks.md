@@ -5,24 +5,35 @@
 - [ ] 1.1 In `src/control_panel/routes.py`, split the search query from the anchored-recency
   query: search (used by `GET /verify/search` and the new `?q=` initial render) drops the
   `ots_state IN ('incomplete','complete')` filter and matches all tracked files owned by the
-  user (same escaped-LIKE, same `limit(50)`, keep `ots_stamped_at DESC NULLS LAST` ordering);
-  the `verify_page` "recent" list keeps the anchored-only filter and its meaning.
-- [ ] 1.2 Render each search-result row's proof-state badge in `partials/verify_results.html`
-  (reuse the existing badge macro) so unstamped rows are visibly unstamped; every row remains
-  selectable into the per-file verify flow regardless of state.
-- [ ] 1.3 Tests (`tests/test_ux_verify.py`): search returns `none`/`pending` files with state
-  visible; recent list still excludes them; owner scoping unchanged.
+  user (same escaped-LIKE, same 50-row cap), ordered `relpath ASC` with a collection
+  tiebreaker; it also returns the true total match count. The `verify_page` "recent" list keeps
+  the anchored-only filter, its `ots_stamped_at DESC` order, and its meaning.
+- [ ] 1.2 Blank stays default: a blank or whitespace-only query — including
+  `GET /verify/search?q=` — renders the anchored-only recent listing, never the widened search.
+- [ ] 1.3 In `partials/verify_results.html`: render each result row's proof-state badge (reuse
+  the existing badge macro) so unstamped rows are visibly unstamped; every row remains
+  selectable into the per-file verify flow regardless of state; when total > cap, state
+  "showing 50 of N matches" and invite a narrower query.
+- [ ] 1.4 State-neutral search copy on both render paths: the searchable-count line, the search
+  heading, and the no-match copy in `verify.html` + `partials/verify_results.html` describe
+  tracked files, not anchored files/proofs; anchored wording survives only on the recent list.
+- [ ] 1.5 Tests (`tests/test_ux_verify.py`): search returns `none`/`pending` files with state
+  visible; blank query (both routes) renders the recent list only; truncation line appears with
+  the true total when matches exceed the cap and results are path-ordered; copy is
+  state-neutral for an all-unstamped owner; recent list still excludes unstamped; owner scoping
+  unchanged in multi mode.
 
 ## 2. Top-bar global search (#36)
 
 - [ ] 2.1 Wrap the topbar input in `base.html` in a plain `GET` form to `/verify` with
-  `name="q"` (no htmx).
-- [ ] 2.2 `verify_page` accepts `q: str = Query("")`; when non-empty, run the task-1 search and
-  seed `verify.html`'s search input + results region with the query and results (the existing
-  htmx live search takes over from there). Empty `q` renders the default page.
+  `name="q"` (no htmx); change the placeholder + aria-label to advertise only the supported
+  search (file names and paths — no "hashes").
+- [ ] 2.2 `verify_page` accepts `q: str = Query("")`; when non-blank, run the task-1 search and
+  seed `verify.html`'s search input + results region with the query, results, and total (the
+  existing htmx live search takes over from there). Blank `q` renders the default page.
 - [ ] 2.3 Tests: `GET /verify?q=…` renders matching results and pre-fills the input; no-match
-  query renders the existing empty state; `?q=` empty behaves as the default page; results are
-  owner-scoped in multi mode.
+  query renders the empty state; blank `q` behaves as the default page; the topbar form and
+  honest placeholder are in the base chrome; results are owner-scoped in multi mode.
 
 ## 3. Proof badge links in every state (#41 frontend)
 
@@ -47,7 +58,8 @@
 
 - [ ] 5.1 Relabel the dashboard scan button "Scan all collections" and add a light
   `confirm()` naming the user's collection count (count from data already in the dashboard
-  context — no new query loop).
+  context — no new query loop). The count is a render-time snapshot; the POST is unchanged and
+  scans the collections owned at execution time (spec'd weakening, not an oversight).
 - [ ] 5.2 Tests: label text and confirm attribute (with the count) present in the dashboard
   render.
 
@@ -56,14 +68,18 @@
 - [ ] 6.1 In `partials/_collection_card.html`, give the segbar `role="img"` plus a
   `title`/`aria-label` of the form "File status: X ok, Y new, Z modified, W missing", built from
   the same `c.counts` values the segments are sized from.
-- [ ] 6.2 Reword the anchored ratio to name its denominator ("N / M present files anchored");
+- [ ] 6.2 Give segments a CSS `min-width` (~3px) so a nonzero status whose share rounds to
+  0.00% still renders a visible sliver — the bar must never contradict its own label.
+- [ ] 6.3 Reword the anchored ratio to name its denominator ("N / M present files anchored");
   the `all_confirmed` branch and all computed identities (sprint-1 D5/D13) unchanged.
-- [ ] 6.3 Tests: label present and counts agree with the rendered segments; ratio wording names
-  present files; "all confirmed" branch unchanged.
+- [ ] 6.4 Tests: label present and counts agree with the rendered segments; a
+  one-modified-in-many collection renders a nonzero-width segment; ratio wording names present
+  files; "all confirmed" branch unchanged.
 
 ## 7. Verification
 
 - [ ] 7.1 Full test suite green (`.venv/bin/pytest -q`).
 - [ ] 7.2 `openspec validate fix-ux-audit-sprint2 --strict` passes.
 - [ ] 7.3 Grep check: no template still renders a bare (formless) topbar search input; no badge
-  render path bypasses the link wrapper.
+  render path bypasses the link wrapper; no remaining "hashes" claim in search chrome; no
+  anchored-only wording on a search surface.

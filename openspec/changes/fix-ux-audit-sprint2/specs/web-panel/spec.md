@@ -15,6 +15,17 @@ The navigation SHALL preserve the query so the verify page's search input arrive
 it, and refining the search from there SHALL behave exactly as searching on the verify page
 directly.
 
+The control's placeholder and accessible name SHALL advertise only the search the backend
+performs (file names and paths). Advertising a hash search that the backend does not perform is
+the same silent failure in a different place: the operator pastes a digest and reads "no
+matches" as "this digest is not tracked".
+
+#### Scenario: The placeholder does not promise an unsupported search
+
+- **WHEN** the top-bar search control renders
+- **THEN** its placeholder and accessible name SHALL describe a file-name/path search and SHALL
+  NOT advertise hash search unless a digest lookup is actually implemented
+
 #### Scenario: Submitting a query from the top bar
 
 - **WHEN** the operator types a query into the top-bar search box on any page and submits
@@ -45,7 +56,22 @@ The verify page's tracked-file search SHALL likewise include files in every proo
 each result's proof state so an unstamped file is visibly unstamped in the list. A search scoped
 to already-anchored files silently hides the files whose verify card carries actionable guidance.
 The verify page's *recent anchored* listing keeps its anchored-only meaning — the state filter
-belongs to that list's stated purpose, not to search.
+belongs to that list's stated purpose, not to search. A **blank or whitespace-only query SHALL
+render the anchored-only recent listing**, never the widened search: the widened population is
+reachable only through a non-blank query, so clearing the search input restores exactly the
+page's default state.
+
+Search results SHALL be **ordered deterministically by path**, and a result set truncated by the
+row cap SHALL say so, naming the true total match count and inviting a narrower query. With a
+recency-of-stamping order and a silent cap, an unstamped file sharing a searchable name with
+enough stamped files is unreachable no matter what the operator types — a silent cap on a search
+whose purpose is finding a specific file is the "silently hides files" defect reintroduced one
+level down.
+
+Search copy SHALL match the widened population on **every render path** (full-page and
+partial-refinement alike): the search heading, the searchable-file count, and the no-match copy
+SHALL describe tracked files, not anchored files or proofs. Anchored-only wording survives only
+on the recent-anchored listing, whose population it correctly describes.
 
 #### Scenario: A never-stamped file's badge
 
@@ -65,6 +91,26 @@ belongs to that list's stated purpose, not to search.
 - **WHEN** the operator searches the verify page for a tracked file that has never been stamped
 - **THEN** the file SHALL appear in the results with its proof state visible, and selecting it
   SHALL reach its verify card
+
+#### Scenario: A blank query does not widen the listing
+
+- **WHEN** the verify page's search input is cleared (or submitted blank / whitespace-only)
+- **THEN** the page SHALL render the anchored-only recent listing in its existing form, and
+  SHALL NOT render unstamped files under an anchored heading
+
+#### Scenario: A capped result set discloses its truncation
+
+- **WHEN** a search query matches more tracked files than the result cap
+- **THEN** the results SHALL be ordered deterministically by path, SHALL state the true total
+  match count and that the list is truncated, and a file excluded by the cap SHALL be reachable
+  by narrowing the query
+
+#### Scenario: Search copy describes the widened population
+
+- **WHEN** an operator whose only tracked files are unstamped uses the verify search (full page
+  or refinement)
+- **THEN** the searchable-file count, headings, and no-match copy SHALL describe tracked files —
+  never a zero count of anchored files or proofs
 
 ### Requirement: The collection detail page discloses the new-file count
 
@@ -102,8 +148,16 @@ scoped action; the correction is a statement of scope, not a change of behavior.
 #### Scenario: Confirmation names the count
 
 - **WHEN** the operator activates the dashboard's scan-all control
-- **THEN** the panel SHALL ask for confirmation naming how many collections will be scanned, and
-  SHALL proceed only on confirmation
+- **THEN** the panel SHALL ask for confirmation naming how many collections the dashboard
+  currently shows, and SHALL proceed only on confirmation
+
+#### Scenario: The count is a render-time statement, not a binding
+
+- **WHEN** the operator's collection set changes between the dashboard render and the confirmed
+  submission
+- **THEN** the action SHALL scan the collections owned at execution time; the confirmation's
+  count is explicitly the render-time snapshot (the action is read-only detection, so acting on
+  a drifted fleet is harmless and re-confirmation is not required)
 
 ### Requirement: The status bar and the coverage ratio each name what they measure
 
@@ -130,3 +184,11 @@ same counts the visuals render from, so the label and the picture cannot drift a
 
 - **WHEN** the file-status bar renders segments for a collection's counts
 - **THEN** the label's counts SHALL be the same values the segments are sized from
+
+#### Scenario: A nonzero status is never rendered invisible
+
+- **WHEN** a nonzero status count's proportional segment width would round to zero (one modified
+  file in a two-hundred-thousand-file collection)
+- **THEN** the bar SHALL still render a visible marker for that status (a minimum segment
+  width), so the visual can never contradict its own label by showing a fully-green bar over a
+  stated issue
