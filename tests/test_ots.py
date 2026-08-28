@@ -2113,6 +2113,48 @@ def test_node_backend_never_verifies_on_a_nonzero_exit(tmp_path, monkeypatch):
     assert result.inconclusive is True
 
 
+def test_node_backend_flags_an_existing_unparseable_proof_as_unreadable(tmp_path, monkeypatch):
+    """An existing `.ots` that `ots info` cannot deserialize is `unreadable_proof`, not "no proof".
+
+    `info()` collapses "no such file" and "exists but unparseable" into `state="none"`, and the
+    node path used to forward that untyped, so the panel fell through to copy offering file-change
+    possibilities this check never examined — the explorer backend has reported it typed since
+    round 1. Nothing was established here about the file OR the proof's content.
+    """
+    from src.services import ots
+
+    proof = tmp_path / "x.ots"
+    proof.write_bytes(b"not an OpenTimestamps proof")
+
+    def fake_run(args, timeout=ots.DEFAULT_TIMEOUT):
+        if args[0] == "info":
+            return 1, "", "Error! Unknown file type"
+        raise AssertionError("verify must not be attempted against an unparseable proof")
+    monkeypatch.setattr(ots, "_run_ots", fake_run)
+
+    result = ots.verify(proof, "ab" * 32, backend="node")
+    assert result.unreadable_proof is True
+    assert result.verified is False and result.state == "none"
+    # Not a transport failure and not a mismatch: nothing was reached, nothing was compared.
+    assert result.transport_error is None
+    assert result.digest_mismatch is False and result.proof_mismatch is False
+    assert "unreadable proof" in result.message
+
+
+def test_node_backend_missing_proof_is_not_reported_as_unreadable(tmp_path, monkeypatch):
+    """The other side of the same split: a file that was never written is an absence, not damage."""
+    from src.services import ots
+
+    def fake_run(args, timeout=ots.DEFAULT_TIMEOUT):
+        raise AssertionError("nothing should be shelled out for a proof that does not exist")
+    monkeypatch.setattr(ots, "_run_ots", fake_run)
+
+    result = ots.verify(tmp_path / "never-written.ots", "ab" * 32, backend="node")
+    assert result.unreadable_proof is False
+    assert result.verified is False and result.state == "none"
+    assert "no usable proof" in result.message
+
+
 def test_node_backend_info_failure_is_a_transport_error_not_an_exception(tmp_path, monkeypatch):
     """`info` shells out too, so it must sit inside the same transport boundary.
 

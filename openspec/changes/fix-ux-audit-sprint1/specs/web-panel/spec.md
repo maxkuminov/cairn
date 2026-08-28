@@ -42,15 +42,31 @@ it as a young proof is a false negative on the one claim Cairn exists to make.
 
 **The panel SHALL attribute such a disagreement using the file's recorded baseline digest**, and
 SHALL NOT attribute it from the disagreement alone. Where the live bytes no longer hash to the
-baseline Cairn recorded at its last scan, the *file* changed and the panel SHALL say so. Where the
-live bytes still hash to that baseline, the *proof* is the artifact that disagrees — it may be
-corrupted or be another file's proof — and the panel SHALL render it in the same shape as a proof
-mismatch: a failure of the proof, explicitly stating that this is not evidence the file changed.
+baseline Cairn recorded at its last scan, the *file* changed and the panel SHALL say so.
+
+Where the live bytes still hash to that baseline, the file is not what moved, and the panel SHALL
+NOT say the file changed. It SHALL NOT state as established that the proof is corrupted or misfiled
+either: the recorded baseline is **not** the digest the stored proof was made from — a scan
+overwrites it with the newly observed bytes before any replacement proof exists — so during the
+window between a modification and its re-stamp a perfectly good proof legitimately commits to
+different bytes. The panel SHALL therefore distinguish two readings of that case from the file
+record's own state:
+
+- where the record indicates a re-stamp is owed — its proof state is queued for stamping, or its
+  status is modified or new — the panel SHALL report that the file matches its current recorded
+  baseline while the stored proof commits to different bytes because the proof **predates this
+  version** and a re-stamp is pending, and SHALL state that this is not evidence against the current
+  file;
+- otherwise the panel SHALL report the disagreement and attribute it to **neither** artifact,
+  stating that the proof may be from an earlier version of the file or may be corrupted and that
+  Cairn cannot tell which without a record of the digest each proof was made from.
+
 Where no baseline digest is recorded, the panel SHALL name both possibilities and blame neither. In
 no case SHALL the panel state that the proof is intact or still attests an earlier version of the
 file, because no verdict on this path validated the proof. Accusing an intact file of changing is a
-false alarm on the product's core signal, and certifying an unvalidated proof is a false assurance
-about the evidence itself.
+false alarm on the product's core signal; certifying an unvalidated proof is a false assurance about
+the evidence itself; and accusing a valid proof of corruption for the ordinary consequence of
+editing a file is the same false alarm pointed at the evidence.
 
 A result whose stored proof **could not be parsed** SHALL be rendered in its own words: the proof
 file could not be read, and no conclusion was reached about the file. It SHALL NOT be rendered with
@@ -207,12 +223,21 @@ asserting a fixed backend.
 - **THEN** the list heading SHALL NOT describe its contents as anchored, while each row's badge
   SHALL continue to name that row's own state
 
-#### Scenario: A digest disagreement over an unchanged file blames the proof
+#### Scenario: A digest disagreement over an unchanged file blames neither artifact
+
+- **WHEN** the panel verifies a file whose live bytes still hash to the digest Cairn recorded for it
+  and whose record indicates no re-stamp is owed, and the proof commits to a different digest
+- **THEN** the panel SHALL state that Cairn cannot tell whether the proof predates the file's current
+  version or is corrupted, and SHALL NOT state that the file's bytes changed, that the proof is
+  intact, or that the proof is corrupted or misfiled
+
+#### Scenario: A digest disagreement while a re-stamp is owed reads as a proof that predates the file
 
 - **WHEN** the panel verifies a file whose live bytes still hash to the digest Cairn recorded for it,
-  and the proof commits to a different digest
-- **THEN** the panel SHALL render a failure of the proof, stating that this is not evidence the file
-  changed, and SHALL NOT state that the file's bytes changed or that the proof is intact
+  whose record indicates a re-stamp is owed, and whose proof commits to a different digest
+- **THEN** the panel SHALL report that the proof predates this version of the file and a re-stamp is
+  pending, SHALL state that this is not evidence against the current file, and SHALL NOT render the
+  result as a failure of the proof or of the file
 
 #### Scenario: A digest disagreement with no recorded baseline blames neither
 
@@ -405,7 +430,11 @@ can publish a fingerprint for a population it never displayed, and an unchanged 
 form would then validate and destroy a record the operator was never shown — the exact accident the
 guard exists to prevent, reintroduced inside the guard's own mint. The same single-read derivation
 SHALL be used when the endpoint recomputes the fingerprint, so the two sides cannot encode the same
-state differently.
+state differently. Any other claim the same page makes **about that population's existence** — in
+particular the review view's "this collection indexes no files" state — SHALL be derived from that
+same snapshot rather than from an earlier count, so that a concurrent re-baseline committed between
+the two reads cannot leave the page reporting a healthy "all clear" for a collection it has just
+emptied.
 
 Because the same verb also marks every open event on the collection reviewed, the fingerprint SHALL
 additionally cover the collection's **set of open (unreviewed) events by identity** — each event's
@@ -793,6 +822,12 @@ has checked none.
 - **THEN** the card, the collection view, the review view and the shared status indicator SHALL
   report that no files are indexed yet, in a non-green state, and no surface SHALL report "all
   clear", that all files are verified, or that all proofs are confirmed
+
+#### Scenario: A collection emptied while its review page was being read
+
+- **WHEN** the review view has counted a collection's files and every file record is removed — by a
+  re-baseline committed from elsewhere — before the view reads the population it renders
+- **THEN** the page SHALL report that no files are indexed yet and SHALL NOT report "all clear"
 
 ### Requirement: The collection file browser honours view and filter deep links
 

@@ -51,13 +51,32 @@ recorded baseline digest** (`files.sha256`, written by the last scan).
 | live vs. recorded baseline | verdict | copy |
 |---|---|---|
 | differs | the **FILE** changed | names the change; says the proof itself was *not* checked here |
-| equal | the **PROOF** disagrees | "the stored proof does not match this file's recorded baseline — it may be corrupted or misfiled; this is **not** evidence the file changed" |
+| equal, and the row says a re-stamp is owed | **neither** — the proof predates this version | "the file matches its current recorded baseline, but the stored proof commits to different bytes — the proof predates this version and a re-stamp is pending; **not** evidence against the current file" |
+| equal, row settled | **neither** — undecidable | "the proof may be from an earlier version of this file, or it may be corrupted; Cairn cannot tell which without per-proof records" |
 | no baseline recorded | **neither** | names both possibilities, attributes to neither |
 
 So `ots.verify` keeps `digest_mismatch` as the transport of the disagreement and keeps its *message*
-neutral, `verify_run` computes `mismatch_blame ∈ {file, proof, unknown}` from `fe.sha256`, and
-`cli._cmd_verify` computes the same from `entry.sha256`. Neither branch claims the proof or its
-attestation was validated, because on this path nothing was.
+neutral, `verify_run` computes `mismatch_blame ∈ {file, proof-stale, proof, unknown}` from
+`fe.sha256` plus the row's own state, and `cli._cmd_verify` computes the same from `entry`. Neither
+branch claims the proof or its attestation was validated, because on this path nothing was.
+
+**The recorded baseline is not the proof's baseline, so proof-blame is never definitive.**
+*(Post-audit revision, round 2 — accepted limitation.)* `files.sha256` is the digest of the bytes the
+**last scan** saw, not the digest the **stored proof** was made from. A scan overwrites it on
+modification *before* any replacement proof exists (`scanner.py` records the new digest, marks the
+row `modified`, and queues the re-stamp), so throughout the modified-awaiting-re-stamp window the
+live bytes equal the recorded baseline while the still-valid proof commits to the previous version.
+Reading "live == recorded" as "therefore the proof is corrupt or misfiled" is the mirror image of
+the false alarm this decision was written to remove: it accuses a good proof of the ordinary
+consequence of editing a file, on a product whose entire claim is about evidence. Cairn cannot
+distinguish that window from a genuinely bad `.ots` with what it stores today, so it says so:
+the `pending` proof state or a `modified`/`new` status — the states that mean a re-stamp is
+owed — select the stale-proof explanation, and every other case is reported as undecidable.
+Deciding it properly requires **recording each proof's own digest beside it**, written atomically
+with `ots_path`/`ots_state`, with legacy rows staying neutral; that is the proof-versioning work
+(**GitHub #15**) and lands with the next change. Out of scope here: this sprint is copy and read-side
+attribution, and a schema change on the proof columns needs its own migration, backfill story and
+adversarial pass.
 
 **Proof-declared metadata is not confirmed provenance.** `_verify_via_cli`'s inconclusive return
 carries `info()`'s `block_height` — read offline out of the proof, checked against nothing. The card
@@ -72,7 +91,14 @@ gate costs nothing real.
 **An unreadable proof is its own outcome** (`unreadable_proof`). Every other not-verified outcome
 presupposes a parseable proof, so describing this one in their words ("its contents may have changed,
 or the proof isn't confirmed yet") offers the operator two possibilities neither of which was
-established, and hides the one that was: the proof is unusable and should be re-stamped.
+established, and hides the one that was: the proof is unusable and should be re-stamped. *(Round-2
+revision.)* This holds on **both** backends. `info()` collapses "no such file" and "exists but
+`ots info` could not parse it" into `state="none"`, so the node path forwarded an untyped "no usable
+proof" result and the panel fell through to exactly that generic copy. `_verify_via_cli` therefore
+re-separates the two on the one fact `info()` discarded — whether the proof file exists — and sets
+`unreadable_proof` for an existing-but-unparseable proof, matching the explorer path. A degenerate
+proof that parses but carries no attestation at all lands here too, which is correct enough: nothing
+usable was read out of it either way, and the copy asks for a re-stamp.
 
 `_verify_via_cli` shells out to `ots verify -d`; a digest mismatch there produces a non-zero exit
 — indistinguishable from a proof that is not yet anchored, and equally
@@ -184,19 +210,20 @@ post-audit)*:
 
 1. `live_unavailable` — there are no bytes to check
 2. `mismatch_blame == "file"` → `danger`, "File no longer matches its proof"
-3. `mismatch_blame == "proof"` → `danger`, "This proof does not match this file" (proof-blame copy)
-4. `mismatch_blame == "unknown"` → `danger`, "Fingerprint and proof disagree" (names both, blames neither)
-5. `result.verified` → `ok`
-6. `proof_mismatch` → `danger`, "This proof does not check out" (blames the proof, not the file)
-7. `transport_error` → `unavailable`, "Couldn't check right now"
-8. `inconclusive` → `unavailable`, "Couldn't confirm — pending, changed, or unreachable"
-9. `unreadable_proof` → `unavailable`, "Proof file could not be read" (no conclusion about the file)
-10. `state == "incomplete"` → `warn`, "Pending confirmation"
-11. `state == "pending"` → `warn`, "Queued to stamp"
-12. otherwise → `danger`, "Could not verify"
+3. `mismatch_blame == "proof-stale"` → `warn`, "Proof predates this version of the file" (a re-stamp is owed; amber, not red — it is the expected state of that window, and red here trains the operator to dismiss the red card that means a real mismatch)
+4. `mismatch_blame == "proof"` → `danger`, "This proof does not match this file" (describes the disagreement, blames neither artifact)
+5. `mismatch_blame == "unknown"` → `danger`, "Fingerprint and proof disagree" (names both, blames neither)
+6. `result.verified` → `ok`
+7. `proof_mismatch` → `danger`, "This proof does not check out" (blames the proof, not the file)
+8. `transport_error` → `unavailable`, "Couldn't check right now"
+9. `inconclusive` → `unavailable`, "Couldn't confirm — pending, changed, or unreachable"
+10. `unreadable_proof` → `unavailable`, "Proof file could not be read" (no conclusion about the file)
+11. `state == "incomplete"` → `warn`, "Pending confirmation"
+12. `state == "pending"` → `warn`, "Queued to stamp"
+13. otherwise → `danger`, "Could not verify"
 
-Steps 2–4 are the one place a `VerifyResult` flag does not map to a verdict on its own: they are
-computed from `digest_mismatch` **and** the caller's recorded baseline (D1). The template branches
+Steps 2–5 are the one place a `VerifyResult` flag does not map to a verdict on its own: they are
+computed from `digest_mismatch` **and** the caller's recorded baseline and row state (D1). The template branches
 on the resulting `mismatch_blame` string and never re-derives it — it has no access to the baseline.
 
 **A verified result outranks `proof_mismatch` — and the flag is defined so that conflict cannot
@@ -314,9 +341,14 @@ Derived, in `_collection_view`:
   `_STATUS_META`: it branches on `total_issues == 0` and prints a green "All clear — nothing is
   missing or changed in this collection right now". For an empty collection that is the same false
   green, one page further in — "nothing is missing or changed" is a claim about files that were
-  checked, and none were. `collection_review.html` therefore splits that branch on the view's
+  checked, and none were. `collection_review.html` therefore splits that branch on
   `is_empty` and renders the muted "No files indexed yet" card (same `folder` icon, `--text-3`)
-  instead, pointing at the collection page rather than congratulating the operator.
+  instead, pointing at the collection page rather than congratulating the operator. *(Round-2
+  revision.)* That flag comes from the **population snapshot**, not from `_collection_view`'s
+  earlier count: the two are separate reads, and an accept committed between them — adopting the
+  collection's last missing file and leaving it empty — produced an empty population under a stale
+  `is_empty=false` and rendered the false green anyway. `_read_population` therefore carries a
+  `total_files` count leg (see D14) and the route overrides `view["is_empty"]` from it.
 
 **Global (dashboard) proof coverage is computed strictly over `ots_mode == 'perfile'` collections.**
 Tripwire (`none`) collections stamp nothing and their stamp route rejects them, so folding their
@@ -692,9 +724,9 @@ in another could therefore publish a fingerprint for a population it never displ
 POST would then validate and delete a `missing` row the operator never saw — the guard's own mint
 reintroducing the accident the guard exists to prevent. So `_read_population(session, collection,
 scope)` returns one `_Population` snapshot — the protected file rows (uncapped, with the columns the
-page renders), the open-event set, and for `baseline-new` the `missing + modified` count — read as a
-**single `UNION ALL` statement** across the two tables, which SQLite evaluates inside one implicit
-read transaction. Everything downstream is derived from that value in Python: the rendered rows are
+page renders), the open-event set, the collection's whole-file `total_files` count, and for
+`baseline-new` the `missing + modified` count — read as a **single `UNION ALL` statement** across the
+two tables, which SQLite evaluates inside one implicit read transaction. Everything downstream is derived from that value in Python: the rendered rows are
 a *slice* of it (re-sorted missing-first), the recovery copy list is a slice, "N issues" is its
 length, the "need action" pill is the length of its event set, and `_population_fingerprint(collection,
 pop)` — now a pure function over a snapshot — hashes exactly those rows. The detail page's D7 gate is
@@ -710,7 +742,11 @@ One read *that feeds a hashed claim*, that is. The per-row "Mark reviewed" looku
 behind each row's button and contributes nothing to the fingerprint, and `ack_event` is idempotent
 (it no-ops on an already-acknowledged event), so a stale row button cannot destroy anything. The
 rule is that everything the guard *hashes* — and everything the page *claims* about that population
-— comes from the one snapshot.
+— comes from the one snapshot. That second half is why `total_files` rides in the union even though
+the fingerprint does not hash it: the review page's "this collection indexes nothing" claim is a
+claim about the same population, and taking it from `_collection_view`'s earlier count let a
+concurrent accept between the two reads render "All clear" for a collection it had just emptied
+(round-2 audit finding). Counted, never materialized — only its zero-ness is read.
 
 The union is the price of atomicity across two tables: file rows, open events and the issue count are
 padded to one 10-column row shape and tagged in the first column. The alternative — forcing an

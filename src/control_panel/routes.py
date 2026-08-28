@@ -1166,12 +1166,16 @@ class _Population(NamedTuple):
     ``files`` is sorted by ``relpath`` (total order — unique within a collection), ``open_events``
     by ``id``. ``issues`` is the ``missing`` + ``modified`` count and is read only for the
     ``baseline-new`` scope (0 elsewhere, where it is neither hashed nor asserted).
+    ``total_files`` is the collection's whole file population (every status) from this same
+    snapshot: it is what tells "nothing is wrong" apart from "nothing is watched", and reading it
+    anywhere else would let the two disagree (see :func:`collection_review`).
     """
 
     scope: str
     files: list[_PopFile]
     open_events: list[_PopEvent]
     issues: int
+    total_files: int
 
 
 async def _read_population(
@@ -1223,7 +1227,27 @@ async def _read_population(
         null(),
         null(),
     ).where(Event.collection_id == collection.id, Event.acknowledged_at.is_(None))
-    legs = [files_q, events_q]
+    # The collection's entire file population, counted in the same snapshot as the rows above so a
+    # concurrent accept cannot empty the collection between "are there issues?" and "is this
+    # collection watching anything at all?" — the interleaving that rendered a false green "All
+    # clear" for a just-emptied collection. Counted, never materialized: only its zero-ness is used.
+    total_q = (
+        select(
+            literal("t"),
+            func.count(),
+            null(),
+            null(),
+            null(),
+            null(),
+            null(),
+            null(),
+            null(),
+            null(),
+        )
+        .select_from(FileEntry)
+        .where(FileEntry.collection_id == collection.id)
+    )
+    legs = [files_q, events_q, total_q]
     if scope == "baseline-new":
         # The zero-issue assertion the detail form makes, hashed and re-asserted. Counted rather
         # than materialized: on a collection that has both `new` files and a large issue set the
@@ -1251,18 +1275,27 @@ async def _read_population(
     files: list[_PopFile] = []
     events: list[_PopEvent] = []
     issues = 0
+    total_files = 0
     for row in (await session.execute(union_all(*legs))).all():
         part = row[0]
         if part == "f":
             files.append(_PopFile(*row[1:10]))
         elif part == "e":
             events.append(_PopEvent(row[1], row[2], row[5]))
+        elif part == "t":
+            total_files = int(row[1] or 0)
         else:
             issues = int(row[1] or 0)
 
     files.sort(key=lambda f: f.relpath)
     events.sort(key=lambda e: e.id)
-    return _Population(scope=scope, files=files, open_events=events, issues=issues)
+    return _Population(
+        scope=scope,
+        files=files,
+        open_events=events,
+        issues=issues,
+        total_files=total_files,
+    )
 
 
 def _population_fingerprint(collection: Collection, pop: _Population) -> str:
@@ -1495,6 +1528,13 @@ async def collection_review(
     view["counts"] = dict(view["counts"])
     view["counts"]["missing"] = sum(1 for f in pop.files if f.status == "missing")
     view["counts"]["modified"] = total_issues - view["counts"]["missing"]
+    # Same reason, one level up: "no issues" only means "All clear" if the collection is actually
+    # watching files. `_collection_view` counted them in an EARLIER, separate statement, so an
+    # accept committed between the two reads (the last missing file adopted, the collection left
+    # empty) left `is_empty` false while this snapshot has nothing in it — the page then claimed a
+    # green all-clear for a collection that has established nothing (#31). Take it from the
+    # snapshot the rest of this page is rendered from.
+    view["is_empty"] = pop.total_files == 0
     ctx = await _base_context(request, session, user, "collection")
     ctx.update(
         {
@@ -1868,9 +1908,19 @@ async def verify_run(
     # A digest disagreement establishes only that the live digest and the proof's committed digest
     # DIFFER — not which of the two moved (design D1). The tiebreaker is the baseline Cairn recorded
     # for this file at its last scan: if the live bytes no longer hash to it, the FILE changed; if
-    # they still do, the proof is not this file's proof (corrupted or misfiled) and blaming the file
-    # would be a false alarm on the product's core signal. With no recorded baseline neither can be
-    # blamed, so the card names both possibilities.
+    # they still do, blaming the file would be a false alarm on the product's core signal. With no
+    # recorded baseline neither can be blamed, so the card names both possibilities.
+    #
+    # What the recorded baseline is NOT is the digest the stored proof was made from: a scan
+    # overwrites `files.sha256` with the newly observed bytes BEFORE a replacement proof exists, so
+    # in the modified-awaiting-re-stamp window the live bytes equal the recorded baseline while the
+    # (still valid, still current) proof commits to the previous version. Accusing that proof of
+    # being corrupt or misfiled there is the mirror-image false alarm. Cairn cannot tell the two
+    # apart from what it stores today, so "live == recorded, != proof" splits by the row's own
+    # state: `pending` (a re-stamp is queued) or a `modified`/`new` status is the stale-proof
+    # window and gets that explanation; anything else stays explicitly undecided. A definitive
+    # blame needs each proof's own digest recorded beside it — the proof-versioning work (#15),
+    # deliberately out of this sprint (design D1, accepted limitation).
     stored_sha = (fe.sha256 or "").strip().lower()
     live_sha = (digest or "").strip().lower()
     mismatch_blame = None
@@ -1879,6 +1929,8 @@ async def verify_run(
             mismatch_blame = "unknown"
         elif live_sha != stored_sha:
             mismatch_blame = "file"
+        elif fe.ots_state == "pending" or fe.status in ("modified", "new"):
+            mismatch_blame = "proof-stale"
         else:
             mismatch_blame = "proof"
 
@@ -1891,9 +1943,16 @@ async def verify_run(
     elif mismatch_blame == "file":
         verdict = "danger"
         title = "File no longer matches its proof"
+    elif mismatch_blame == "proof-stale":
+        # The row says a re-stamp is owed, so the proof committing to other bytes is the expected
+        # state of that window, not a fault. Amber like the other "a stamp is owed" verdicts — red
+        # here would train the operator to dismiss the red card that means a real mismatch.
+        verdict = "warn"
+        title = "Proof predates this version of the file"
     elif mismatch_blame == "proof":
-        # The live bytes still hash to the recorded baseline, so the disagreement is the proof's.
-        # Same shape of copy as `proof_mismatch`: a failure OF THE PROOF, never of the file.
+        # The live bytes still hash to the recorded baseline and the row claims no re-stamp is
+        # owed. That the proof disagrees is all that is established: this card describes it and
+        # blames nothing (see the tiebreaker note above).
         verdict = "danger"
         title = "This proof does not match this file"
     elif mismatch_blame == "unknown":
@@ -1970,8 +2029,9 @@ async def verify_run(
         # Reason flags travel on every branch, not only the one that won: a transport failure under
         # a verdict that outranks it is still disclosed as a diagnostic line (design D2).
         "digest_mismatch": bool(result and result.digest_mismatch),
-        # Which artifact the digest disagreement is attributed to: "file" | "proof" | "unknown".
-        # Never derived in the template — the template has no access to the recorded baseline.
+        # Which artifact the digest disagreement is attributed to:
+        # "file" | "proof-stale" | "proof" | "unknown". Never derived in the template — the
+        # template has no access to the recorded baseline or the row's state.
         "mismatch_blame": mismatch_blame,
         "proof_mismatch": bool(result and result.proof_mismatch),
         "unreadable_proof": bool(result and result.unreadable_proof),

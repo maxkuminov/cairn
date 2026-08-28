@@ -557,11 +557,22 @@ def _verify_via_cli(
             message=str(exc),
         )
     if proof.state == "none":
+        # `info` collapses "no such file" and "exists but `ots info` could not parse it" into the
+        # same `none`. They are different findings for the operator, so re-separate them here on
+        # the one fact `info` discarded: the file's existence. An EXISTING proof that cannot be
+        # parsed is `unreadable_proof` — nothing whatever was established — exactly as the explorer
+        # backend reports it. Without this the node backend fell through to the untyped "no usable
+        # proof" result, and the panel then offered file-change possibilities this check never
+        # examined (the very false alarm the typed flag exists to prevent).
+        unreadable = ots_path.exists()
         return VerifyResult(
             verified=False,
             state="none",
             calendars=proof.calendars,
-            message=f"no usable proof at {ots_path}",
+            unreadable_proof=unreadable,
+            message=(
+                f"unreadable proof at {ots_path}" if unreadable else f"no usable proof at {ots_path}"
+            ),
         )
 
     args: list[str] = []

@@ -649,7 +649,68 @@ artifacts: a verdict presented as established when only a weaker fact was. Fixed
   and `web-panel` deltas carry the matching requirement text and scenarios.
 - [x] 8.11 Gates re-run: full `PYTHONPATH=. pytest -q` green, `ruff check src tests` clean,
   `openspec validate fix-ux-audit-sprint1 --strict` passes.
-- [ ] 8.12 Re-run the adversarial Codex pass (§6.8) against the reworked verify path: say which
-  findings were addressed and how, and ask it to attack the blame tiebreak specifically — whether a
-  stale or absent `files.sha256` can misattribute a disagreement, and whether any surface still
-  presents proof-declared metadata as confirmed.
+- [ ] 8.12 Re-run the adversarial Codex pass (§6.8) against the reworked verify path *and* the
+  accept guard: say which findings were addressed and how, and ask it to attack the blame tiebreak
+  specifically — whether a stale or absent `files.sha256` can misattribute a disagreement, and
+  whether any surface still presents proof-declared metadata as confirmed.
+
+## 9. Residual findings from adversarial Codex round 2 (guard + verify)
+
+Three findings survived round 2 — one on the guard slice, two on the verify slice. All three are the
+same shape as the ones before them: a surface stating as established something the data underneath
+it does not establish.
+
+- [x] 9.1 (MAJOR, guard) **The review page's zero-file state comes from the population snapshot.**
+  `_read_population`'s `UNION ALL` gains a `total_files` count leg (tagged `"t"`, counted not
+  materialized) carried on `_Population`, and `collection_review` overrides `view["is_empty"]` from
+  it. It previously came from the earlier, separate `_collection_view` read, so an accept committed
+  from another tab between the two reads — adopting the collection's last missing file — left
+  `is_empty=false` over an empty population and rendered a green "All clear" for a collection that
+  had just been emptied (#31's false green, inside the guard's own page). The fingerprint encoding is
+  untouched: the new leg is display state, not hashed state.
+- [x] 9.2 (MAJOR, verify) **Proof-blame is never definitive; the re-stamp window gets its own copy.**
+  `files.sha256` is the last scan's digest, not the stored proof's, and a scan overwrites it on
+  modification *before* a replacement proof exists — so in the modified-awaiting-re-stamp window
+  live == recorded while a perfectly good proof commits to the previous version, and the card
+  accused it of being "corrupted or misfiled". `mismatch_blame` now splits that case: with the row
+  saying a re-stamp is owed (`ots_state == "pending"`, or `status in ("modified", "new")`) it is
+  `proof-stale` — `warn`, "Proof predates this version of the file", explicitly *not* evidence
+  against the current file; otherwise it is `proof`, which describes the disagreement and blames
+  **neither** artifact ("may be from an earlier version of this file, or may be corrupted; Cairn
+  cannot tell without per-proof records"). The definitive accusation is gone from both consumers,
+  and `cli._cmd_verify` branches identically (`PROOF PREDATES THIS VERSION` / `PROOF DOES NOT MATCH
+  THIS FILE`). **Accepted limitation, recorded in design D1 and the two spec deltas:** deciding
+  proof blame requires storing each proof's own digest beside `ots_path`/`ots_state`, which is the
+  proof-versioning work (**GitHub #15**) and lands with the next change — a schema change on the
+  proof columns needs its own migration, backfill and adversarial pass, so it is deliberately not
+  bundled into this copy-and-attribution sprint.
+- [x] 9.3 (MINOR, verify) **The node backend keeps the unreadable-proof signal.** `info()` collapses
+  "no such file" and "exists but unparseable" into `state="none"`; `_verify_via_cli` now re-separates
+  them on the file's existence and sets `unreadable_proof=True` (with an "unreadable proof at …"
+  message) for an existing proof `ots info` cannot parse, so the typed card/CLI line renders instead
+  of the generic copy that invents possible file changes. A proof path that does not exist stays
+  "no usable proof" with the flag clear.
+- [x] 9.4 Regressions, each verified to fail against the pre-fix behaviour:
+  `test_a_concurrent_accept_between_the_two_reads_never_reads_all_clear` (tests/test_ux_review.py —
+  forces the interleaving by mutating inside a patched `_collection_view`, asserts the muted empty
+  card, not "All clear"),
+  `test_a_disagreement_in_the_restamp_window_reads_as_a_proof_that_predates_the_file`,
+  `test_a_pending_restamp_state_also_reads_as_a_proof_that_predates_the_file`,
+  `test_no_card_ever_states_the_proof_is_corrupted_or_misfiled`,
+  `test_cli_disagreement_in_the_restamp_window_prints_the_stale_proof_line`
+  (tests/test_ux_verify.py), plus
+  `test_node_backend_flags_an_existing_unparseable_proof_as_unreadable` and
+  `test_node_backend_missing_proof_is_not_reported_as_unreadable` (tests/test_ots.py). Two round-1
+  tests were renamed with the rule they now assert:
+  `test_a_disagreement_over_an_intact_file_blames_the_proof_not_the_file` →
+  `…_never_accuses_the_file`, and `test_cli_disagreement_over_an_intact_file_blames_the_proof` →
+  `…_blames_neither`; `_seed_one_anchored_file` / `_cmd_verify_output` take a `status` argument.
+- [x] 9.5 Spec + design updated: design D1 (the four-row tiebreak table, the "recorded baseline is
+  not the proof's baseline" limitation with the #15 pointer, the unreadable-proof paragraph covering
+  both backends, the renumbered 13-step verdict order), D14 + the #31 note (the `total_files` leg and
+  why the page's existence claim must come from the snapshot); the `web-panel` delta (neutral
+  proof-blame rule + re-stamp-window scenario, single-read derivation of the zero-file state +
+  emptied-while-reading scenario) and the `ots-notarization` delta (the CLI's split attribution +
+  two scenarios, and the per-backend unreadable-proof scenarios).
+- [x] 9.6 Gates re-run: full `PYTHONPATH=. pytest -q` green, `ruff check src tests` clean,
+  `openspec validate fix-ux-audit-sprint1 --strict` passes.

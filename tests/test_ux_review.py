@@ -262,6 +262,57 @@ def test_a_zero_file_collections_review_page_never_reads_all_clear(cairn_env):
     assert "Nothing has been checked in this collection" in body
 
 
+def test_a_concurrent_accept_between_the_two_reads_never_reads_all_clear(cairn_env, monkeypatch):
+    """The review page's zero-file state must come from the population snapshot, not an earlier read.
+
+    `_collection_view` counts the collection's files in its own statement; the protected population
+    is read seconds later in another. Python's sqlite3 runs in legacy transaction mode, so those
+    are two independent snapshots: an accept committed from another tab in between (adopting the
+    last missing file and leaving the collection empty) left `is_empty` false while the population
+    read returned nothing — and the page rendered a green "All clear" for a collection that has
+    established nothing. The interleaving is forced here by mutating inside `_collection_view`.
+    """
+    from sqlalchemy import delete, update
+
+    root = cairn_env / "raced"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _seed_missing_file_with_event(cid)
+
+    with _make_client(cairn_env, seed) as client:
+        from src.control_panel import routes
+
+        original = routes._collection_view
+
+        async def racing_view(session, collection):
+            view = await original(session, collection)
+            # The concurrent accept, on its own connection: the last missing row is adopted and
+            # its event acknowledged AFTER the counts were read, BEFORE `_read_population` runs.
+            from src.database import get_sessionmaker
+            from src.models.db import Event, FileEntry
+
+            async with get_sessionmaker()() as other:
+                await other.execute(
+                    delete(FileEntry).where(FileEntry.collection_id == collection.id)
+                )
+                await other.execute(
+                    update(Event)
+                    .where(Event.collection_id == collection.id)
+                    .values(acknowledged_at=datetime.now(timezone.utc))
+                )
+                await other.commit()
+            return view
+
+        monkeypatch.setattr(routes, "_collection_view", racing_view)
+        body = client.get("/collection/1/review").text
+
+    assert "All clear" not in body
+    assert "No files indexed yet" in body
+    assert "Nothing has been checked in this collection" in body
+
+
 # --- #32: the truncation deep-link and the recovery copy -------------------------------------
 
 

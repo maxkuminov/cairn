@@ -47,7 +47,11 @@ def _make_client(seed_coro):
 
 
 async def _seed_one_anchored_file(
-    root: Path, *, ots_state: str = "complete", sha256: str | None = "d" * 64
+    root: Path,
+    *,
+    ots_state: str = "complete",
+    sha256: str | None = "d" * 64,
+    status: str = "ok",
 ) -> int:
     """One collection with a single on-disk, stamped file. Returns the collection id.
 
@@ -55,6 +59,11 @@ async def _seed_one_anchored_file(
     tiebreaker both consumers use to attribute a digest disagreement (design D1), so the tests that
     exercise blame set it deliberately: equal to the live hash of the on-disk bytes means the file
     is intact, different means it changed, ``None`` means there is no baseline to compare against.
+
+    ``status``/``ots_state`` are the second half of that tiebreak: a scan overwrites the baseline
+    on modification BEFORE a replacement proof exists, so a row that is `modified`/`new` or whose
+    proof is `pending` is in the re-stamp window, where "live == baseline, != proof" means the
+    proof simply predates this version rather than being at fault.
     """
     from src.database import get_sessionmaker
     from src.models.db import FileEntry
@@ -64,7 +73,7 @@ async def _seed_one_anchored_file(
     async with get_sessionmaker()() as s:
         s.add(FileEntry(
             collection_id=cid, relpath="doc.txt", size=5, sha256=sha256,
-            status="ok", ots_state=ots_state, ots_path=str(root.parent / "p" / "doc.txt.ots"),
+            status=status, ots_state=ots_state, ots_path=str(root.parent / "p" / "doc.txt.ots"),
             ots_stamped_at=now, first_seen=now, last_checked=now,
         ))
         await s.commit()
@@ -375,7 +384,9 @@ def test_checked_using_sentence_follows_the_configured_backend(verify_client, mo
 # --- the CLI consumer: the same false negative, the other surface ---------------------------
 
 
-def _cmd_verify_output(cairn_env, capsys, result, *, ots_state="complete", sha256="d" * 64):
+def _cmd_verify_output(
+    cairn_env, capsys, result, *, ots_state="complete", sha256="d" * 64, status="ok"
+):
     """Run `cairn verify doc.txt` with `ots.verify` stubbed; return (rc, stdout, stderr)."""
     import src.cli as cli
     from src.services import ots as ots_svc
@@ -385,7 +396,9 @@ def _cmd_verify_output(cairn_env, capsys, result, *, ots_state="complete", sha25
     (root / "doc.txt").write_text("hello")
 
     async def seed():
-        await _seed_one_anchored_file(root, ots_state=ots_state, sha256=sha256)
+        await _seed_one_anchored_file(
+            root, ots_state=ots_state, sha256=sha256, status=status
+        )
 
     asyncio.run(seed())
 
@@ -507,6 +520,34 @@ def intact_file_client(cairn_env):
 
 
 @pytest.fixture
+def restamp_window_client(cairn_env):
+    """The modified-awaiting-re-stamp window: baseline already rewritten, proof not yet replaced."""
+    root = cairn_env / "restamp"
+    root.mkdir()
+    (root / "doc.txt").write_text("hello")
+    with _make_client(
+        lambda: _seed_one_anchored_file(
+            root, sha256=_LIVE_SHA_OF_HELLO, status="modified", ots_state="pending"
+        )
+    ) as client:
+        yield client
+
+
+@pytest.fixture
+def pending_restamp_client(cairn_env):
+    """Same window, arrived at from the proof side: status settled, the re-stamp still queued."""
+    root = cairn_env / "pending"
+    root.mkdir()
+    (root / "doc.txt").write_text("hello")
+    with _make_client(
+        lambda: _seed_one_anchored_file(
+            root, sha256=_LIVE_SHA_OF_HELLO, status="ok", ots_state="pending"
+        )
+    ) as client:
+        yield client
+
+
+@pytest.fixture
 def no_baseline_client(cairn_env):
     """Panel client for a row with no recorded baseline digest at all."""
     root = cairn_env / "nobase"
@@ -516,21 +557,70 @@ def no_baseline_client(cairn_env):
         yield client
 
 
-def test_a_disagreement_over_an_intact_file_blames_the_proof_not_the_file(
+def test_a_disagreement_over_an_intact_file_never_accuses_the_file(
     intact_file_client, monkeypatch
 ):
-    """The file still hashes to its recorded baseline, so the PROOF is what disagrees.
+    """The file still hashes to its recorded baseline, so the FILE is not what the card blames.
 
     Pre-fix this rendered "the file has changed since it was stamped. The proof itself is intact"
-    — both halves false — for a `.ots` with one flipped byte in its serialized digest.
+    — both halves false — for a `.ots` with one flipped byte in its serialized digest. Nor does it
+    swing to the opposite accusation: with the row settled (`ok` + `complete`) Cairn has no record
+    of which digest THIS proof was made from, so it says exactly that and blames neither.
     """
     html = _post_verify(intact_file_client, _result(digest_mismatch=True), monkeypatch)
     assert "This proof does not match this file" in html
-    assert "may be corrupted" in html
-    assert "not evidence that" in html
+    assert "may be from an earlier version of this file, or it may be corrupted" in html
+    assert "cannot tell which without per-proof records" in html
+    assert "neither the file nor the proof is blamed here" in html
     # The two accusations the pre-fix card made, neither of which was established:
     assert "has changed since it was stamped" not in html
     assert "The proof itself is intact" not in html
+
+
+def test_a_disagreement_in_the_restamp_window_reads_as_a_proof_that_predates_the_file(
+    restamp_window_client, monkeypatch
+):
+    """A `modified` row: the scan already overwrote the baseline, the re-stamp has not run yet.
+
+    Live bytes == recorded baseline and != the proof's digest is the EXPECTED state of that window
+    — the proof is good, it just covers the previous version. Calling it corrupt or misfiled here
+    accuses a valid proof of the ordinary consequence of editing a file.
+    """
+    html = _post_verify(restamp_window_client, _result(digest_mismatch=True), monkeypatch)
+    assert "Proof predates this version of the file" in html
+    assert "matches its current recorded baseline" in html
+    assert "a re-stamp is still pending" in html
+    assert "It is not evidence against the current file." in html
+    assert "verdict--warn" in html
+    assert "verdict--danger" not in html
+    # Neither accusation: not the file, and not the proof.
+    assert "has changed since it was stamped" not in html
+    assert "may be corrupted" not in html
+
+
+def test_a_pending_restamp_state_also_reads_as_a_proof_that_predates_the_file(
+    pending_restamp_client, monkeypatch
+):
+    """The other half of the window: the row is back to `ok` but the re-stamp is still queued."""
+    html = _post_verify(pending_restamp_client, _result(digest_mismatch=True), monkeypatch)
+    assert "Proof predates this version of the file" in html
+    assert "a re-stamp is still pending" in html
+    assert "may be corrupted" not in html
+
+
+def test_no_card_ever_states_the_proof_is_corrupted_or_misfiled(
+    intact_file_client, restamp_window_client, monkeypatch
+):
+    """The definitive accusation is gone from the surface, not merely re-routed.
+
+    `files.sha256` is not the digest the stored proof was made from (a scan overwrites it before a
+    replacement proof exists), so no branch may present proof corruption as established fact.
+    """
+    for client in (intact_file_client, restamp_window_client):
+        html = _post_verify(client, _result(digest_mismatch=True), monkeypatch)
+        assert "another file's proof" not in html
+        assert "the proof may be corrupted, or it may be another file" not in html
+        assert "This is not evidence that" not in html
 
 
 def test_a_disagreement_over_a_changed_file_still_blames_the_file(verify_client, monkeypatch):
@@ -626,15 +716,31 @@ def test_the_proof_list_heading_covers_both_proof_states(cairn_env):
 # --- the CLI consumer: the same blame tiebreak, the other surface ---------------------------
 
 
-def test_cli_disagreement_over_an_intact_file_blames_the_proof(cairn_env, capsys):
+def test_cli_disagreement_over_an_intact_file_blames_neither(cairn_env, capsys):
     rc, out, err = _cmd_verify_output(
         cairn_env, capsys, _result(digest_mismatch=True), sha256=_LIVE_SHA_OF_HELLO
     )
     assert rc == 1
     combined = out + err
     assert "PROOF DOES NOT MATCH THIS FILE" in combined
-    assert "NOT evidence the file changed" in combined
-    assert "CHANGED —" not in combined  # the pre-fix accusation
+    assert "cannot tell which without per-proof records" in combined
+    assert "CHANGED —" not in combined  # the pre-fix accusation against the file
+    assert "corrupted or misfiled" not in combined  # ...and the one against the proof
+
+
+def test_cli_disagreement_in_the_restamp_window_prints_the_stale_proof_line(cairn_env, capsys):
+    """Mirrors the panel: a `modified` row whose re-stamp has not run is not a proof fault."""
+    rc, out, err = _cmd_verify_output(
+        cairn_env, capsys, _result(digest_mismatch=True),
+        sha256=_LIVE_SHA_OF_HELLO, status="modified", ots_state="pending",
+    )
+    assert rc == 1
+    combined = out + err
+    assert "PROOF PREDATES THIS VERSION" in combined
+    assert "a re-stamp is still pending" in combined
+    assert "NOT evidence against the current file" in combined
+    assert "CHANGED —" not in combined
+    assert "corrupted" not in combined
 
 
 def test_cli_disagreement_with_no_baseline_blames_neither(cairn_env, capsys):

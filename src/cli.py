@@ -294,10 +294,19 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             # A digest disagreement establishes only that the live digest and the digest the proof
             # commits to DIFFER (design D1). The tiebreaker is the baseline recorded for this file
             # at its last scan: live bytes that no longer hash to it mean the FILE changed; live
-            # bytes that still do mean the proof is not this file's proof. Blaming the file for a
-            # corrupted `.ots` is a false alarm on the product's core signal, so the two get
-            # different lines — and neither claims the proof or its attestation was validated,
-            # because at this point nothing validated either.
+            # bytes that still do mean the file is not what moved. Blaming the file for a bad
+            # `.ots` is a false alarm on the product's core signal, so the two get different lines
+            # — and neither claims the proof or its attestation was validated, because at this
+            # point nothing validated either.
+            #
+            # The recorded baseline is NOT the digest the stored proof was made from: a scan
+            # overwrites it with the newly observed bytes before a replacement proof exists, so in
+            # the modified-awaiting-re-stamp window live == recorded while the good, current proof
+            # commits to the previous version. So "live == recorded, != proof" splits by the row's
+            # own state (`pending`, or a `modified`/`new` status = that window) and is otherwise
+            # left explicitly undecided — never a definitive accusation against the proof. Deciding
+            # it needs each proof's own digest stored beside it (#15, out of scope here). Mirrors
+            # the panel's `mismatch_blame`.
             stored_sha = (entry.sha256 or "").strip().lower()
             live_sha = (digest or "").strip().lower()
             if result.digest_mismatch and live_sha and stored_sha and live_sha != stored_sha:
@@ -308,12 +317,27 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
+            if (
+                result.digest_mismatch
+                and live_sha
+                and stored_sha
+                and (entry.ots_state == "pending" or entry.status in ("modified", "new"))
+            ):
+                print(
+                    f"[{args.relpath}] PROOF PREDATES THIS VERSION — the file matches its current "
+                    f"recorded baseline, but the stored proof commits to different bytes; the "
+                    f"proof predates this version of the file and a re-stamp is still pending. "
+                    f"This is NOT evidence against the current file",
+                    file=sys.stderr,
+                )
+                return 1
             if result.digest_mismatch and live_sha and stored_sha:
                 print(
                     f"[{args.relpath}] PROOF DOES NOT MATCH THIS FILE — the stored proof commits "
                     f"to a different digest than this file's recorded baseline; the proof may be "
-                    f"corrupted or misfiled. This is NOT evidence the file changed — its "
-                    f"fingerprint is exactly the one Cairn recorded",
+                    f"from an earlier version of this file, or it may be corrupted. Cairn cannot "
+                    f"tell which without per-proof records, so neither the file nor the proof is "
+                    f"blamed here",
                     file=sys.stderr,
                 )
                 return 1

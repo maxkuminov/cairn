@@ -123,6 +123,18 @@ exception aborts the command instead of reporting that nothing could be checked.
 - **THEN** the result SHALL carry the unreadable-proof indicator, SHALL NOT carry either mismatch
   indicator, and SHALL NOT be described in the words used for a proof that is merely unconfirmed
 
+#### Scenario: An unreadable proof is reported as such by every backend
+
+- **WHEN** the node backend verifies against a stored `.ots` that exists but cannot be deserialized
+- **THEN** the result SHALL carry the unreadable-proof indicator rather than being reported as no
+  usable proof, so the caller SHALL NOT offer a possible file change as an explanation
+
+#### Scenario: A proof that was never written is not reported as damaged
+
+- **WHEN** verification is asked for a proof path that does not exist
+- **THEN** the result SHALL report that there is no usable proof and SHALL NOT carry the
+  unreadable-proof indicator
+
 #### Scenario: Malformed block data from the explorer is a transport failure
 
 - **WHEN** the explorer returns a block whose merkle root is not 64 hexadecimal characters, or whose
@@ -217,10 +229,15 @@ A **digest disagreement SHALL be attributed from the file's recorded baseline di
 reported, and the command SHALL print a different line for each attribution. Where the live bytes no
 longer hash to the recorded baseline, the command SHALL report that the **file** changed, and SHALL
 NOT claim that the proof was validated or remains intact. Where the live bytes still hash to the
-recorded baseline, the command SHALL report that the **stored proof** does not match this file's
-recorded baseline and may be corrupted or misfiled, and SHALL state that this is not evidence the
-file changed. Where there is no recorded baseline, the command SHALL name both possibilities and
-attribute the disagreement to neither. A proof mismatch SHALL be reported as a failure of the proof,
+recorded baseline, the command SHALL report that the file is not what moved, and SHALL make the same
+distinction the panel makes: where the file record indicates a re-stamp is owed — its proof state is
+queued for stamping, or its status is modified or new — it SHALL report that the stored proof
+**predates this version** of the file with a re-stamp pending, and that this is not evidence against
+the current file; otherwise it SHALL report that the proof may be from an earlier version of the file
+or may be corrupted and that Cairn cannot tell which, attributing the disagreement to neither
+artifact. It SHALL NOT report as established that the proof is corrupted or misfiled, because the
+recorded baseline is not the digest the stored proof was made from. Where there is no recorded
+baseline, the command SHALL name both possibilities and attribute the disagreement to neither. A proof mismatch SHALL be reported as a failure of the proof,
 not of the file. An unreadable proof SHALL be reported as the proof being unreadable, stating that
 no conclusion was reached about the file, and SHALL NOT be reported in the words used for a file
 that may have changed or a proof that is merely unconfirmed. A transport failure SHALL be reported
@@ -241,12 +258,21 @@ proof states in the same words the panel uses: a proof awaiting Bitcoin confirma
 merely queued for stamping. The queued state SHALL NOT be reported with awaiting-confirmation
 wording.
 
-#### Scenario: The command line blames the proof when the file matches its baseline
+#### Scenario: The command line blames neither artifact when the file matches its baseline
 
 - **WHEN** `cairn verify` receives a digest disagreement for a file whose live bytes still hash to
-  the digest Cairn recorded for it
-- **THEN** the command SHALL report the stored proof as what does not match, SHALL state that this
-  is not evidence the file changed, and SHALL NOT print its changed-file wording
+  the digest Cairn recorded for it and whose record indicates no re-stamp is owed
+- **THEN** the command SHALL report the stored proof as what does not match, SHALL state that Cairn
+  cannot tell whether that proof predates the file's current version or is corrupted, and SHALL NOT
+  print its changed-file wording nor state that the proof is corrupted or misfiled
+
+#### Scenario: The command line reports a proof that predates the file while a re-stamp is owed
+
+- **WHEN** `cairn verify` receives a digest disagreement for a file whose live bytes still hash to
+  the digest Cairn recorded for it and whose record indicates a re-stamp is owed
+- **THEN** the command SHALL report that the proof predates this version of the file with a re-stamp
+  pending, SHALL state that this is not evidence against the current file, and SHALL NOT print its
+  changed-file wording
 
 #### Scenario: The command line blames neither artifact with no recorded baseline
 
