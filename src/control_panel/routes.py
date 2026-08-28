@@ -528,7 +528,14 @@ async def _event_feed(session: AsyncSession, collection_ids: list[int]) -> dict[
             await session.scalars(
                 select(Event)
                 .where(Event.collection_id.in_(collection_ids))
-                .order_by(Event.detected_at.desc())
+                # Unreviewed first, newest-first within each group (#25 / design D4). ORDER, never
+                # a WHERE: `added`/`restored`/`moved` are born acknowledged, so an open-only feed
+                # renders "No events recorded yet." on a healthy system — #12's rejected fix 2. The
+                # `guard-proof-and-restore-integrity` live pass caught the sharp end of the old
+                # pure-recency order: the dashboard offered "Mark all 8 reviewed" above a feed
+                # showing none of those 8, every one pushed off the bottom by newer informational
+                # rows. The events the bulk verb names now lead the list it sits above.
+                .order_by(Event.acknowledged_at.is_(None).desc(), Event.detected_at.desc())
                 .limit(20)
             )
         )
@@ -592,13 +599,16 @@ async def dashboard(
         anchored_sub = " · ".join(parts)
 
     # The biggest, reddest number on the panel used to be an inert <div> (#18). It becomes a link to
-    # the page that can act on it: exactly one affected collection -> that collection's review page;
-    # several -> the collections list. NEVER `/review` — it is a 404 until #27 (design D4).
+    # the page that can act on it, and the rule is: land the operator where the number's whole
+    # population can be worked. Exactly one affected collection -> that collection's review page;
+    # several -> `/review`, the fleet-wide review page (#27), which lists every one of the files
+    # this tile counts. (#18 had to point the many-collections case at `/collections` because
+    # `/review` was a 404; it exists now, so the placeholder goes.)
     affected = [v for v in views if v["issues"] > 0]
     issues_href = None
     if total_issues > 0:
         issues_href = (
-            f"/collection/{affected[0]['id']}/review" if len(affected) == 1 else "/collections"
+            f"/collection/{affected[0]['id']}/review" if len(affected) == 1 else "/review"
         )
 
     collection_ids = [c.id for c in collections]
@@ -615,11 +625,26 @@ async def dashboard(
             .limit(1)
         )
     last_collection = ""
-    last_activity_sub = "no scans yet"
+    last_activity_sub = "no activity yet"
     if last_run is not None:
         c = await session.get(Collection, last_run.collection_id)
         last_collection = c.name if c else ""
-        last_activity_sub = f"{last_collection} scan" if last_collection else "last scan"
+        # The tile summarises the newest finished run of ANY kind, so it must say what it found
+        # (design D14). It used to label every one of them "<collection> scan" with no result: a
+        # `stamp` pass, last night's `upgrade`, a `partial` scan that skipped files, a failed scan
+        # and a run reclaimed by the reaper all rendered identically to a clean scan — the tile
+        # asserting a check that either never happened or did not complete. Kept generic rather
+        # than narrowed to completed scans: a fleet whose only recent activity is the nightly
+        # upgrade would otherwise read "no scans yet", and the per-collection scan story already
+        # lives on the cards below. Plain text, deliberately not Slice B's `run_health_note` macro.
+        kind = last_run.kind or "scan"
+        last_activity_sub = f"{last_collection} {kind}" if last_collection else f"last {kind}"
+        # `interrupted` is worded neutrally and NEVER as a fault (design D7): since the operation
+        # claim landed it is what a reclaimed abandoned claim writes — i.e. what restarting the app
+        # mid-scan produces, an ordinary outcome, not an integrity event.
+        _RESULT_WORDS = {"partial": "partial", "error": "failed", "interrupted": "interrupted"}
+        if last_run.result != "ok":
+            last_activity_sub += f" · {_RESULT_WORDS.get(last_run.result, last_run.result)}"
         if last_run.moved:
             last_activity_sub += f" · {last_run.moved} moved"
 
@@ -679,9 +704,14 @@ async def ack_event(
             .where(Event.collection_id.in_(collection_ids), Event.acknowledged_at.is_(None))
         )
 
-    if view == "review":
-        # Acknowledged from the review page: swap that row in place and refresh the collection's
-        # "unreviewed" pill (#review-open-pill) plus the global sidebar badge.
+    if view in ("review", "fleet"):
+        # Acknowledged from a review surface: swap that row in place and refresh the collection's
+        # "unreviewed" pill plus the global sidebar badge. `fleet` is the same response with the
+        # OOB pill id parameterized — the fleet page carries one pill PER collection, so the
+        # collection page's single hardcoded `#review-open-pill` would refresh whichever group
+        # happened to render first (design D10). Everything else, including the post-ack
+        # single-snapshot re-mint below, is identical; only the ids and the row's return
+        # destination differ.
         # The swapped-in row carries its own accept form again, so marking a file reviewed does not
         # quietly cost it the control beside it — and BOTH halves of that row come from ONE post-ack
         # `_read_population`, exactly as the page's own render does (design D2/D9): the state it
@@ -731,6 +761,7 @@ async def ack_event(
             .select_from(Event)
             .where(Event.collection_id == collection.id, Event.acknowledged_at.is_(None))
         )
+        fleet = view == "fleet"
         return templates.TemplateResponse(
             request,
             "partials/review_ack_row.html",
@@ -738,7 +769,15 @@ async def ack_event(
                 "it": item,
                 "c": {"id": collection.id},
                 "csrf_token": generate_csrf_token(request),
+                # Scoped to THIS collection either way — the fleet page's group pill counts the
+                # same population the collection page's pill does.
                 "review_open": int(review_open or 0),
+                "pill_id": f"review-open-pill-{collection.id}" if fleet else "review-open-pill",
+                # The swapped-in row keeps the surface it was swapped into: its accept must come
+                # back to the fleet page, not deposit the operator on a collection page they never
+                # navigated to. Both values are literals chosen here, never operator input.
+                "row_from": "fleet" if fleet else "",
+                "row_view": "fleet" if fleet else "review",
                 "alert_count": alert_count,
             },
         )
@@ -1543,6 +1582,22 @@ def _population_fingerprint(collection: Collection, pop: _Population) -> str:
     return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
 
 
+def _review_return_base(collection_id: int, origin: str) -> str:
+    """The review surface a per-file accept came from, chosen from a **fixed pair** (design D2).
+
+    ``origin`` is a query value, so it is treated as one bit of information and nothing else:
+    exactly the literal ``"fleet"`` selects the fleet page; every other value — absent, empty,
+    ``//evil.example``, an absolute URL, arbitrary text — falls back to the collection's own review
+    page. No part of the supplied string ever reaches the ``Location`` header, so there is no
+    open-redirect surface to reason about and no proxy-dependent ``Referer`` heuristic.
+
+    It selects a DESTINATION only. The verb performed stays a route constant (see
+    :func:`_guarded_accept`), so one URL still means one consequence; this only stops a fleet-page
+    operator from being deposited on a different page on every click, success or refusal.
+    """
+    return "/review" if origin == "fleet" else f"/collection/{collection_id}/review"
+
+
 async def _guarded_accept(
     session: AsyncSession,
     collection: Collection,
@@ -1550,12 +1605,14 @@ async def _guarded_accept(
     form: str,
     submitted_fp: str,
     file_id: int | None = None,
+    origin: str = "",
 ) -> RedirectResponse | None:
     """Run ``form``'s accept only if its population still matches ``submitted_fp`` (design D14).
 
     Returns ``None`` when the accept was performed (the caller then redirects to its own success
-    target), or the fail-closed refusal response — a 303 to ``/collection/{id}/review?stale=1``,
-    the page that lists exactly the issues that caused the refusal — on any of:
+    target), or the fail-closed refusal response — a 303 to ``…/review?stale=1`` on the surface the
+    submission came from (:func:`_review_return_base`), the page that lists exactly the issues that
+    caused the refusal — on any of:
 
     * an absent or empty ``population_fp`` (fail closed: an unguarded POST is refused, never run);
     * an operation already in flight (``blocking_run``, now belt-and-braces for the *long* window);
@@ -1573,7 +1630,9 @@ async def _guarded_accept(
     call — ``accept_collection(scope=…)`` for the three bulk forms, ``accept_file`` for
     ``accept-file``, whose ``file_id`` is the row named by the URL.
     """
-    stale = RedirectResponse(f"/collection/{collection.id}/review?stale=1", status_code=303)
+    stale = RedirectResponse(
+        f"{_review_return_base(collection.id, origin)}?stale=1", status_code=303
+    )
     submitted = (submitted_fp or "").strip()
     if not submitted:
         await session.rollback()
@@ -1661,6 +1720,17 @@ async def collection_accept(
 # recovery clipboard (with a "+N more" note). The accurate full count still comes from the counts.
 REVIEW_ROW_LIMIT = 500
 REVIEW_COPY_LIMIT = 2000
+
+# The fleet page's two caps, for two different failure modes (design D11):
+#   * per group, so one collection with 40,000 missing files cannot crowd every other collection
+#     off a page whose whole purpose is showing the operator every collection in trouble;
+#   * in total, so the page's cost is bounded however many collections are affected.
+# A group past the TOTAL budget is still rendered — header, counts and its "Review all in X" link,
+# with zero rows: a collection must never disappear from a fleet-wide issue list because of a
+# render budget. Counts and ordering always come from each collection's population snapshot, never
+# from the truncated render list.
+FLEET_COLLECTION_ROW_LIMIT = 100
+FLEET_ROW_LIMIT = 500
 
 
 def _review_item(
@@ -1814,6 +1884,118 @@ async def collection_review(
     return templates.TemplateResponse(request, "collection_review.html", ctx)
 
 
+@router.get("/review", response_class=HTMLResponse)
+async def fleet_review(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(current_user),
+    stale: str = Query(""),
+):
+    """Every open issue across the current user's collections, grouped by collection (#27).
+
+    The destination the fleet-wide counts never had: the dashboard's "Open issues" tile and the
+    sidebar badge count files across every collection, and until this page existed the only honest
+    place to send that number was a list of collections, which acts on nothing.
+
+    **A read surface with per-row verbs, not a new mutation surface** (design D1/D3). It introduces
+    no query primitive, no route and no ``_FP_FORMS`` entry: the rows are the same
+    ``partials/review_row.html`` the collection review page renders, minted from the same
+    ``_read_population`` snapshot, and they post to the same per-file routes. It offers **no
+    collection-spanning bulk verb** — each bulk accept is authorized by a fingerprint over ONE
+    collection's whole population and is irreversible, so a fleet bulk would be "stop tracking 412
+    files across 6 collections" behind a single button: the unscoped irreversible verb the scoped
+    ones replaced, rebuilt one level up. Those verbs stay one click away, on each group's own
+    review page.
+
+    **One population read per collection, and everything a group shows or authorizes is a slice of
+    it** — the counts, the rows, each row's per-file fingerprint AND each row's open-event state.
+    """
+    collections = await collections_svc.list_collections(session, user_id=user.id)
+
+    # Read once per collection, then decide what to render. Ordering needs every group's counts, so
+    # the reads cannot be stopped early at the row budget — and a group past the budget still has
+    # to state its counts, which is the only reason this page is worth loading for that operator.
+    snapshots = []
+    for c in collections:
+        pop = await _read_population(session, c, "review")
+        if not pop.files:
+            continue  # not affected — an unaffected collection is not listed at all
+        missing = sum(1 for f in pop.files if f.status == "missing")
+        snapshots.append((c, pop, missing, len(pop.files) - missing))
+    # Worst first, matching "missing first" within a group.
+    snapshots.sort(key=lambda s: (-s[2], -s[3], s[0].name))
+
+    groups: list[dict[str, Any]] = []
+    budget = FLEET_ROW_LIMIT
+    for c, pop, missing, modified in snapshots:
+        # The row's open event comes out of the SAME snapshot (design D1) — deliberately NOT
+        # `_latest_events_by_file`, which the collection review page uses. With two reads, a
+        # scanner insert or a concurrent acknowledgement between them lets a row offer "Mark
+        # reviewed" for an event that is already acknowledged, or hide the control for one that is
+        # open, while its accept fingerprint describes the other read: the guard's own failure mode
+        # reintroduced beside the guard. Highest id = newest generation, the same rule `ack_event`
+        # applies to `narrowed.open_events[-1]`.
+        #
+        # Accepted consequence: `pop.open_events` holds OPEN events only, so a row whose events are
+        # all acknowledged shows no open event (correct — the collection page renders it the same
+        # way) and takes its "detected" time from `last_changed` rather than from that acknowledged
+        # event. A slightly different relative timestamp on an already-reviewed row is the whole
+        # cost, and it buys a snapshot property that authorizes a destructive verb.
+        open_by_file: dict[int, _PopEvent] = {}
+        for e in pop.open_events:
+            if e.file_id is None:
+                continue
+            prev = open_by_file.get(e.file_id)
+            if prev is None or e.id > prev.id:
+                open_by_file[e.file_id] = e
+
+        ordered = sorted(
+            pop.files, key=lambda f: (0 if f.status == "missing" else 1, f.relpath)
+        )
+        shown = ordered[: min(FLEET_COLLECTION_ROW_LIMIT, max(budget, 0))]
+        budget -= len(shown)
+        groups.append(
+            {
+                "id": c.id,
+                "name": c.name,
+                # Every number from the snapshot, never from the truncated render list.
+                "missing": missing,
+                "modified": modified,
+                "issues": len(pop.files),
+                "review_open": len(pop.open_events),
+                "items": [
+                    _review_item(
+                        f,
+                        c.root,
+                        open_by_file.get(f.id),
+                        fp=_population_fingerprint(
+                            c,
+                            _narrow(
+                                pop, "accept-file", _FP_FORMS["accept-file"][1], file_id=f.id
+                            ),
+                        ),
+                    )
+                    for f in shown
+                ],
+                "shown": len(shown),
+                "more": len(pop.files) - len(shown),
+            }
+        )
+
+    ctx = await _base_context(request, session, user, "review")
+    ctx.update(
+        {
+            "groups": groups,
+            "has_collections": bool(collections),
+            "total_missing": sum(g["missing"] for g in groups),
+            "total_modified": sum(g["modified"] for g in groups),
+            "total_issues": sum(g["issues"] for g in groups),
+            "stale": stale == "1",
+        }
+    )
+    return templates.TemplateResponse(request, "review_fleet.html", ctx)
+
+
 # The review page's two bulk verbs, one route each. `POST /collection/{id}/review/accept` — the
 # single "Accept all changes" that adopted the modified files, deleted the missing ones AND
 # promoted every `new` file in the collection — is **removed, not redirected**: a POST from a stale
@@ -1881,8 +2063,11 @@ async def collection_file_accept(
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
     population_fp: str = Form(""),
+    # Which review surface this row was rendered on. Whitelisted to a fixed pair by
+    # `_review_return_base`; it never becomes part of a redirect target and never selects a verb.
+    origin: str = Query("", alias="from"),
 ):
-    """Accept ONE row from the review page (#30), then land back on a freshly rendered review.
+    """Accept ONE row from a review page (#30), then land back on a freshly rendered review.
 
     A plain POST → 303, not an htmx row swap: the row's disappearance changes the header count, the
     legend, the copy list, both bulk button labels, the "need action" pill and the sidebar badge —
@@ -1900,11 +2085,13 @@ async def collection_file_accept(
     if owner_id is not None and owner_id != collection.id:
         raise HTTPException(status_code=404, detail="file not found")
     refused = await _guarded_accept(
-        session, collection, user, "accept-file", population_fp, file_id=file_id
+        session, collection, user, "accept-file", population_fp, file_id=file_id, origin=origin
     )
     if refused is not None:
         return refused
-    return RedirectResponse(f"/collection/{collection_id}/review", status_code=303)
+    # Success and refusal land on the SAME surface (design D2): a fleet-page operator who is sent
+    # to a different page on every click has a worse dead end than the one `/review` removes.
+    return RedirectResponse(_review_return_base(collection_id, origin), status_code=303)
 
 
 @router.post(

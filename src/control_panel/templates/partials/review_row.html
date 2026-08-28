@@ -1,4 +1,10 @@
 {% import "_macros.html" as m %}
+{# The row renders on two surfaces: a collection's own review page and the fleet-wide `/review`.
+   `row_from` / `row_view` name which one, and BOTH default to the collection page so its rendered
+   markup is byte-for-byte what it was. They select a DESTINATION only — never the verb, which
+   stays a route constant, and never a URL, which the route whitelists to a fixed pair. #}
+{% set row_accept_q = "?from=fleet" if row_from|default("") == "fleet" else "" %}
+{% set row_ack_view = "fleet" if row_view|default("review") == "fleet" else "review" %}
 <div class="review-row" id="review-row-{{ it.id }}">
   <div class="review-row__icon review-row__icon--{{ 'danger' if it.status == 'missing' else 'warn' }}">
     {{ m.icon('minusCircle' if it.status == 'missing' else 'alert', size=16, stroke=2) }}
@@ -32,7 +38,7 @@
        contrast card exists to prevent. The path rides a data attribute rather than the confirm
        string so a quote in a filename cannot break the confirm. #}
     {% if it.fp and csrf_token %}
-      <form method="post" action="/collection/{{ c.id }}/file/{{ it.id }}/accept" style="display:inline"
+      <form method="post" action="/collection/{{ c.id }}/file/{{ it.id }}/accept{{ row_accept_q }}" style="display:inline"
             data-relpath="{{ it.relpath }}"
             onsubmit="return confirm({% if it.status == 'missing' %}'Stop tracking ' + this.dataset.relpath + '? Its record is permanently removed from Cairn — path, first-seen date, and the link to its timestamp proof. Nothing on disk is deleted and the .ots proof file stays in the proof store.'{% else %}'Adopt the current contents of ' + this.dataset.relpath + ' as correct from now on? This change will not be reported again.'{% endif %});">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
@@ -59,7 +65,7 @@
          repeating the paragraph on up to 500 rows would bury it. #}
       <button class="btn btn--sm btn--subtle"
               title="Notes that you've seen this. The file stays on record as missing or changed, keeps any existence proof, and the collection keeps its Alert status until you restore or retire it."
-              hx-post="/events/{{ it.event_id }}/ack?view=review"
+              hx-post="/events/{{ it.event_id }}/ack?view={{ row_ack_view }}"
               hx-target="#review-row-{{ it.id }}" hx-swap="outerHTML">
         {{ m.icon('check', size=14, stroke=2) }} Mark reviewed
       </button>

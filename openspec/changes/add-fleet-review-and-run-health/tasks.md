@@ -67,18 +67,18 @@ the `from` parameter on `collection_file_accept` / `_guarded_accept` **only**), 
 
 ### The page
 
-- [ ] 2.1 Add `FLEET_ROW_LIMIT = 500` and `FLEET_COLLECTION_ROW_LIMIT = 100` beside the existing
+- [x] 2.1 Add `FLEET_ROW_LIMIT = 500` and `FLEET_COLLECTION_ROW_LIMIT = 100` beside the existing
   `REVIEW_ROW_LIMIT`, with the two-failure-modes comment from design D11.
-- [ ] 2.2 Add `GET /review` → `fleet_review()`, page id `"review"`. For each collection from
+- [x] 2.2 Add `GET /review` → `fleet_review()`, page id `"review"`. For each collection from
   `collections_svc.list_collections(session, user_id=user.id)`: one
   `_read_population(session, collection, "review")`; skip collections whose `pop.files` is empty.
   **One read per collection, and every number the group shows comes out of it** (design D1).
-- [ ] 2.3 Per group, build rows exactly as `collection_review` does: sort `missing` first then
+- [x] 2.3 Per group, build rows exactly as `collection_review` does: sort `missing` first then
   `modified`, path-ordered within each; truncate to `FLEET_COLLECTION_ROW_LIMIT` and to the
   remaining share of `FLEET_ROW_LIMIT`; one `_review_item(..., fp=_population_fingerprint(collection,
   _narrow(pop, "accept-file", …, file_id=f.id)))` per row. **No new `_FP_FORMS` entry** —
   `accept-file` is already per-row and per-collection.
-- [ ] 2.3a **Do NOT call `_latest_events_by_file` on this page** (design D1). Each rendered file's
+- [x] 2.3a **Do NOT call `_latest_events_by_file` on this page** (design D1). Each rendered file's
   open event is taken from `pop.open_events` — the newest (`max` by `id`, matching `ack_event`'s
   `open_events[-1]` "highest id = newest generation" rule) entry whose `file_id` matches; build the
   `{file_id: _PopEvent}` map once per group in Python from that one list. `_review_item` already
@@ -86,10 +86,10 @@ the `from` parameter on `collection_file_accept` / `_guarded_accept` **only**), 
   the fingerprint it *authorizes* come from two snapshots — the guard's own failure mode beside the
   guard. Comment it with that reason and with the accepted consequence: a row whose events are all
   acknowledged shows no open event and takes its "detected" time from `last_changed`.
-- [ ] 2.4 Group ordering `missing DESC, modified DESC, name`; per-group counts and `review_open`
+- [x] 2.4 Group ordering `missing DESC, modified DESC, name`; per-group counts and `review_open`
   from the snapshot, never from the truncated row list. A group past the total cap is still rendered
   with its header, counts and link — with zero rows (design D11).
-- [ ] 2.5 `templates/review_fleet.html`: the panel shell, a page header naming the totals, one
+- [x] 2.5 `templates/review_fleet.html`: the panel shell, a page header naming the totals, one
   group per collection (header = name, `N missing · M modified`, the `_review_open_pill` with id
   `review-open-pill-{{ c.id }}`, and a **"Review all in {name} →"** link to
   `/collection/{id}/review`), then `{% include "partials/review_row.html" %}` per row, and a
@@ -97,34 +97,34 @@ the `from` parameter on `collection_file_accept` / `_guarded_accept` **only**), 
   (design D3) — one comment in the template says so and says why, so it is not "helpfully" added
   later. One line pointing at the per-collection review page for recovery guidance; no copy-paths
   control here.
-- [ ] 2.6 Empty state: "No open issues across your collections" — distinct from the no-collections
+- [x] 2.6 Empty state: "No open issues across your collections" — distinct from the no-collections
   state, which links to `/collection/new`.
-- [ ] 2.7 Sidebar: no new nav entry (the page is reached from the tile, the badge and the cards);
+- [x] 2.7 Sidebar: no new nav entry (the page is reached from the tile, the badge and the cards);
   `_base_context(..., page="review")` must not light up another nav item.
 
 ### Per-row actions from the fleet page
 
-- [ ] 2.8 `partials/review_row.html`: the per-row accept form's `action` gains an optional
+- [x] 2.8 `partials/review_row.html`: the per-row accept form's `action` gains an optional
   `?from=fleet` (from a `row_from` variable defaulting to empty, so the collection page's markup is
   unchanged); the Mark-reviewed button's `hx-post` gains `?view=fleet` the same way.
-- [ ] 2.9 `collection_file_accept` + `_guarded_accept`: accept a `from` query value **whitelisted to
+- [x] 2.9 `collection_file_accept` + `_guarded_accept`: accept a `from` query value **whitelisted to
   the two literals** `"fleet"` / anything-else (design D2), and use it as the base of **both** the
   success redirect and the `?stale=1` refusal redirect. The verb performed stays a route constant;
   `from` selects a destination and nothing else. Assert this in a test.
-- [ ] 2.10 `ack_event`: add the `view == "fleet"` branch. It renders the same
+- [x] 2.10 `ack_event`: add the `view == "fleet"` branch. It renders the same
   `partials/review_ack_row.html` as `view == "review"` — including the post-ack single-snapshot
   re-mint of the row and its fingerprint, unchanged — with `pill_id = f"review-open-pill-{collection.id}"`
   and `review_open` scoped to that collection.
-- [ ] 2.11 `partials/review_ack_row.html`: parameterize the OOB pill id
+- [x] 2.11 `partials/review_ack_row.html`: parameterize the OOB pill id
   (`{% set pid = pill_id|default("review-open-pill") %}`) so the collection review page's rendered
   markup is byte-for-byte unchanged (design D10). Keep the `#sidebar-alert-badge` OOB swap.
 
 ### The tile and the feed
 
-- [ ] 2.12 `dashboard()`: `issues_href` for two-or-more affected collections becomes `/review`
+- [x] 2.12 `dashboard()`: `issues_href` for two-or-more affected collections becomes `/review`
   (single affected collection keeps its direct review link; zero keeps `None` and the inert `<div>`).
   Delete the now-false "NEVER `/review` — it is a 404" comment and replace it with the rule.
-- [ ] 2.12a **The "last activity" tile** (`dashboard()`, `routes.py:617-624` — Slice A's function,
+- [x] 2.12a **The "last activity" tile** (`dashboard()`, `routes.py:617-624` — Slice A's function,
   design D14): it selects the newest **finished run of any kind** and labels it `"<collection>
   scan"` with no result, so a `stamp` run, an `upgrade` run, a `partial` scan, a failed scan and a
   reclaimed one all render as a clean scan. Fix the sub-line to name the run it actually found:
@@ -132,49 +132,49 @@ the `from` parameter on `collection_file_accept` / `_guarded_accept` **only**), 
   `failed` (for `error`), `interrupted` (worded neutrally, never as a fault — design D7). Keep the
   existing `· N moved` suffix. **Plain text built in `dashboard()`** — it must NOT call Slice B's
   `run_health_note` macro, which would make `_macros.html` a shared file (design D9/D14).
-- [ ] 2.13 `_event_feed()`: add `Event.acknowledged_at.is_(None).desc()` **before**
+- [x] 2.13 `_event_feed()`: add `Event.acknowledged_at.is_(None).desc()` **before**
   `Event.detected_at.desc()`. Do **not** add a `WHERE` clause; do not change the `limit(20)`; do not
   change how `open_events` / `alert_count` are counted (real COUNTs over the whole population).
   Comment it with #12's rejected fix 2 and the `user-representative` finding it closes.
 
 ### Tests
 
-- [ ] 2.14 `/review` with issues in two collections renders both groups, missing rows before
+- [x] 2.14 `/review` with issues in two collections renders both groups, missing rows before
   modified within a group, and each row's accept form carries a non-empty `population_fp`.
-- [ ] 2.15 `/review` renders **no** bulk accept/acknowledge form (assert the absence of
+- [x] 2.15 `/review` renders **no** bulk accept/acknowledge form (assert the absence of
   `/review/ack-all`, `/review/adopt-changed`, `/review/stop-tracking` in the body).
-- [ ] 2.16 A per-row accept posted with `from=fleet` and a **stale** fingerprint redirects to
+- [x] 2.16 A per-row accept posted with `from=fleet` and a **stale** fingerprint redirects to
   `/review?stale=1` and mutates nothing; with a valid fingerprint it accepts the one file and
   redirects to `/review`.
-- [ ] 2.17 Acknowledging from the fleet view swaps the row, OOB-refreshes
+- [x] 2.17 Acknowledging from the fleet view swaps the row, OOB-refreshes
   `review-open-pill-{cid}` and the sidebar badge, and leaves the group's missing/modified counts
   unchanged.
-- [ ] 2.18 Feed ordering: with 25 born-acknowledged informational events newer than 3 unacknowledged
+- [x] 2.18 Feed ordering: with 25 born-acknowledged informational events newer than 3 unacknowledged
   `missing` events, all 3 unacknowledged events appear in the 20-row feed, at the top; and a feed
   with **no** unacknowledged events still renders the informational rows (no filtering).
-- [ ] 2.19 Dashboard tile: two affected collections → `href="/review"`; one → that collection's
+- [x] 2.19 Dashboard tile: two affected collections → `href="/review"`; one → that collection's
   review page; zero → a non-interactive element.
-- [ ] 2.20 Scoping: in `multi` mode, `/review` for user A shows none of user B's collections or rows.
-- [ ] 2.21 **Per-group cap:** a collection with more issues than `FLEET_COLLECTION_ROW_LIMIT`
+- [x] 2.20 Scoping: in `multi` mode, `/review` for user A shows none of user B's collections or rows.
+- [x] 2.21 **Per-group cap:** a collection with more issues than `FLEET_COLLECTION_ROW_LIMIT`
   renders exactly that many rows, a "+N more" note whose N is the *snapshot* remainder (not the
   render remainder), its "Review all in X →" link, and the other affected collections still render
   their rows.
-- [ ] 2.22 **Total cap:** with more affected collections than `FLEET_ROW_LIMIT` can seat, the groups
+- [x] 2.22 **Total cap:** with more affected collections than `FLEET_ROW_LIMIT` can seat, the groups
   past the budget are still rendered — header, missing/modified counts and link — with zero rows,
   and the total rendered row count does not exceed `FLEET_ROW_LIMIT`.
-- [ ] 2.23 **Both empty states:** a user with collections but no missing/modified files gets the
+- [x] 2.23 **Both empty states:** a user with collections but no missing/modified files gets the
   "No open issues" state and **no** `/collection/new` link; a user with no collections at all gets
   the distinct no-collections state that does link to `/collection/new`.
-- [ ] 2.24 **Hostile `from=`:** posting a per-file accept with `from=https://evil.example/x`,
+- [x] 2.24 **Hostile `from=`:** posting a per-file accept with `from=https://evil.example/x`,
   `from=//evil.example`, `from=/collection/99/review` and `from=` (empty) each redirects to the
   *collection's own* review page (never to the supplied value, never off-host), and each performs
   exactly the same single-file accept. Assert the `Location` header equals the route constant.
-- [ ] 2.25 **Single-snapshot event derivation:** acknowledge one of the rendered files' events, then
+- [x] 2.25 **Single-snapshot event derivation:** acknowledge one of the rendered files' events, then
   assert the fleet page rendered from a population read taken **before** that ack does not offer a
   second, contradicting state for that row — i.e. the row's `event_id`/`acked` and its `fp` both
   derive from `pop`, and no `_latest_events_by_file` call is made by `fleet_review` (assert by
   monkeypatching it to raise).
-- [ ] 2.26 **Last-activity tile** (2.12a), one assertion per case: newest finished run is a clean
+- [x] 2.26 **Last-activity tile** (2.12a), one assertion per case: newest finished run is a clean
   `scan` → `"<name> scan"` with no result suffix; `partial` → names partial; `error` → names a
   failure; `interrupted` → neutral wording, not the failure wording; `kind='stamp'` → says "stamp",
   not "scan"; `kind='upgrade'` → says "upgrade"; and the `· N moved` suffix survives.

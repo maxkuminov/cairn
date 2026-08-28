@@ -204,7 +204,13 @@ def test_issues_tile_is_a_link_to_the_single_affected_collections_review(cairn_e
         assert 'href="/review"' not in body
 
 
-def test_issues_tile_points_at_the_collections_list_when_several_are_affected(cairn_env):
+def test_issues_tile_points_at_the_fleet_review_when_several_are_affected(cairn_env):
+    """#18's placeholder destination is retired now that `/review` exists (#27).
+
+    The tile used to land on `/collections` in exactly the case it matters most — several
+    collections in trouble — because a fleet-wide review page did not exist to link to. It does
+    now, and it lists every file this tile counts, so the tile lands where the number can be worked.
+    """
     a, b = cairn_env / "a", cairn_env / "b"
     a.mkdir()
     b.mkdir()
@@ -217,8 +223,8 @@ def test_issues_tile_points_at_the_collections_list_when_several_are_affected(ca
 
     with _make_client(cairn_env, seed) as client:
         body = client.get("/").text
-        assert '<a class="card tile tile--link" href="/collections">' in body
-        assert 'href="/review"' not in body
+        assert '<a class="card tile tile--link" href="/review">' in body
+        assert 'href="/collections">' not in body.split('class="card tile tile--link"')[1][:200]
 
 
 def test_issues_tile_is_inert_at_zero(cairn_env):

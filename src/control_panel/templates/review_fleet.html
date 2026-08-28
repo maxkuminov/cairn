@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Review — all collections · Cairn{% endblock %}
+{% block content %}
+{# The fleet-wide review page (#27): every missing or changed file across the collections you own,
+   grouped by collection, worst first. It is where the dashboard's "Open issues" tile and the
+   sidebar badge land when more than one collection is affected — the destination those counts
+   never had.
+
+   NO COLLECTION-SPANNING BULK ACTION IS OFFERED HERE, and none should be added (design D3). Every
+   bulk accept verb is authorized by a fingerprint minted over ONE collection's entire population
+   and is irreversible; a fleet-wide one would need a cross-collection fingerprint scope, a
+   cross-collection mutation route, and a confirm reading "permanently remove 412 file records
+   across 6 collections" — the unscoped irreversible verb the scoped verbs replaced, rebuilt one
+   level up on the page whose whole purpose is making counts land somewhere honest. The scoped bulk
+   verbs live on each collection's own review page, with their counts, one click away through each
+   group's "Review all in …" link. The per-row verbs ARE offered, because a row is the honest unit:
+   one file, one consequence, one fingerprint. #}
+<div class="page-header">
+  <div>
+    <h1>What changed</h1>
+    <div class="page-header__sub">
+      {% if groups %}
+        {{ total_issues }} file{{ "" if total_issues == 1 else "s" }} missing or changed across
+        {{ groups|length }} collection{{ "" if groups|length == 1 else "s" }} —
+        {{ total_missing }} missing · {{ total_modified }} modified. Each action below acts only on
+        the file it names; the collection-wide actions live on each collection's own review page.
+      {% else %}
+        Missing or changed files across every collection you monitor.
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if stale %}
+  {# Where a per-row accept refused by the population guard lands when it was submitted from this
+     page (`?stale=1`). Same wording as the collection review page's banner: the operator clicked a
+     destructive button and the first thing they need to know is that it did not run. #}
+  <div class="card" id="stale-banner"
+       style="margin-bottom:16px;display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border-color:color-mix(in oklch, var(--warn) 35%, var(--border));background:color-mix(in oklch, var(--warn-soft) 40%, var(--surface))">
+    <span style="color:var(--warn);flex-shrink:0;display:flex">{{ m.icon("alert", size=16, stroke=2) }}</span>
+    <div style="flex:1;font-size:13px;line-height:1.55;color:var(--text-2)">
+      <strong>Your action was NOT applied</strong> — that collection changed since the page loaded.
+      Nothing was deleted or acknowledged. The list below is current; review it and decide again.
+    </div>
+    <button type="button" class="btn btn--sm btn--subtle" aria-label="Dismiss"
+            onclick="var b=document.getElementById('stale-banner'); if (b) b.remove();">Dismiss</button>
+  </div>
+{% endif %}
+
+{% if not groups %}
+  {# Two distinct empty states. "No open issues" is a real all-clear over collections that are
+     being watched; "no collections" has established nothing at all and is the only one that
+     offers the add-collection route. #}
+  {% if has_collections %}
+    <div class="card">
+      <div class="empty-state">
+        <div style="display:flex;justify-content:center;margin-bottom:10px;color:var(--ok)">{{ m.icon("checkCircle", size=34, stroke=1.7) }}</div>
+        <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px">No open issues across your collections</div>
+        <div>Nothing is missing or changed anywhere right now.</div>
+        <a class="btn btn--subtle btn--sm" href="/collections" style="margin-top:16px;display:inline-flex">Back to collections</a>
+      </div>
+    </div>
+  {% else %}
+    <div class="card">
+      <div class="empty-state">
+        <div style="display:flex;justify-content:center;margin-bottom:10px;color:var(--text-3)">{{ m.icon("folder", size=34, stroke=1.7) }}</div>
+        <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px">No collections yet</div>
+        <div>Nothing is being watched, so there is nothing to review. Add a collection to start monitoring files.</div>
+        <a class="btn btn--sm" href="/collection/new" style="margin-top:16px;display:inline-flex">{{ m.icon("plus", size=14) }} Add collection</a>
+      </div>
+    </div>
+  {% endif %}
+{% else %}
+  <div class="field__hint" style="margin-bottom:14px">
+    <strong>Mark reviewed:</strong> Notes that you've seen this. The file stays on record as missing
+    or changed, keeps any existence proof, and the collection keeps its Alert status until you
+    restore or retire it. To recover files, or to act on a whole collection at once, open that
+    collection's own review page from its heading below — recovery guidance and the copy-paths
+    controls live there, where the paths share one root.
+  </div>
+
+  {% for g in groups %}
+    <div class="card card--flush review-list" style="margin-bottom:16px">
+      <div class="review-list__head">
+        <h3><a href="/collection/{{ g.id }}/review" style="color:inherit">{{ g.name }}</a></h3>
+        <div class="review-list__legend">
+          {% if g.missing %}<span class="legend__stat">{{ m.dot("var(--danger)", size=7) }}{{ g.missing }} missing</span>{% endif %}
+          {% if g.modified %}<span class="legend__stat">{{ m.dot("var(--warn)", size=7) }}{{ g.modified }} modified</span>{% endif %}
+          {# One pill per group, so its OOB id carries the collection id (design D10). #}
+          <span id="review-open-pill-{{ g.id }}">
+            {% with review_open = g.review_open %}{% include "partials/_review_open_pill.html" %}{% endwith %}
+          </span>
+          <a class="btn btn--sm btn--subtle" href="/collection/{{ g.id }}/review">Review all in {{ g.name }} {{ m.icon("chevronR", size=12) }}</a>
+        </div>
+      </div>
+      {% for it in g["items"] %}
+        {% with c = g, row_from = "fleet", row_view = "fleet" %}
+          {% include "partials/review_row.html" %}
+        {% endwith %}
+      {% endfor %}
+      {% if g.more > 0 %}
+        <div class="review-list__more">
+          Showing the first {{ g.shown }} of {{ g.issues }} in {{ g.name }} — {{ g.more }} more.
+          <a href="/collection/{{ g.id }}/review">Review all in {{ g.name }}</a> to see them.
+        </div>
+      {% endif %}
+    </div>
+  {% endfor %}
+{% endif %}
+{% endblock %}

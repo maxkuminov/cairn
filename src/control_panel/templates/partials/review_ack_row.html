@@ -1,7 +1,14 @@
-{# Response to acknowledging a single file from the review page: swap the row in place, and
-   OOB-refresh the collection's "unreviewed" pill + the global sidebar alert badge. #}
+{# Response to acknowledging a single file from a review surface: swap the row in place, and
+   OOB-refresh that collection's "unreviewed" pill + the global sidebar alert badge.
+
+   `pill_id` is parameterized because the fleet-wide `/review` carries one pill PER collection
+   group (design D10); a single hardcoded id there would refresh whichever group happened to render
+   first. It defaults to the collection review page's own id, so that page's rendered markup is
+   byte-for-byte unchanged. The `#sidebar-alert-badge` swap stays in BOTH responses (#12's rejected
+   fix 8). #}
+{% set pid = pill_id|default("review-open-pill") %}
 {% include "partials/review_row.html" %}
-<span id="review-open-pill" hx-swap-oob="innerHTML">{% include "partials/_review_open_pill.html" %}</span>
+<span id="{{ pid }}" hx-swap-oob="innerHTML">{% include "partials/_review_open_pill.html" %}</span>
 <span id="sidebar-alert-badge" hx-swap-oob="innerHTML">
   {% if alert_count and alert_count > 0 %}<span class="nav-badge" title="{{ alert_count }} file{{ '' if alert_count == 1 else 's' }} missing or changed — open dashboard" aria-label="{{ alert_count }} file{{ '' if alert_count == 1 else 's' }} missing or changed — open dashboard">{{ alert_count }}</span>{% endif %}
 </span>
