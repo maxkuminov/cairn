@@ -48,6 +48,12 @@ log = logging.getLogger("cairn.scheduler")
 # Per-collection first-run offset so a fleet of collections does not all fire on the very first tick.
 STAGGER_SECONDS = 1.0
 
+# How long an in-progress run may go without reporting progress before the startup reaper treats it
+# as orphaned. It must comfortably exceed the gap between two progress writes of the slowest real
+# operation (a scan batch of 500 files, a stamp batch, one upgraded proof) and stay short enough that
+# a crash does not strand a collection for long. Fifteen minutes is both, by a wide margin.
+RUN_HEARTBEAT_TIMEOUT_SECONDS = 15 * 60
+
 CollectionState = Literal["fresh", "pending", "stale"]
 HealthStatus = Literal["ok", "degraded"]
 
@@ -141,21 +147,51 @@ async def compute_health(session: AsyncSession, settings: Settings) -> HealthRep
 
 
 async def reap_orphaned_runs(session: AsyncSession) -> int:
-    """Mark any leftover ``result='running'`` run as ``interrupted`` (finished now); return the count.
+    """Mark every STALE ``result='running'`` run as ``interrupted`` (finished now); return the count.
 
-    Called once on startup: a restarted process cannot still be running an operation, so a run
-    still ``running`` was orphaned by a crash/kill mid-flight. Left alone it would freeze the live
-    status badge at "in progress" forever and (via the concurrency guard) block a new operation on
-    that collection. Reaping clears the stale indicator and unblocks the collection. The terminal state is
-    ``interrupted`` (not ``error``) so a benign restart-induced interruption — e.g. a deploy killing
-    a long scan mid-flight — is not conflated with a genuine scan failure. Like ``error``, an
-    ``interrupted`` run does not refresh scan freshness (:func:`compute_health` keys on ``ok``/
-    ``partial`` only).
+    Called once on startup. A run still ``running`` is usually one orphaned by a crash/kill
+    mid-flight: left alone it freezes the live status badge at "in progress" forever and (via the
+    concurrency guard) blocks every new operation on that collection. Reaping clears the stale
+    indicator and unblocks the collection. The terminal state is ``interrupted`` (not ``error``) so a
+    benign restart-induced interruption — e.g. a deploy killing a long scan mid-flight — is not
+    conflated with a genuine scan failure. Like ``error``, an ``interrupted`` run does not refresh
+    scan freshness (:func:`compute_health` keys on ``ok``/``partial`` ``kind='scan'`` runs only).
+
+    **"Usually" is why this is not a bulk update.** The claim is cross-PROCESS (design D10): a
+    ``cairn stamp`` or ``cairn upgrade`` invoked from cron can legitimately hold a collection's claim
+    while the web process restarts. Clearing it because *this* process just started would revoke a
+    LIVE claim, letting the scheduler or panel start a second writer over the same proofs — the
+    concurrent check-then-act that the claim exists to prevent, reintroduced by the cleanup meant to
+    protect it. So liveness decides, not process startup: a run is reaped only when it has reported
+    no progress for :data:`RUN_HEARTBEAT_TIMEOUT_SECONDS`, measured on ``heartbeat_at`` (refreshed by
+    every scan batch, stamp batch and upgraded proof) and falling back to ``started`` for a run that
+    has not yet reported any (including rows written before migration ``0011``).
+
+    The cost is bounded and one-directional: a genuinely dead run keeps its collection claimed for up
+    to the threshold, during which the scheduler simply skips that collection and the badge still
+    reads "in progress" — while the dead-man's switch is untouched, since freshness is keyed on
+    completed ``kind='scan'`` runs and an unreaped run was never going to refresh it. A collection
+    that is late by a threshold's worth of minutes is a delay; a second proof writer is evidence loss.
     """
+    now = _utcnow()
+    running = list(await session.scalars(select(Run).where(Run.result == "running")))
+    stale = [
+        run.id
+        for run in running
+        if (now - _as_aware(run.heartbeat_at or run.started)).total_seconds()
+        > RUN_HEARTBEAT_TIMEOUT_SECONDS
+    ]
+    if not stale:
+        if running:
+            log.info(
+                "startup: %d in-progress run(s) still heartbeating — left claimed, not reaped",
+                len(running),
+            )
+        return 0
     result = await session.execute(
         update(Run)
-        .where(Run.result == "running")
-        .values(result="interrupted", finished=_utcnow())
+        .where(Run.id.in_(stale), Run.result == "running")
+        .values(result="interrupted", finished=now)
     )
     await session.commit()
     return result.rowcount or 0

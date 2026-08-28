@@ -343,25 +343,46 @@ other lacks, and which of them is the stronger evidence is a judgement the prese
 NOT make. Keeping the earlier and discarding the later can therefore discard an anchored proof in
 favour of an unanchored one, which is the loss this requirement exists to prevent. The suffix SHALL
 be derived only from how many proofs are already preserved at that location, so it cannot inherit any
-component of a watched file's name.
+component of a watched file's name. The search for a free name SHALL NOT be bounded by a fixed
+ceiling: preservation is the step that exists so that no proof is ever destroyed, and a ceiling
+makes a store that reaches it refuse every later preservation permanently — reachable by a prolonged
+deferral loop or by a prepopulated store. The system SHALL find the first free name efficiently,
+without one failed attempt per name already taken, while the exclusive create remains what decides.
 
 Preservation SHALL claim each name by an **exclusive create** — create-the-name-or-fail-if-it-exists,
 then write the proof's bytes, flush them to durable storage, close, **flush the preserved copy's name
 to durable storage**, and only then remove the source that was preserved — and a name that already
 exists SHALL cause the next suffix to be tried rather than anything being replaced.
 
+The write SHALL cover the **complete** proof before anything is flushed, named or removed. A write
+that reports fewer bytes taken than it was given SHALL be continued until the whole proof is written,
+the total written SHALL be confirmed to equal the source's size before the durability sequence
+begins, and a write that makes no progress SHALL be treated as a failure rather than retried
+indefinitely. Otherwise a preserved copy can be a **prefix** of the proof — flushed, durably named,
+and followed by the removal of the intact original, destroying the evidence as completely as an
+overwrite while reporting success. The source SHALL NOT be removed unless the complete copy and its
+whole durability sequence succeeded, and a preservation that fails SHALL NOT leave a partial copy
+occupying a preserved name.
+
 Flushing the preserved proof's **bytes** is not sufficient: the directory entry that *names* those
 bytes SHALL also be made durable **before** the source is removed. Otherwise an interruption may
 persist the removal of the source while the preserved copy's name never lands, and the only copy of
 the proof is destroyed — the precise loss this requirement exists to prevent. Preservation SHALL
-therefore flush the directory holding the preserved proof, and every directory it created above it,
-up to and including the first directory that already existed (which holds the name of the shallowest
-directory created), and SHALL do so **deepest-first — each directory only after the entry it holds
-exists** — before removing the source. Directories above that first pre-existing one SHALL NOT need
-flushing.
+therefore flush the directory holding the preserved proof and **every directory above it up to and
+including the proof store's root**, and SHALL do so **deepest-first — each directory only after the
+entry it holds exists** — before removing the source. Directories above the store root SHALL NOT need
+flushing: the store root's own name predates every proof.
 
-The placement that follows SHALL likewise flush the directory holding the canonical name — and any
-directory the placement created, in the same order — **before** the placement is reported to its
+The chain SHALL be derived from the preserved copy's **path**, and SHALL NOT be narrowed to the
+directories a particular attempt created. Those differ: an earlier attempt can create the directories
+and then fail before flushing them, leaving directories a later attempt cannot distinguish from
+durable ones. A later attempt that flushed only what *it* created would remove the source while an
+ancestor's name was never made durable — losing the preserved proof on the next power cut, which is
+the loss this requirement exists to prevent. Every successful preservation SHALL therefore flush the
+whole chain, whichever attempt created each directory.
+
+The placement that follows SHALL likewise flush the directory holding the canonical name — and every
+directory above it up to the store root, in the same order — **before** the placement is reported to its
 caller and before any proof path, proof state, provenance or stamp time is recorded for the file. A
 name established by a rename is not durable until the directory holding it is, so recording a proof
 path first would let the system commit to a path whose entry did not survive, while the preserved
@@ -496,12 +517,40 @@ Each preservation, and each discarded newly-produced proof, SHALL be logged nami
   source at the canonical output path was removed
 - **THEN** at least one intact, named copy of that proof SHALL exist afterwards: it SHALL NOT be
   possible for the removal of the source to persist while the preserved copy's name does not, because
-  the directory holding the preserved copy — and every directory created above it, each flushed only
-  after the entry it holds exists, up to the first pre-existing directory — SHALL have been flushed
-  to durable storage before the source was removed
+  the directory holding the preserved copy — and every directory above it up to the proof store's
+  root, each flushed only after the entry it holds exists — SHALL have been flushed to durable
+  storage before the source was removed
 - **AND** where the interruption instead falls after the placement, the directory holding the
   canonical name SHALL have been flushed before the file's proof path was recorded, so no recorded
   proof path can name an entry that did not survive
+
+#### Scenario: A write that reports fewer bytes than given still preserves the whole proof
+
+- **WHEN** a proof is preserved on a store whose writes report fewer bytes taken than they were given
+- **THEN** the preserved copy SHALL be byte-identical to the proof, and the source SHALL have been
+  removed only after that complete copy was made durable
+
+#### Scenario: A copy that cannot make progress refuses and keeps the source
+
+- **WHEN** the copy of a proof into its preserved name can make no progress
+- **THEN** the preservation SHALL fail rather than retry indefinitely, the failure SHALL be
+  classified transient with the file left queued, the proof SHALL remain intact at its original
+  path, and no partial copy SHALL be left occupying a preserved name
+
+#### Scenario: A retry after a failed attempt still makes the whole chain durable
+
+- **WHEN** a preservation attempt creates the directories leading to a preserved name and then fails,
+  and a later attempt succeeds using those same directories
+- **THEN** the successful attempt SHALL flush the whole directory chain up to the proof store's root
+  before removing the source, so no directory left by the failed attempt is treated as durable
+  because it already existed
+
+#### Scenario: Preservation into an already-crowded location still succeeds
+
+- **WHEN** a proof must be preserved to a location that already holds a very large number of
+  preserved proofs for that digest
+- **THEN** the proof SHALL still be preserved under the next free name, with no fixed bound refusing
+  the preservation
 
 #### Scenario: A failure to preserve refuses the placement
 
@@ -564,6 +613,17 @@ that a scheduled invocation which did nothing is visibly distinguishable from on
 where it acted on at least one it SHALL exit zero, so that one busy collection does not fail an
 otherwise healthy fleet run.
 
+Because the claim is held by a **process**, and a claim held by a live process may outlive the start
+of another, no maintenance action SHALL clear a claim merely because a process started. A claim SHALL
+be releasable by cleanup only on evidence that the operation holding it is no longer running: the
+holder SHALL record liveness as it makes progress, and cleanup SHALL treat a claim as abandoned only
+once no progress has been reported for a bounded interval that comfortably exceeds the gap between
+two progress reports of the slowest operation. Clearing a claim a live command-line stamp or upgrade
+still holds would admit a second writer to the same proofs, which is the loss this requirement
+exists to prevent. The cost — that a claim survives a crash until the interval elapses, during which
+the collection is skipped — SHALL be accepted, and it SHALL NOT affect scan freshness, which is
+derived from completed scan runs and never from a claim.
+
 This exit-status rule SHALL apply to the command-line **scan** exactly as it does to stamp and
 upgrade. A scan is the operation an operator schedules to assert that the files were examined; a run
 in which every requested collection was refused examined nothing, and reporting success for it lets a
@@ -577,6 +637,19 @@ exists to prevent, reached through the exit status instead of the output.
 - **THEN** the second SHALL be refused with a message naming the collection and the operation in
   progress, SHALL NOT place, preserve or adopt any proof, and SHALL NOT wait for the first to finish
 - **AND** every proof placed by the first SHALL be intact afterwards
+
+#### Scenario: Startup cleanup does not revoke a live command-line claim
+
+- **WHEN** a command-line stamp or upgrade holds a collection's claim and is still reporting
+  progress, and the web application starts
+- **THEN** the claim SHALL be left in place, and no scheduled or panel-initiated operation SHALL be
+  admitted for that collection while it is held
+
+#### Scenario: A claim whose holder died is released by cleanup
+
+- **WHEN** an operation holding a collection's claim is killed and reports no further progress for
+  longer than the abandonment interval
+- **THEN** cleanup SHALL release that claim so the collection can be operated on again
 
 #### Scenario: The command-line stamp claims the collection's operation slot
 

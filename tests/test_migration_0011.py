@@ -4,11 +4,13 @@ Shared prep owns the single Alembic revision of the guard-proof-and-restore-inte
 its round-trip test lives here rather than with either implementation slice.
 
 Covers the datastore spec delta's three scenarios:
-- the upgrade adds nullable `files.ots_digest` (NULL on every existing row, nothing else rewritten)
-  and widens `events.kind` to accept `restored_changed`, preserving existing event rows;
+- the upgrade adds nullable `files.ots_digest` and nullable `runs.heartbeat_at` (NULL on every
+  existing row, nothing else rewritten) and widens `events.kind` to accept `restored_changed`,
+  preserving existing event rows;
 - the downgrade **refuses** while a `restored_changed` event exists, naming the kind and the count,
   and leaves every table exactly as it was;
-- with no such rows the downgrade narrows the CHECK back, drops `ots_digest`, and preserves rows.
+- with no such rows the downgrade narrows the CHECK back, drops both added columns, and preserves
+  rows.
 
 Run from the repo root: ``PYTHONPATH=. pytest tests/test_migration_0011.py``
 """
@@ -84,6 +86,10 @@ def test_migration_0011_round_trip_and_refusing_downgrade(tmp_path):
     assert "ots_digest" in cols
     assert cols["ots_digest"][3] == 0  # nullable
     assert con.execute("SELECT ots_digest FROM files").fetchall() == [(None,)]
+    run_cols = {row[1]: row for row in con.execute("PRAGMA table_info(runs)")}
+    assert "heartbeat_at" in run_cols
+    assert run_cols["heartbeat_at"][3] == 0  # nullable — a pre-0011 run reports no liveness
+    assert con.execute("SELECT heartbeat_at FROM runs").fetchall() == [(None,)]
     # Nothing else about the pre-existing rows changed.
     assert con.execute("SELECT relpath,size,sha256,status,ots_path,ots_state FROM files").fetchone() == (
         "a.txt", 3, "aa", "ok", "/p/a.txt.ots", "complete"
@@ -123,6 +129,7 @@ def test_migration_0011_round_trip_and_refusing_downgrade(tmp_path):
     alembic("downgrade", PREV)
     con = sqlite3.connect(db)
     assert "ots_digest" not in {row[1] for row in con.execute("PRAGMA table_info(files)")}
+    assert "heartbeat_at" not in {row[1] for row in con.execute("PRAGMA table_info(runs)")}
     ddl = con.execute("SELECT sql FROM sqlite_master WHERE name='events'").fetchone()[0]
     assert "ck_events_kind" in ddl and "restored_changed" not in ddl
     con.close()

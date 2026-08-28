@@ -62,6 +62,51 @@ streaming the file in chunks (never loading it wholly into memory). Files classi
   reconcile it into a single moved file per the reconciliation requirement
 
 
+### Requirement: Orphaned running runs are reconciled on startup
+
+On application startup the system SHALL mark a leftover run still recorded as `result` = `running`
+with no `finished` as terminated (result `interrupted`, `finished` set) **only where that run has
+reported no progress for longer than a bounded abandonment interval**. A run interrupted by process
+termination would otherwise stay stuck at `running`, freezing the in-progress indicator and blocking
+new operations on that collection; but the operation claim is held by a *process*, and a command-line
+stamp or upgrade can legitimately hold one while the application restarts. Clearing a live claim
+would admit a second writer to that collection's proofs, which is the loss the claim exists to
+prevent, so startup alone SHALL NOT be treated as evidence that a run is dead.
+
+A run's liveness SHALL be recorded as it progresses and read from the later of its last reported
+progress and its start time, so a run that has not yet reported any (including rows predating the
+liveness column) falls back to its start time. The abandonment interval SHALL comfortably exceed the
+gap between two progress reports of the slowest operation.
+
+The `interrupted` terminal state SHALL be distinct from `error` so that a benign restart-induced
+interruption is not conflated with a genuine scan failure. `interrupted` SHALL be an allowed value of
+`runs.result` but SHALL be produced only by this reconciliation — a scan/stamp/upgrade that runs to
+completion SHALL still finish `ok`, `partial`, or `error`. This reconciliation SHALL clear any stale
+in-progress indicator and SHALL NOT block starting a new operation on the affected collection. Like
+`error`, an `interrupted` run SHALL NOT refresh scan freshness (the dead-man's switch derives from
+`ok`/`partial` scan runs only), so deferring the reconciliation of a claim that may still be live
+SHALL NOT affect staleness reporting.
+
+#### Scenario: Abandoned running run is cleared at startup
+
+- **WHEN** the application starts and finds a `runs` row with `result` = `running`, no `finished`,
+  and no progress reported for longer than the abandonment interval
+- **THEN** that run SHALL be marked `interrupted` with `finished` set, so no collection is shown as
+  perpetually scanning and a new operation can be started
+
+#### Scenario: A run still reporting progress keeps its claim across a restart
+
+- **WHEN** the application starts and finds a `runs` row with `result` = `running` whose last
+  reported progress is recent, however long ago it started
+- **THEN** that run SHALL be left `running`, so the operation still performing it keeps sole
+  ownership of that collection's proofs
+
+#### Scenario: Interruption is distinguished from failure
+
+- **WHEN** a run is reconciled by startup reconciliation versus a scan that finishes with errors
+- **THEN** the reconciled run SHALL carry `result` = `interrupted` while the failed scan SHALL carry
+  `result` = `error`, so the two are distinguishable in the run record
+
 ### Requirement: WORM and churn modes differ in nagging
 
 In `worm` mode a content modification SHALL raise an unacknowledged `modified` event (a nag). In

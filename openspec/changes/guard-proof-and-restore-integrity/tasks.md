@@ -122,6 +122,9 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   the new `.ots` name durable), then each ancestor **this call created**, ending with the first
   **pre-existing** ancestor (it holds the shallowest new directory's name); stop there — ancestors
   above it already existed durably.
+  **(Amended by 5.3a/5.3b/5.3d.)** The chain now runs to the **proof-store root** rather than to the
+  first pre-existing ancestor; the byte copy must be a **complete** write; and the suffix search has
+  **no ceiling**.
   Do **not** use `os.replace` (silently overwrites) and do **not** use `os.link` (needs hard links,
   which the proof store's writable-filesystem contract does not promise — on a CIFS/FAT/FUSE store it
   would turn every occupied-path placement into a permanent retry loop reported as transient). No
@@ -134,7 +137,8 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   the caller records `ots_path`/`ots_state`/`ots_digest`. A rename is not durable until the directory
   holding it is; without this the datastore can record a proof path whose name did not survive a
   crash while the preserved copy sits under a name no row points at. One extra `fsync` per placement,
-  on a path already off the hot loop.
+  on a path already off the hot loop. **(Amended by 5.3b:** the placement's chain also runs to the
+  store root, through the same helper.**)**
 - [x] 2.6b `ots.py`: every directory `fsync` in 2.6/2.6a goes through **one shared helper**
   (`_fsync_dir(path)`), which is where the *unsupported-operation degrade* lives. An `OSError` whose
   `errno` is exactly `EINVAL`, `ENOTSUP` or `EOPNOTSUPP` is **deterministic unsupported, never
@@ -185,6 +189,8 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   apply, so a cron `cairn scan` that examined nothing cannot record a clean integrity pass. Do not
   change `scanner.py` (Slice B owns it); `summary.result == "skipped"` already carries the fact.
 - [x] 2.8d `src/services/scheduler.py`: audit only — confirm the scan pass and the daily upgrade both
+  **(Amended by 5.3c: the audit missed `reap_orphaned_runs`, which revoked live cross-process
+  claims. The scheduler is no longer audit-only.)**
   claim (they do: `scan_collection`'s `claim_run`, and `run_daily_upgrade`'s own). Expected diff is
   zero or a comment pointing at design D10. Do **not** add a claim inside `stamp_pending` or
   `upgrade_incomplete` — they are called from inside callers that already hold one (`scanner.py:540`).
@@ -417,6 +423,48 @@ new `tests/test_restored_changed.py`.
   path builder, the proof parser, `ots_digest`) — fan-out ships green-but-unwired code.
 - [x] 4.4 `openspec validate guard-proof-and-restore-integrity --strict` green.
 - [x] 4.5 `make audit` (pip-audit) green.
+
+## 4a. Post-audit hardening (adversarial Codex round 1 — 3 BLOCKER, 1 MAJOR, 1 MINOR)
+
+The review found that preservation and serialization still contained evidence-loss paths. Each fix
+is scoped to the finding; none expands the change's scope.
+
+- [x] 5.3a **B1 — a short write archived a prefix and then unlinked the original.** `_preserve_proof`
+  called `os.write` once and ignored the returned count; the truncated copy was fsynced, named, and
+  the intact canonical proof removed. `ots._write_all` now loops until the payload is exhausted,
+  treats zero progress as a failure (`OSError` → transient `OtsError`, source untouched), and the
+  written size is confirmed against the payload **before** the durability sequence begins. A failed
+  copy removes the slot it exclusively created, so a doomed retry loop cannot leave truncated
+  impostor proofs behind.
+- [x] 5.3b **B2 — a failed attempt's directory residue was treated as durable on retry.** The
+  directory chain is no longer "what this call created": `_dir_chain`/`_sync_dir_chain` flush from
+  the target directory up to and including the **proof-store root**, on every successful
+  preservation and every placement, whichever attempt created each directory. `_mkdirs_tracked` /
+  `_sync_created_chain` are gone (no cleanup needed them). The per-directory `_fsync_dir` degrade for
+  stores that cannot flush directories is unchanged.
+- [x] 5.3c **B3 — startup revoked live cross-process claims.** Migration `0011` (unreleased) gains
+  nullable `runs.heartbeat_at`; `collections.claim_run` stamps it and every progress write refreshes
+  it (`scanner._drain`, the scan's stamp tail via a new batch-granular progress callback,
+  `proofs.run_stamp_backfill` and `proofs.upgrade_collection`'s callbacks, and
+  `cli.py::_cmd_stamp`'s own claim, which stamped with no progress callback at all — the very
+  long-running CLI claim the finding is about).
+  `scheduler.reap_orphaned_runs` now reaps only runs whose `coalesce(heartbeat_at, started)` is older
+  than `RUN_HEARTBEAT_TIMEOUT_SECONDS` (15 min). A live `cairn stamp`/`upgrade` survives a panel
+  restart; a dead run is reaped within the threshold. Design D10 records the accepted cost (a crash
+  leaves a collection claimed for up to the threshold; the dead-man's switch is unaffected).
+- [x] 5.3d **M1 — the 10,000-suffix cap could wedge preservation permanently.** Removed.
+  `_claim_archive_slot` tries slot 0, and on collision seeds past the existing family with one
+  `scandir` (`_next_archive_index`) before continuing the `O_EXCL` claim loop — unbounded, and one
+  directory read rather than one failed `open` per occupied slot.
+- [x] 5.3e **MINOR — the ordering test could not pin the ordering it claimed.** The recorder now
+  captures exclusive opens, per-call write byte counts, closes, each fsync tagged file-vs-directory,
+  unlinks and renames **with their paths**, and the test asserts the exact sequence. Added: the
+  short-write case, the no-progress case, the failed-attempt-then-retry case (asserting the full
+  chain is flushed on the successful attempt), and the crowded-family case.
+- [x] 5.3f Spec + design updated to match: `ots-notarization` (complete write, chain to the store
+  root, no suffix ceiling, claims-are-leases + 4 new scenarios), `datastore`
+  (`runs.heartbeat_at` + its migration scenario), `integrity-scanning` (the reaper requirement,
+  rewritten around liveness), design "Crash-safety of the shuffle" and D10.
 
 ## 5. Gates
 

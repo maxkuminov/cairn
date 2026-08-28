@@ -237,6 +237,9 @@ def test_scan_progress_processed_and_total_estimate(cairn_env):
     assert first.processed == 7 and first.result == "ok"
     assert second.total == 7  # estimate = prior scan's processed
     assert second.processed == 7
+    # Every batch drain is also the claim's heartbeat: a scan that is progressing must never look
+    # abandoned to the startup reaper, which would revoke a live claim (design D10).
+    assert first.heartbeat_at is not None and second.heartbeat_at is not None
 
 
 # --- 7.4 stamp/upgrade do not refresh freshness ---------------------------------------------
@@ -281,9 +284,11 @@ def test_reaper_marks_orphaned_running_runs_interrupted(cairn_env):
     root.mkdir()
 
     async def go():
+        from datetime import timedelta
+
         from src.database import get_sessionmaker
         from src.models.db import Run
-        from src.services.scheduler import reap_orphaned_runs
+        from src.services.scheduler import RUN_HEARTBEAT_TIMEOUT_SECONDS, reap_orphaned_runs
 
         # One running run per collection across two collections — the partial unique index
         # uq_runs_one_running_per_collection (issue #4) now forbids two running runs on one collection, so
@@ -291,9 +296,15 @@ def test_reaper_marks_orphaned_running_runs_interrupted(cairn_env):
         (root2 := root.parent / "c2").mkdir()
         cid = await _seed_collection(root)
         cid2 = await _seed_collection(root2)
+        dead = _utcnow() - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS + 60)
         async with get_sessionmaker()() as s:
-            s.add(Run(collection_id=cid, kind="scan", result="running"))
-            s.add(Run(collection_id=cid2, kind="stamp", result="running"))
+            # Reported progress once, then stopped: the ordinary crashed-scan orphan.
+            s.add(Run(collection_id=cid, kind="scan", result="running",
+                      started=dead, heartbeat_at=dead))
+            # Never reported at all (a pre-0011 row, or a claim that died immediately): `started`
+            # is the fallback liveness reference.
+            s.add(Run(collection_id=cid2, kind="stamp", result="running",
+                      started=dead, heartbeat_at=None))
             s.add(Run(collection_id=cid, kind="scan", result="ok", finished=_utcnow()))
             await s.commit()
         async with get_sessionmaker()() as s:
@@ -310,6 +321,70 @@ def test_reaper_marks_orphaned_running_runs_interrupted(cairn_env):
     for r in runs:
         if r.result == "interrupted":
             assert r.finished is not None  # reaped runs get a finished timestamp
+
+
+def test_reaper_leaves_a_live_claim_alone(cairn_env):
+    """Startup must not revoke the claim of a live SECOND process (design D10).
+
+    The claim is cross-process and cross-host: a cron `cairn stamp`/`cairn upgrade` can hold a
+    collection while the web app restarts. Bulk-reaping every `running` row on startup would clear
+    that claim and let the scheduler or panel start a second writer over the same proofs — the
+    concurrent check-then-act the claim exists to prevent. Liveness decides, not startup: a run that
+    is still reporting progress keeps its claim however long it has been running.
+    """
+    root = cairn_env / "live"
+    root.mkdir()
+
+    async def go():
+        from datetime import timedelta
+
+        from src.database import get_sessionmaker
+        from src.models.db import Run
+        from src.services.scheduler import RUN_HEARTBEAT_TIMEOUT_SECONDS, reap_orphaned_runs
+
+        cid = await _seed_collection(root)
+        async with get_sessionmaker()() as s:
+            # Hours old — a multi-hour upgrade pass — but it reported progress moments ago.
+            s.add(
+                Run(
+                    collection_id=cid,
+                    kind="upgrade",
+                    result="running",
+                    started=_utcnow() - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS * 20),
+                    heartbeat_at=_utcnow(),
+                )
+            )
+            await s.commit()
+        async with get_sessionmaker()() as s:
+            reaped = await reap_orphaned_runs(s)
+        async with get_sessionmaker()() as s:
+            run = await s.scalar(select(Run).where(Run.collection_id == cid))
+        return reaped, run
+
+    reaped, run = _run_check(go)
+    assert reaped == 0
+    assert run.result == "running" and run.finished is None
+
+
+def test_claiming_a_run_stamps_its_heartbeat(cairn_env):
+    """A lease with no liveness signal is indistinguishable from a corpse, so the claim starts one."""
+    root = cairn_env / "claimed"
+    root.mkdir()
+
+    async def go():
+        from src.database import get_sessionmaker
+        from src.models.db import Run
+        from src.services.collections import claim_run
+
+        cid = await _seed_collection(root)
+        async with get_sessionmaker()() as s:
+            claimed = await claim_run(s, Run(collection_id=cid, kind="stamp", result="running"))
+            assert claimed is not None
+        async with get_sessionmaker()() as s:
+            return await s.scalar(select(Run).where(Run.collection_id == cid))
+
+    run = _run_check(go)
+    assert run.heartbeat_at is not None
 
 
 # --- 7.6 tree + op-status route fragments ---------------------------------------------------

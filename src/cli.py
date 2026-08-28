@@ -814,8 +814,16 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
             if await collections_svc.claim_run(session, run_row) is None:
                 print(busy, file=sys.stderr)
                 return 1
+            async def _progress(done: int) -> None:
+                # Per-batch progress AND liveness: this claim is held by a CLI process, so a long
+                # stamp must keep reporting or the panel's startup reaper would treat it as
+                # orphaned and revoke a claim that is still being worked (design D10).
+                run_row.processed = done
+                run_row.heartbeat_at = _utcnow()
+                await session.commit()
+
             try:
-                stamped = await proofs.stamp_pending(session, collection)
+                stamped = await proofs.stamp_pending(session, collection, progress=_progress)
                 run_row.result = "ok"
             except Exception:  # stamping must never leave the run row `running`
                 run_row.result = "error"

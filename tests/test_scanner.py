@@ -381,7 +381,7 @@ async def test_deep_does_not_restamp_intact_files(cairn_env, monkeypatch):
     from src.models.db import Collection, FileEntry, Run
     from src.services.scanner import scan_collection
 
-    async def fake_stamp(session, collection):
+    async def fake_stamp(session, collection, settings=None, *, progress=None):
         rows = list(
             await session.scalars(
                 select(FileEntry).where(

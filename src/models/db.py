@@ -154,6 +154,14 @@ class Run(Base):
         DateTime(timezone=True), default=utcnow, nullable=False
     )
     finished: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Liveness of an in-progress run, refreshed by the operation itself as it makes progress (every
+    # scan batch, every stamp batch, every upgraded proof). It is what lets the startup reaper tell a
+    # run orphaned by a crash from one a LIVE second process is still working: a `cairn stamp` or
+    # `cairn upgrade` running while the web app restarts holds a legitimate claim, and revoking it
+    # would admit a second proof writer for that collection — the concurrent check-then-act the claim
+    # exists to prevent (design D10). NULL on rows written before 0011 (and until the first progress
+    # write), so readers fall back to `started`.
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Live progress: items handled so far (files walked / stamped / proofs upgraded), written as
     # the operation runs so a concurrent reader sees a growing count. ``total`` is the planned
     # denominator (NULL = unknown → indeterminate progress; a scan estimates it from the prior run).

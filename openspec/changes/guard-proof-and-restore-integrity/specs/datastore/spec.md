@@ -14,7 +14,8 @@ commits to. `events.kind` SHALL
 be constrained to {added,modified,missing,restored,moved,restored_changed}, and `events` SHALL carry
 a nullable `detail` TEXT column (used to record the old → new path of a `moved` file, and both
 digests of a `restored_changed` file). `runs` SHALL carry an
-integer `moved` count. The `files`, `runs`, and `events` tables SHALL reference their owning
+integer `moved` count and a nullable `heartbeat_at` timestamp recording when the run last reported
+progress, so that a claim held by a live process is distinguishable from one orphaned by a crash. The `files`, `runs`, and `events` tables SHALL reference their owning
 collection through a `collection_id` foreign key. JSON-valued columns (`exclude_globs_json`,
 `alert_json`) SHALL be stored as TEXT. Deleting a collection SHALL cascade to its `files`, `runs`,
 and `events`.
@@ -61,6 +62,13 @@ and `events`.
 - **THEN** `files.ots_digest` SHALL exist as a nullable TEXT column, every existing row's value
   SHALL be NULL, and no existing row SHALL be otherwise altered
 
+#### Scenario: The same migration adds the run liveness column without rewriting rows
+
+- **WHEN** that revision is applied against a database holding existing runs
+- **THEN** `runs.heartbeat_at` SHALL exist as a nullable timestamp column, every existing row's value
+  SHALL be NULL — a run that reports no liveness falls back to its start time — and no existing row
+  SHALL be otherwise altered
+
 A migration that widens an event-kind constraint SHALL NOT reverse itself by discarding or
 reinterpreting the rows that constraint now admits. Where a downgrade would narrow `events.kind`
 while rows of the removed kind exist, it SHALL **refuse**, raising an error naming the kind and how
@@ -89,6 +97,6 @@ rows exist the downgrade SHALL proceed normally.
 
 - **WHEN** `alembic downgrade` is run past that revision against a database holding events but no
   `restored_changed` event
-- **THEN** the downgrade SHALL restore the previous `events.kind` constraint, drop `files.ots_digest`,
-  and preserve every existing row
+- **THEN** the downgrade SHALL restore the previous `events.kind` constraint, drop `files.ots_digest`
+  and `runs.heartbeat_at`, and preserve every existing row
 

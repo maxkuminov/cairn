@@ -397,42 +397,44 @@ def _fsync_dir(path: Path, *, store_key: str) -> None:
         os.close(fd)
 
 
-def _mkdirs_tracked(target: Path) -> tuple[list[Path], Path | None]:
-    """``mkdir -p`` ``target``; return ``(dirs created deepest-first, first pre-existing ancestor)``.
+def _dir_chain(target: Path, root: Path | None) -> list[Path]:
+    """``target`` then each ancestor up to and including ``root``, deepest-first.
 
-    The caller needs both to sync the right chain: a directory's ``fsync`` makes durable the entries
-    IT holds, so the shallowest new directory's name is only durable once its (pre-existing) parent
-    is synced. When nothing had to be created there is no chain — ``target``'s own name was already
-    durable and only ``target`` itself needs syncing for the entry about to be made in it.
+    Durability of a NAME belongs to the directory that holds it, so making a freshly created path
+    durable means flushing every directory on the chain — not just the deepest one. The chain is
+    computed from the path itself rather than from "what this call happened to create", because a
+    directory created by an EARLIER, FAILED attempt is indistinguishable from a durable one: a retry
+    would see it as pre-existing, flush only the deepest parent, unlink the source and commit — and a
+    power loss could still lose the ancestor's name (Codex B2). Anchoring on the proof-store root
+    instead is both simpler and immune to that residue: the store root's own name predates every
+    proof (it is created by ``cairn init``), so everything above it is already durable.
+
+    ``root`` that is not an ancestor of ``target`` (defensive; not reachable from ``_place_proof``)
+    yields the target alone rather than climbing to the filesystem root.
     """
-    created: list[Path] = []
-    probe = target
-    while not probe.exists():
-        created.append(probe)
-        if probe.parent == probe:  # filesystem root; cannot climb further
-            break
-        probe = probe.parent
-    target.mkdir(parents=True, exist_ok=True)
-    return created, (probe if created else None)
+    chain = [target]
+    if root is None:
+        return chain
+    root_key = os.path.abspath(root)
+    if os.path.abspath(target) == root_key:
+        return chain
+    for ancestor in target.parents:
+        chain.append(ancestor)
+        if os.path.abspath(ancestor) == root_key:
+            return chain
+    return [target]
 
 
-def _sync_created_chain(
-    target: Path, created: list[Path], pre_existing: Path | None, *, store_key: str
-) -> None:
-    """Sync ``target``, then every directory this call created above it, deepest-first.
+def _sync_dir_chain(target: Path, root: Path | None, *, store_key: str) -> None:
+    """Flush ``target``'s entries and those of every ancestor up to ``root``, deepest-first.
 
-    Order is load-bearing (parent-after-child): syncing a parent before the child entry exists in it
-    accomplishes nothing. ``target`` goes first because that is what makes the newly created FILE's
-    name durable; then each created ancestor; then the first pre-existing ancestor, which holds the
-    shallowest new directory's name. Stop there — everything above it already existed durably.
+    Order is load-bearing (parent-after-child): a directory's ``fsync`` makes durable the entries IT
+    holds, so it is flushed only once the child entry exists. Bounded by the depth of the proof
+    store (a handful of descriptors), and every flush goes through :func:`_fsync_dir`, so the
+    unsupported-operation degrade applies per directory exactly as specified.
     """
-    _fsync_dir(target, store_key=store_key)
-    for ancestor in created:
-        if ancestor == target:
-            continue
-        _fsync_dir(ancestor, store_key=store_key)
-    if pre_existing is not None:
-        _fsync_dir(pre_existing, store_key=store_key)
+    for directory in _dir_chain(target, root):
+        _fsync_dir(directory, store_key=store_key)
 
 
 def superseded_root(store_root: str | os.PathLike[str], collection_id: str | int) -> Path:
@@ -458,8 +460,85 @@ def _archive_dir_for(archive_root: Path, facts: StoredProofFacts) -> tuple[Path,
     return archive_root / "unknown", uuid.uuid4().hex
 
 
+def _write_all(fd: int, payload: bytes) -> None:
+    """Write EVERY byte of ``payload`` to ``fd``, or raise ``OSError``.
+
+    ``os.write`` is allowed to write fewer bytes than it was handed — a signal, a full disk, a
+    network filesystem's own buffering — and returns how many it took. A single unchecked call can
+    therefore archive a PREFIX of a proof, which is then fsynced, named, and followed by the unlink
+    of the intact original: the only copy of the evidence silently replaced by a truncated one
+    (Codex B1). So the write loops until the payload is exhausted, and a call that makes no progress
+    is a failure, not a retry forever — it raises, which ``_place_proof`` classifies transient, so
+    the source is never unlinked and the file stays queued.
+    """
+    view = memoryview(payload)
+    written = 0
+    while written < len(view):
+        n = os.write(fd, view[written:])
+        if n <= 0:
+            raise OSError(
+                errno.EIO,
+                f"archive write made no progress after {written} of {len(payload)} bytes",
+            )
+        written += n
+    if written != len(payload):  # pragma: no cover - defensive
+        raise OSError(
+            errno.EIO, f"archive write covered {written} of {len(payload)} bytes"
+        )
+
+
+def _next_archive_index(directory: Path, stem: str) -> int:
+    """First index past every ``<stem>[.N].ots`` already in ``directory`` (one directory read).
+
+    Only a SEED for the exclusive-create loop, never the decision: the ``O_EXCL`` claim is what makes
+    the choice race-safe. Reading the family once means a large family costs one ``scandir`` instead
+    of one failed ``open`` per occupied slot.
+    """
+    highest = 0
+    prefix = f"{stem}."
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            name = entry.name
+            if not name.startswith(prefix) or not name.endswith(".ots"):
+                continue
+            middle = name[len(prefix) : -len(".ots")]
+            if middle.isascii() and middle.isdigit():
+                highest = max(highest, int(middle))
+    return highest + 1
+
+
+def _claim_archive_slot(directory: Path, stem: str) -> tuple[int, Path]:
+    """Exclusively create the first free ``<stem>[.N].ots`` in ``directory``; return ``(fd, path)``.
+
+    There is deliberately **no ceiling**. A fixed bound (this used to refuse past 10,000) turns a
+    long-lived deferral loop or a prepopulated store into a proof store that can never preserve
+    anything again — every later placement refuses, permanently, on a path whose whole purpose is to
+    never lose a proof (Codex M1). The search is still cheap: the common case is one ``open``, and
+    only a collision pays for one directory read to skip past the whole existing family.
+    """
+    index = 0
+    seeded = False
+    while True:
+        candidate = directory / (f"{stem}.ots" if index == 0 else f"{stem}.{index}.ots")
+        try:
+            fd = os.open(str(candidate), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            if seeded:
+                index += 1
+            else:
+                index = max(index + 1, _next_archive_index(directory, stem))
+                seeded = True
+            continue
+        return fd, candidate
+
+
 def _preserve_proof(
-    source: Path, archive_root: Path, facts: StoredProofFacts, *, store_key: str
+    source: Path,
+    archive_root: Path,
+    facts: StoredProofFacts,
+    *,
+    store_key: str,
+    sync_root: Path | None = None,
 ) -> Path:
     """Move ``source`` into the content-addressed archive, never discarding, never overwriting.
 
@@ -470,42 +549,52 @@ def _preserve_proof(
     removed.
 
     The write is an EXCLUSIVE create (``O_CREAT|O_EXCL``) — ``os.replace`` silently overwrites and
-    is therefore unusable — followed by a byte copy. ``os.link`` is deliberately NOT used: it needs
-    hard-link support, which the proof store's "writable" contract does not promise, and on a
-    CIFS/FAT/FUSE store it would turn every occupied-path placement into a permanent retry loop
-    reported as transient. Copying a sub-kilobyte file works everywhere ``open`` does.
+    is therefore unusable — followed by a COMPLETE byte copy (:func:`_write_all`: a short
+    ``os.write`` that archived a prefix and then unlinked the original would destroy the evidence
+    just as surely as an overwrite). ``os.link`` is deliberately NOT used: it needs hard-link
+    support, which the proof store's "writable" contract does not promise, and on a CIFS/FAT/FUSE
+    store it would turn every occupied-path placement into a permanent retry loop reported as
+    transient. Copying a sub-kilobyte file works everywhere ``open`` does.
 
-    Ordering (design D1, "Crash-safety of the shuffle"): create+copy -> fsync the FILE -> close ->
-    fsync the archive's directory chain deepest-first -> and ONLY THEN unlink the source. An
-    interruption anywhere before that unlink leaves the proof intact at its original path; after it,
-    the archived name is durable. "Both names gone" is unreachable.
+    Ordering (design D1, "Crash-safety of the shuffle"): create -> write EVERY byte -> verify the
+    written size -> fsync the FILE -> close -> fsync the archive's directory chain deepest-first,
+    from the archive directory up to and including ``sync_root`` (the proof-store root, whose own
+    name predates every proof) -> and ONLY THEN unlink the source. An interruption anywhere before
+    that unlink leaves the proof intact at its original path; after it, the archived name is durable.
+    "Both names gone" is unreachable — and it stays unreachable across retries, because the chain is
+    derived from the path, not from which attempt happened to create each directory.
 
     Returns the archive path the proof now occupies.
     """
     directory, stem = _archive_dir_for(archive_root, facts)
-    created, pre_existing = _mkdirs_tracked(directory)
+    directory.mkdir(parents=True, exist_ok=True)
     payload = source.read_bytes()
 
-    index = 0
-    while True:
-        candidate = directory / (f"{stem}.ots" if index == 0 else f"{stem}.{index}.ots")
-        try:
-            fd = os.open(str(candidate), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            break
-        except FileExistsError:
-            index += 1
-            # Bounded by construction (the collection claim serializes writers and the shard is
-            # scoped by collection id), but never spin forever on a pathological store.
-            if index > 10_000:  # pragma: no cover - defensive
-                raise OtsError(f"cannot find a free archive slot for {candidate!r}") from None
-
+    fd, candidate = _claim_archive_slot(directory, stem)
     try:
-        os.write(fd, payload)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    # The file's BYTES are durable; its NAME is not until the directory holding it is synced.
-    _sync_created_chain(directory, created, pre_existing, store_key=store_key)
+        try:
+            _write_all(fd, payload)
+            # The complete payload is on the descriptor before anything is made durable and long
+            # before the source is unlinked: a short write must never be fsynced and named as if it
+            # were the proof.
+            if os.fstat(fd).st_size != len(payload):  # pragma: no cover - defensive
+                raise OSError(
+                    errno.EIO,
+                    f"archived proof is {os.fstat(fd).st_size} bytes, expected {len(payload)}",
+                )
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        # This name was created by THIS call's exclusive create, so the partial file is ours and
+        # nothing else's proof: remove it so a doomed retry loop cannot leave a trail of truncated
+        # archive slots. Best-effort — the source is untouched either way, which is what matters.
+        with contextlib.suppress(OSError):
+            os.unlink(candidate)
+        raise
+    # The file's BYTES are durable; its NAME is not until every directory on the chain holding it is
+    # synced — including any created by an earlier failed attempt, hence the chain to the store root.
+    _sync_dir_chain(directory, sync_root if sync_root is not None else archive_root, store_key=store_key)
     # Only now may the only other copy go away.
     os.unlink(source)
     return candidate
@@ -578,6 +667,11 @@ def _place_proof(
     # Keyed per proof store: the directory-sync degrade is a property of the store's filesystem.
     store_key = str(store if store is not None else out_ots_path.parent)
 
+    # Everything this function makes durable is flushed up to (and including) the proof-store root:
+    # anchoring on a directory whose name predates every proof is what makes durability independent
+    # of which attempt created the intermediate directories (Codex B2).
+    sync_root = store if store is not None else out_ots_path.parent
+
     if store is not None:
         try:
             collection_id = out_ots_path.relative_to(store).parts[0]
@@ -618,7 +712,10 @@ def _place_proof(
                 # can take the backend offline; discarding the staged proof would lose evidence;
                 # demoting the existing one would throw away a probably-genuine anchor over a
                 # network blip. Keep BOTH and decide on a pass whose backend answers.
-                slot = _preserve_proof(staged_ots, archive_root, staged_facts, store_key=store_key)
+                slot = _preserve_proof(
+                    staged_ots, archive_root, staged_facts,
+                    store_key=store_key, sync_root=sync_root,
+                )
                 log.warning(
                     "deferring proof placement for %s: the existing proof's anchor was neither "
                     "confirmed nor disproven, so it stays canonical and the freshly staged proof is "
@@ -627,7 +724,10 @@ def _place_proof(
                     slot,
                 )
                 return StampOutcome(kind="deferred")
-            slot = _preserve_proof(out_ots_path, archive_root, existing_facts, store_key=store_key)
+            slot = _preserve_proof(
+                out_ots_path, archive_root, existing_facts,
+                store_key=store_key, sync_root=sync_root,
+            )
             log.warning(
                 "superseded proof preserved: %s -> %s (%s)",
                 out_ots_path,
@@ -649,12 +749,13 @@ def _place_proof(
         ) from exc
 
     try:
-        created, pre_existing = _mkdirs_tracked(out_ots_path.parent)
+        out_ots_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(staged_ots, out_ots_path)
         # A rename is not durable until the directory holding it is synced. Without this the caller
         # can record a proof path naming an entry that did not survive a crash, while the preserved
-        # copy sits under a name no row points at.
-        _sync_created_chain(out_ots_path.parent, created, pre_existing, store_key=store_key)
+        # copy sits under a name no row points at. Same chain rule as preservation: up to the store
+        # root, so a directory left by an earlier failed attempt is never assumed durable.
+        _sync_dir_chain(out_ots_path.parent, sync_root, store_key=store_key)
     except OSError as exc:
         if exc.errno == errno.ENAMETOOLONG:
             raise OtsPathError(f"cannot write proof to {out_ots_path!r}: {exc}") from exc

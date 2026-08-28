@@ -15,7 +15,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models.db import Collection, FileEntry, Run
+from ..models.db import Collection, FileEntry, Run, utcnow
 
 
 async def create_collection(
@@ -88,7 +88,12 @@ async def claim_run(session: AsyncSession, run: Run) -> Run | None:
     the slot, the INSERT violates the index, the commit raises :class:`IntegrityError`, and we
     roll back and return ``None`` — the caller must treat that as "already running" and abort. On
     success the committed run (visible to the badge/freshness immediately) is returned.
+
+    The claim also stamps ``heartbeat_at``: the claim is a LEASE, and a lease with no liveness signal
+    is indistinguishable from a corpse — the startup reaper would revoke a claim a live second
+    process is still working under (design D10). Every long operation refreshes it as it progresses.
     """
+    run.heartbeat_at = utcnow()
     session.add(run)
     try:
         await session.commit()

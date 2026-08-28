@@ -372,6 +372,10 @@ async def scan_collection(
                 .values(acknowledged_at=now, acknowledged_by=None)
             )
         run.processed = processed  # persist live progress for the status badge
+        # ...and the claim's liveness with it. A batch is the scan's unit of progress, so this is
+        # the scan's heartbeat: without it a long scan looks abandoned to the startup reaper, which
+        # would revoke a live claim and let a second writer in (design D10).
+        run.heartbeat_at = _utcnow()
         await session.commit()
         # Cleared only once the commit has returned, so a rollback never drops an acknowledgement
         # that was never persisted.
@@ -635,7 +639,16 @@ async def scan_collection(
         try:
             from . import proofs
 
-            run.stamped = await proofs.stamp_pending(session, collection)
+            async def _stamp_heartbeat(done: int) -> None:
+                # The stamp pass runs after the walk, under the same claim, and can take far longer
+                # than the reaper's threshold on a large backlog. Batch-granular heartbeat so the
+                # claim keeps reading live; `processed` stays the scan's own count.
+                run.heartbeat_at = _utcnow()
+                await session.commit()
+
+            run.stamped = await proofs.stamp_pending(
+                session, collection, progress=_stamp_heartbeat
+            )
         except Exception:
             logging.getLogger("cairn.scanner").exception(
                 "stamp_pending failed for collection %s", collection_id

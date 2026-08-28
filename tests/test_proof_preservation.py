@@ -442,10 +442,12 @@ async def test_one_unarchivable_member_does_not_stop_the_batch(cairn_env, monkey
 
     real_preserve = ots._preserve_proof
 
-    def selective(source, archive_root, facts, *, store_key):
+    def selective(source, archive_root, facts, *, store_key, sync_root=None):
         if Path(source).name == "a.txt.ots":
             raise OSError(errno.EACCES, "Permission denied")
-        return real_preserve(source, archive_root, facts, store_key=store_key)
+        return real_preserve(
+            source, archive_root, facts, store_key=store_key, sync_root=sync_root
+        )
 
     monkeypatch.setattr(ots, "_preserve_proof", selective)
     monkeypatch.setattr(ots, "_run_ots", _stamp_fake())
@@ -532,56 +534,256 @@ async def test_interrupted_between_archive_and_place_loses_nothing(cairn_env, mo
     assert archived.read_bytes() == old_bytes
 
 
+def _syscall_recorder(monkeypatch, under: Path) -> list[tuple]:
+    """Record the file-system syscalls `_place_proof` makes, WITH their paths, in order.
+
+    The durability argument is entirely about ordering — which name exists, and is durable, at each
+    instant — so a test that only counts generic "a directory was fsynced" events cannot tell a
+    correct implementation from one that flushes the wrong directories, flushes before closing, or
+    writes a prefix of the proof (Codex MINOR). Every recorded event therefore carries its path:
+    exclusive creations, per-call write byte counts, closes, each fsync tagged file-vs-directory,
+    unlinks and renames. Events outside ``under`` (pytest's own I/O) are dropped.
+    """
+    events: list[tuple] = []
+    fds: dict[int, str] = {}
+    real_open, real_write, real_close = os.open, os.write, os.close
+    real_fsync, real_unlink, real_replace = os.fsync, os.unlink, os.replace
+    prefix = str(under)
+
+    def keep(path: str | None) -> bool:
+        return path is not None and path.startswith(prefix)
+
+    def rec_open(path, flags, mode=0o777, **kw):
+        fd = real_open(path, flags, mode, **kw)
+        fds[fd] = str(path)
+        if flags & os.O_EXCL and keep(str(path)):
+            events.append(("open_excl", str(path)))
+        return fd
+
+    def rec_write(fd, data):
+        n = real_write(fd, data)
+        if keep(fds.get(fd)):
+            events.append(("write", fds[fd], n))
+        return n
+
+    def rec_fsync(fd):
+        path = fds.get(fd)
+        if keep(path):
+            kind = "fsync_dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "fsync_file"
+            events.append((kind, path))
+        return real_fsync(fd)
+
+    def rec_close(fd):
+        path = fds.pop(fd, None)
+        if keep(path):
+            events.append(("close", path))
+        return real_close(fd)
+
+    def rec_unlink(path, **kw):
+        if keep(str(path)):
+            events.append(("unlink", str(path)))
+        return real_unlink(path, **kw)
+
+    def rec_replace(src, dst, **kw):
+        if keep(str(dst)):
+            events.append(("replace", str(dst)))
+        return real_replace(src, dst, **kw)
+
+    monkeypatch.setattr(os, "open", rec_open)
+    monkeypatch.setattr(os, "write", rec_write)
+    monkeypatch.setattr(os, "fsync", rec_fsync)
+    monkeypatch.setattr(os, "close", rec_close)
+    monkeypatch.setattr(os, "unlink", rec_unlink)
+    monkeypatch.setattr(os, "replace", rec_replace)
+    return events
+
+
 def test_preservation_syncs_directories_before_unlinking_the_source(tmp_path, monkeypatch):
-    """2.29a: the call ordering the durability argument rests on.
+    """2.29a: the exact call ordering the durability argument rests on.
 
     A file `fsync` commits BYTES, never the directory entry that NAMES them. So "create -> copy ->
     fsync file -> unlink source" has a real crash window: the unlink can persist while the archive's
     new name never lands, and the only copy of the proof is gone. A true power-loss test is out of
     scope — nothing here can cut power or model write reordering — but the ordering is the part the
-    implementation can get wrong, so it is asserted directly.
+    implementation can get wrong, so the whole sequence is asserted literally, path by path.
     """
     from src.services import ots
 
     store = tmp_path / "proofs"
     canonical = store / "1" / "doc.txt.ots"
-    _write_proof(canonical, "55" * 32, height=555_000)
+    old_bytes = _write_proof(canonical, "55" * 32, height=555_000)
     staged = tmp_path / "staged.ots"
     _write_proof(staged, "66" * 32)
 
-    events: list[str] = []
-    real_fsync, real_unlink, real_replace = os.fsync, os.unlink, os.replace
-
-    def rec_fsync(fd):
-        kind = "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
-        events.append(f"fsync_{kind}")
-        return real_fsync(fd)
-
-    def rec_unlink(path, **kw):
-        events.append("unlink")
-        return real_unlink(path, **kw)
-
-    def rec_replace(src, dst, **kw):
-        events.append("replace")
-        return real_replace(src, dst, **kw)
-
-    monkeypatch.setattr(os, "fsync", rec_fsync)
-    monkeypatch.setattr(os, "unlink", rec_unlink)
-    monkeypatch.setattr(os, "replace", rec_replace)
-
+    events = _syscall_recorder(monkeypatch, tmp_path)
     ots._place_proof(staged, canonical, store_root=store)
 
-    # The archive chain `<store>/.superseded/1/55/` is created wholesale by this call, so the syncs
-    # are: the archived file, its own directory, each ancestor this call created (parent AFTER
-    # child), then the first pre-existing ancestor that holds the shallowest new name.
-    assert events[0] == "fsync_file"
-    unlink_at = events.index("unlink")
-    replace_at = events.index("replace")
-    archive_dir_syncs = [i for i, e in enumerate(events[:unlink_at]) if e == "fsync_dir"]
-    assert len(archive_dir_syncs) == 4, events  # 55/, 1/, .superseded/, and the store root
-    assert all(i < unlink_at for i in archive_dir_syncs)
-    assert unlink_at < replace_at, "the source was unlinked only after the archive was durable"
-    assert "fsync_dir" in events[replace_at:], "the placement's own directory was never flushed"
+    archived = store / ".superseded" / "1" / "55" / f"{'55' * 32}.ots"
+    assert events == [
+        # 1. claim the archive name exclusively (never `os.replace`: it would overwrite a proof),
+        ("open_excl", str(archived)),
+        # 2. write EVERY byte of the proof — a short write must never be fsynced and named,
+        ("write", str(archived), len(old_bytes)),
+        # 3. flush the bytes, then close,
+        ("fsync_file", str(archived)),
+        ("close", str(archived)),
+        # 4. flush the chain of directories that NAME it, deepest-first (parent after child), all
+        #    the way to the proof-store root — never just the ones this call happened to create,
+        ("fsync_dir", str(store / ".superseded" / "1" / "55")),
+        ("close", str(store / ".superseded" / "1" / "55")),
+        ("fsync_dir", str(store / ".superseded" / "1")),
+        ("close", str(store / ".superseded" / "1")),
+        ("fsync_dir", str(store / ".superseded")),
+        ("close", str(store / ".superseded")),
+        ("fsync_dir", str(store)),
+        ("close", str(store)),
+        # 5. and ONLY THEN remove the source: before this instant the proof is at its canonical
+        #    path; after it, the archived name is durable. "Both names gone" is unreachable.
+        ("unlink", str(canonical)),
+        # 6. the placement, whose own name is likewise durable before the caller records anything.
+        ("replace", str(canonical)),
+        ("fsync_dir", str(store / "1")),
+        ("close", str(store / "1")),
+        ("fsync_dir", str(store)),
+        ("close", str(store)),
+    ]
+    assert archived.read_bytes() == old_bytes
+
+
+def test_a_short_write_still_archives_the_complete_proof(tmp_path, monkeypatch):
+    """`os.write` may legally write FEWER bytes than it was handed — and then the source is unlinked.
+
+    An unchecked single `os.write` archives a PREFIX of the proof, fsyncs it, makes its name durable
+    and removes the intact original: the evidence is destroyed exactly as thoroughly as by the
+    overwrite this whole design exists to prevent, and nothing reports a failure.
+    """
+    from src.services import ots
+
+    store = tmp_path / "proofs"
+    canonical = store / "1" / "doc.txt.ots"
+    old_bytes = _write_proof(canonical, "aa" * 32, height=444_000)
+    staged = tmp_path / "staged.ots"
+    staged_bytes = _write_proof(staged, "bb" * 32)
+
+    real_write = os.write
+    calls: list[int] = []
+
+    def dribble(fd, data):
+        # The pathological-but-legal filesystem: one byte per call.
+        n = real_write(fd, bytes(data)[:1])
+        calls.append(n)
+        return n
+
+    monkeypatch.setattr(os, "write", dribble)
+    outcome = ots._place_proof(staged, canonical, store_root=store)
+
+    assert outcome.kind == "placed"
+    archived = store / ".superseded" / "1" / "aa" / f"{'aa' * 32}.ots"
+    assert archived.read_bytes() == old_bytes, "the archived proof is a truncated copy"
+    assert len(calls) == len(old_bytes), "the write loop did not cover the whole payload"
+    assert canonical.read_bytes() == staged_bytes
+
+
+def test_a_write_that_cannot_progress_refuses_and_keeps_the_source(tmp_path, monkeypatch):
+    """A write that makes no progress is a failure, not an infinite retry — and never a proof loss.
+
+    The refusal is TRANSIENT (the archive is not the final output path), so the file stays queued;
+    the canonical proof is untouched; and the half-claimed archive slot does not linger as a
+    truncated impostor of a proof.
+    """
+    from src.services import ots
+
+    store = tmp_path / "proofs"
+    canonical = store / "1" / "doc.txt.ots"
+    old_bytes = _write_proof(canonical, "cc" * 32, height=333_000)
+    staged = tmp_path / "staged.ots"
+    staged_bytes = _write_proof(staged, "dd" * 32)
+
+    monkeypatch.setattr(os, "write", lambda fd, data: 0)
+
+    with pytest.raises(ots.OtsError) as excinfo:
+        ots._place_proof(staged, canonical, store_root=store)
+    assert not isinstance(excinfo.value, ots.OtsPathError), "a preservation failure is transient"
+
+    assert canonical.read_bytes() == old_bytes, "the source was removed despite a failed archive"
+    assert staged.read_bytes() == staged_bytes, "the staged proof was consumed by a failed placement"
+    family = store / ".superseded" / "1" / "cc"
+    assert not list(family.glob("*.ots")), "a truncated archive slot was left behind"
+
+
+def test_a_retry_after_a_failed_attempt_flushes_the_whole_chain(tmp_path, monkeypatch):
+    """A directory left by a FAILED attempt must not be mistaken for a durable one.
+
+    "Sync what this call created" is wrong across retries: the first attempt creates the archive
+    chain and dies before flushing it, so the retry sees those directories as pre-existing, flushes
+    only the deepest, unlinks the source and lets the row be recorded — and a power loss can still
+    lose an ancestor's name, with it the archived proof (Codex B2). Anchoring the chain on the
+    proof-store root, whose name predates every proof, is immune to that residue.
+    """
+    from src.services import ots
+
+    store = tmp_path / "proofs"
+    canonical = store / "1" / "doc.txt.ots"
+    old_bytes = _write_proof(canonical, "ff" * 32, height=222_000)
+    staged = tmp_path / "staged.ots"
+    _write_proof(staged, "0a" * 32)
+
+    # Attempt 1: fails mid-write, AFTER `mkdir -p` created the whole archive chain.
+    monkeypatch.setattr(os, "write", lambda fd, data: 0)
+    with pytest.raises(ots.OtsError):
+        ots._place_proof(staged, canonical, store_root=store)
+    monkeypatch.undo()
+    assert (store / ".superseded" / "1" / "ff").is_dir(), "the residue this test is about"
+    assert canonical.read_bytes() == old_bytes
+
+    # Attempt 2 succeeds — and must still flush every directory up to the store root, even though
+    # it created none of them.
+    events = _syscall_recorder(monkeypatch, tmp_path)
+    ots._place_proof(staged, canonical, store_root=store)
+
+    unlink_at = next(i for i, e in enumerate(events) if e[0] == "unlink")
+    assert [e for e in events[:unlink_at] if e[0] == "fsync_dir"] == [
+        ("fsync_dir", str(store / ".superseded" / "1" / "ff")),
+        ("fsync_dir", str(store / ".superseded" / "1")),
+        ("fsync_dir", str(store / ".superseded")),
+        ("fsync_dir", str(store)),
+    ]
+    archived = store / ".superseded" / "1" / "ff" / f"{'ff' * 32}.ots"
+    assert archived.read_bytes() == old_bytes
+
+
+def test_the_archive_family_has_no_ceiling(tmp_path):
+    """A fixed suffix bound turns a busy proof store into one that can never preserve again.
+
+    Preservation is the step that exists so no proof is ever destroyed; a ceiling on it means every
+    later placement refuses permanently once the family is full — reachable by a prolonged deferral
+    loop or by a prepopulated store (Codex M1). There is no bound, and finding the free slot costs
+    one directory read rather than one failed `open` per occupied slot.
+    """
+    from src.services import ots
+
+    store = tmp_path / "proofs"
+    digest = "1e" * 32
+    archive_root = ots.superseded_root(store, 1)
+    family = archive_root / digest[:2]
+    family.mkdir(parents=True)
+    occupied = 10_002  # past the ceiling this used to have
+    for i in range(occupied):
+        (family / (f"{digest}.ots" if i == 0 else f"{digest}.{i}.ots")).write_bytes(b"old")
+
+    source = tmp_path / "incoming.ots"
+    payload = _write_proof(source, digest, height=111_000)
+    slot = ots._preserve_proof(
+        source,
+        archive_root,
+        ots.StoredProofFacts(readable=True, digest=digest, anchored=True),
+        store_key=str(store),
+    )
+
+    assert slot.name == f"{digest}.{occupied}.ots"
+    assert slot.read_bytes() == payload
+    assert not source.exists()
+    assert len(list(family.glob("*.ots"))) == occupied + 1, "an existing archived proof was replaced"
 
 
 def test_a_store_that_cannot_flush_directories_degrades_instead_of_wedging(

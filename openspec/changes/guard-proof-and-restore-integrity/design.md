@@ -127,12 +127,30 @@ step syncs directories too, and syncs them **before** the source is removed:
 
 - `fsync` the archived file's own directory — that is what makes the new `<digest>[.N].ots` name
   durable;
-- then `fsync` each directory **this call created** above it, and finally the first **pre-existing**
-  ancestor, which holds the shallowest new directory's name. Stop there: everything above it already
-  existed durably.
+- then `fsync` **every** directory above it, up to and including the **proof-store root**. Stop
+  there: the store root is created by `cairn init` and its name predates every proof, so everything
+  above it is already durable.
+- The chain is derived from the **path**, never from "which directories this call created". Those
+  differ, and the difference is a real crash window: a first attempt can create the whole archive
+  chain and then fail before flushing it, leaving directories that a retry cannot distinguish from
+  durable ones. The retry would flush only the deepest parent, unlink the source, and a power loss
+  could still lose an ancestor's name — and with it the archived proof. Anchoring on the store root
+  is both simpler than tracking creation and immune to that residue; it costs a handful of extra
+  `fsync`s on a path that already only runs when the output path is occupied.
 - The order is **deepest-first — equivalently, parent-after-child**: a directory's `fsync` makes
   durable the entries *it* holds, so it is synced only once the child entry exists. Syncing a parent
   before creating the child in it accomplishes nothing.
+- The copy itself must be **complete before any of this begins**. `os.write` may legally write fewer
+  bytes than it was handed, so the copy loops until the payload is exhausted, verifies the written
+  size, and treats a call that makes no progress as a failure. A single unchecked `write` would
+  fsync a *prefix* of the proof, make that prefix's name durable, and then unlink the intact
+  original — destroying the evidence exactly as thoroughly as the overwrite this design exists to
+  prevent, and reporting success. A failed copy removes the slot it exclusively created (the partial
+  file is this call's own, never anyone's proof) and refuses, transiently, with the source untouched.
+- There is **no ceiling on the suffix search**. A bound would make a proof store that reached it
+  refuse every future preservation permanently — on the one path whose entire purpose is that no
+  proof is ever lost. The first free slot is found by one directory read to seed past the existing
+  family, then the same `O_EXCL` claim decides.
 - Only after that chain is synced may `os.unlink` remove the source. Then the two possible crash
   outcomes are "canonical proof still there, archive slot maybe half-written" (harmless, see below)
   and "canonical gone, archive durable" — never "both names gone".
@@ -686,6 +704,32 @@ some collections and skipped others is a success that names the skips.
 it if the process is killed, and `compute_health` is unaffected (only `kind='scan'` runs feed
 freshness). None of that is new machinery — it is what `run_stamp_backfill` already does, called
 from a second front door.
+
+### The claim is a lease, and the startup reaper must not revoke a live one
+
+Making the CLI claim the slot creates a case that did not exist before: **a claim held by a process
+that is not this one**. The startup reaper (`scheduler.reap_orphaned_runs`) used to mark *every*
+`running` run `interrupted`, on the reasoning that "a restarted process cannot still be running an
+operation". With `cairn stamp` and `cairn upgrade` claiming, that reasoning is false — a cron
+`cairn upgrade` grinding through 28,000 proofs legitimately holds a claim while the web app
+restarts, and clearing it lets the scheduler or the panel start a **second writer over the same
+proofs**: the concurrent check-then-act D10 exists to prevent, reintroduced by the cleanup meant to
+protect it.
+
+So the claim carries liveness. `runs.heartbeat_at` (nullable, migration `0011`) is stamped by
+`claim_run` and refreshed by the progress writes every long operation already makes — the scanner's
+per-batch `_drain`, the stamp backfill's per-batch progress callback, the upgrade's per-proof one,
+and the scan's own stamp tail, which now passes a batch-granular heartbeat callback because it runs
+after the walk under the same claim. The reaper reaps a `running` run only when
+`coalesce(heartbeat_at, started)` is older than `RUN_HEARTBEAT_TIMEOUT_SECONDS` (15 minutes),
+comfortably more than the gap between two progress writes of the slowest real operation.
+
+The trade is deliberate and one-directional. A crash now leaves a collection **claimed for up to the
+threshold**: the badge reads "in progress", the scheduler skips that collection, and the next
+restart or the first stale-run reap clears it. That is a delay measured in minutes. Admitting a
+second proof writer is evidence loss. The **dead-man's switch is unaffected** either way — freshness
+is keyed on completed `kind='scan'` runs (`ok`/`partial`), and an unreaped `running` run was never
+going to refresh it; the collection reads stale on schedule exactly as it does today.
 
 **What this does not claim to solve.** The claim serializes Cairn against Cairn. It is not a defence
 against a second, unrelated process writing into the proof store, nor against two Cairn deployments

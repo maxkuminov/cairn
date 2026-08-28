@@ -378,6 +378,9 @@ async def run_stamp_backfill(
 
     async def _progress(done: int) -> None:
         run.processed = done
+        # Progress is also the claim's liveness signal: a long backfill must not look abandoned to
+        # the startup reaper, which would revoke a claim this process still holds (design D10).
+        run.heartbeat_at = _utcnow()
         await session.commit()
 
     try:
@@ -548,6 +551,9 @@ async def upgrade_collection(
 
     async def _progress(done: int) -> None:
         run.processed = done
+        # Same liveness contract as the stamp backfill: an upgrade over tens of thousands of proofs
+        # is exactly the long-running CLI claim the reaper must not revoke (design D10).
+        run.heartbeat_at = _utcnow()
         await session.commit()
 
     try:
