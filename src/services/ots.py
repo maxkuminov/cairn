@@ -1241,8 +1241,16 @@ def _stage_proof_bytes(payload: bytes, directory: Path) -> Path:
         finally:
             os.close(fd)
     except BaseException:
-        with contextlib.suppress(OSError):
+        try:
             os.unlink(staged)
+        except OSError as cleanup_exc:
+            # Undisclosed temp debris accumulates across retries (every sweep re-stages), so a
+            # refused cleanup must be loud and name the path.
+            log.warning(
+                "could not remove the staged proof temp %s after a failed staging: %s",
+                staged,
+                cleanup_exc,
+            )
         raise
     return staged
 
@@ -1584,8 +1592,17 @@ def republish_proof(
             ) from exc
     finally:
         # Only ever the temp. `dst` is either the published proof or was never created.
-        with contextlib.suppress(OSError):
+        try:
             os.unlink(staged)
+        except FileNotFoundError:
+            pass
+        except OSError as cleanup_exc:
+            log.warning(
+                "could not remove the staged proof temp %s after republishing %s: %s",
+                staged,
+                dst,
+                cleanup_exc,
+            )
 
 
 def info(ots_path: str | os.PathLike[str]) -> ProofInfo:
