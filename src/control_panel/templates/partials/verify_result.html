@@ -1,18 +1,38 @@
 {% import "_macros.html" as m %}
 <div>
   <div class="verdict verdict--{{ verdict }}">
-    <div class="verdict__badge">{{ m.icon("check" if verdict == "ok" else ("clock" if verdict == "warn" else "x"), size=26, stroke=2.4) }}</div>
+    <div class="verdict__badge">{{ m.icon("check" if verdict == "ok" else ("clock" if verdict == "warn" else ("info" if verdict == "unavailable" else "x")), size=26, stroke=2.4) }}</div>
     <div style="flex:1;min-width:0">
       <div class="verdict__title">{{ title }}</div>
       <div class="verdict__sub">
+        {# One branch per reason, no wording shared between them: what Cairn established and who it
+           blames are different questions, and collapsing them is how a changed file read "pending". #}
         {% if verdict == "ok" and existed_by %}
           <span class="mono">{{ filename }}</span> existed in this exact form, unaltered, on or before <strong>{{ existed_by }}</strong>, confirmed against the public Bitcoin record.
-        {% elif verdict == "warn" %}
+        {% elif verdict == "ok" %}
+          <span class="mono">{{ filename }}</span> still matches its proof, confirmed against the public Bitcoin record.
+        {% elif digest_mismatch %}
+          <span class="mono">{{ filename }}</span>'s bytes are not the bytes this proof was made from &mdash; the file has changed since it was stamped. The proof itself is intact and still attests the <em>earlier</em> version of the file.
+        {% elif proof_mismatch %}
+          The proof's Bitcoin attestation does not match the block it points at, so the proof may be corrupt (or the explorer returned inconsistent block data). <strong>This is not evidence that <span class="mono">{{ filename }}</span> changed</strong> &mdash; its fingerprint is still exactly the one the proof records.
+        {% elif transport_error %}
+          Cairn could not reach the Bitcoin record to check this proof, so nothing was established either way. It says nothing about <span class="mono">{{ filename }}</span> &mdash; try again in a moment.
+        {% elif inconclusive %}
+          The Bitcoin-node backend reported a failure it cannot explain. Three things are possible: the proof is <em>not yet confirmed</em>, <em>or</em> <span class="mono">{{ filename }}</span> no longer matches it, <em>or</em> the Bitcoin node could not be reached. That backend cannot tell them apart.
+        {% elif verdict == "warn" and ots_state == "incomplete" %}
           <span class="mono">{{ filename }}</span>'s fingerprint has been submitted to Bitcoin but isn't confirmed yet. This usually settles within a few hours.
+        {% elif verdict == "warn" and ots_state == "pending" %}
+          <span class="mono">{{ filename }}</span>'s fingerprint is queued locally and has not been submitted to a timestamp server yet. Nothing has been asked of Bitcoin for it so far.
         {% else %}
           We couldn't confirm <span class="mono">{{ filename }}</span> against the public Bitcoin record. Its contents may have changed since it was recorded, or the proof isn't confirmed yet.
         {% endif %}
       </div>
+      {# Precedence decides the headline, not what the card is allowed to say: a verdict that
+         outranks a transport failure must still disclose it, or the swallow has only moved one
+         layer out. Muted sub-line, never a second verdict style. #}
+      {% if transport_error and (verdict == "ok" or proof_mismatch) %}
+        <div class="verdict__note">Note: {{ failed_lookups }} attestation lookup{{ "" if failed_lookups == 1 else "s" }} failed; the verdict is based on the attestations reached.{% if proof_mismatch %} The mismatch is established only over the attestations that could be fetched.{% endif %}</div>
+      {% endif %}
     </div>
     <a class="btn btn--ghost" href="/verify">{{ m.icon("arrowLeft", size=15) }} Verify another</a>
   </div>
@@ -54,6 +74,6 @@ Verified via: {{ verified_via }}</pre>
   </div>
   <div class="info-strip" style="margin-top:18px">
     {{ m.icon("info", size=15, cls="text-3") }}
-    <span>Verified by explorer lookup. For fully trustless verification, point Cairn at your own Bitcoin node in Settings. The <span class="mono">.ots</span> proof is portable: a third party can verify it against their own copy of the file, without Cairn ever handing out the watched file's bytes. <a href="/learn">How this works →</a></span>
+    <span>Checked using {{ verified_via }}. For fully trustless verification, point Cairn at your own Bitcoin node in Settings. The <span class="mono">.ots</span> proof is portable: a third party can verify it against their own copy of the file, without Cairn ever handing out the watched file's bytes. <a href="/learn">How this works →</a></span>
   </div>
 </div>

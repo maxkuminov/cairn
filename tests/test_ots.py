@@ -1689,3 +1689,222 @@ async def test_stamp_pending_runs_off_the_event_loop(cairn_env, monkeypatch):
     assert all(t is not threading.main_thread() for t in seen_threads), (
         "stamping ran on the event-loop thread — it must be offloaded via asyncio.to_thread"
     )
+
+
+# --- verify(): the typed outcome flags (fix-ux-audit-sprint1, design D1/D2) -----------------
+#
+# `VerifyResult` must say *why* verification did not succeed, and whom that blames. The panel and
+# `cairn verify` both branch on these flags, so a wrong one is a false alarm (or a false
+# reassurance) on the product's core signal.
+
+
+def _write_btc_proof_multi(path, file_digest: bytes, heights):
+    """Like ``_write_btc_proof`` but with several Bitcoin attestations on the same root timestamp.
+
+    Every attestation therefore commits to ``file_digest``, so a stubbed explorer can make one
+    height match its block's merkle root and another not.
+    """
+    from opentimestamps.core.notary import BitcoinBlockHeaderAttestation
+    from opentimestamps.core.op import OpSHA256
+    from opentimestamps.core.serialize import BytesSerializationContext
+    from opentimestamps.core.timestamp import DetachedTimestampFile, Timestamp
+
+    ts = Timestamp(file_digest)
+    for height in heights:
+        ts.attestations.add(BitcoinBlockHeaderAttestation(height))
+    ctx = BytesSerializationContext()
+    DetachedTimestampFile(OpSHA256(), ts).serialize(ctx)
+    path.write_bytes(ctx.getbytes())
+
+
+def test_explorer_digest_mismatch_sets_only_digest_mismatch(tmp_path, monkeypatch):
+    from src.services import ots
+
+    proof = tmp_path / "x.ots"
+    _write_btc_proof(proof, bytes.fromhex("ab" * 32), height=811111)
+
+    def boom(*a, **k):
+        raise AssertionError("explorer must not be queried on a digest mismatch")
+    monkeypatch.setattr(ots, "_fetch_block_merkleroot", boom)
+
+    result = ots.verify(proof, "cd" * 32)
+    assert result.verified is False
+    assert result.digest_mismatch is True   # the FILE changed
+    assert result.proof_mismatch is False   # ...and that says nothing about the proof
+    assert result.transport_error is None
+    assert result.inconclusive is False
+
+
+def test_explorer_merkle_mismatch_sets_proof_mismatch_not_digest_mismatch(tmp_path, monkeypatch):
+    from src.services import ots
+
+    digest_hex = "ab" * 32
+    proof = tmp_path / "x.ots"
+    _write_btc_proof(proof, bytes.fromhex(digest_hex), height=811111)
+
+    def fake_fetch(api, height, timeout):
+        return bytes.fromhex("cd" * 32), 1707935720  # not the commitment → the proof is wrong
+    monkeypatch.setattr(ots, "_fetch_block_merkleroot", fake_fetch)
+
+    result = ots.verify(proof, digest_hex)
+    assert result.verified is False
+    # The live digest matched, so this blames the proof / the explorer's block data — never the
+    # file. Copy derived from `digest_mismatch` here would be a false "your file changed" alarm.
+    assert result.proof_mismatch is True
+    assert result.digest_mismatch is False
+    assert result.transport_error is None
+
+
+def test_explorer_verified_proof_has_every_flag_clear(tmp_path, monkeypatch):
+    from src.services import ots
+
+    digest_hex = "ab" * 32
+    file_digest = bytes.fromhex(digest_hex)
+    proof = tmp_path / "x.ots"
+    _write_btc_proof(proof, file_digest, height=811111)
+    monkeypatch.setattr(
+        ots, "_fetch_block_merkleroot", lambda api, h, t: (file_digest, 1707935720)
+    )
+
+    result = ots.verify(proof, digest_hex)
+    assert result.verified is True
+    assert (result.digest_mismatch, result.proof_mismatch, result.inconclusive) == (
+        False, False, False,
+    )
+    assert result.transport_error is None
+
+
+def test_explorer_one_good_attestation_outranks_a_mismatched_sibling(tmp_path, monkeypatch):
+    """OTS verification is existential: one attestation confirmed against its real block IS proof.
+
+    A bad sibling must stay diagnostic detail in ``message`` — rendering it as a verdict puts a red
+    "this proof does not check out" over a genuinely anchored proof.
+    """
+    from src.services import ots
+
+    digest_hex = "ab" * 32
+    file_digest = bytes.fromhex(digest_hex)
+    proof = tmp_path / "x.ots"
+    _write_btc_proof_multi(proof, file_digest, heights=(811111, 822222))
+
+    def fake_fetch(api, height, timeout):
+        if height == 811111:
+            return file_digest, 1707935720          # matches its block
+        return bytes.fromhex("cd" * 32), 1717935720  # sibling does not
+    monkeypatch.setattr(ots, "_fetch_block_merkleroot", fake_fetch)
+
+    result = ots.verify(proof, digest_hex)
+    assert result.verified is True
+    assert result.proof_mismatch is False
+    assert result.block_height == 811111
+    assert "sibling" in result.message  # kept as detail, never as the verdict
+    assert result.transport_error is None
+
+
+def test_explorer_all_fetches_failing_sets_transport_error_and_is_not_verified(
+    tmp_path, monkeypatch
+):
+    from src.services import ots
+
+    digest_hex = "ab" * 32
+    proof = tmp_path / "x.ots"
+    _write_btc_proof_multi(proof, bytes.fromhex(digest_hex), heights=(811111, 822222))
+
+    def fake_fetch(api, height, timeout):
+        raise ots.OtsError(f"explorer request failed at {height}")
+    monkeypatch.setattr(ots, "_fetch_block_merkleroot", fake_fetch)
+
+    result = ots.verify(proof, digest_hex)
+    assert result.verified is False
+    assert result.transport_error is not None
+    assert ots.failed_lookup_count(result.transport_error) == 2
+    assert result.digest_mismatch is False and result.proof_mismatch is False
+
+
+def test_explorer_verified_result_still_carries_a_swallowed_fetch_error(tmp_path, monkeypatch):
+    from src.services import ots
+
+    digest_hex = "ab" * 32
+    file_digest = bytes.fromhex(digest_hex)
+    proof = tmp_path / "x.ots"
+    _write_btc_proof_multi(proof, file_digest, heights=(811111, 822222))
+
+    def fake_fetch(api, height, timeout):
+        if height == 811111:
+            return file_digest, 1707935720
+        raise ots.OtsError("explorer request failed at 822222")
+    monkeypatch.setattr(ots, "_fetch_block_merkleroot", fake_fetch)
+
+    result = ots.verify(proof, digest_hex)
+    # A transport failure never downgrades a verified result, and is never dropped either: the
+    # operator is told the verdict rests on the attestations that could be reached.
+    assert result.verified is True
+    assert result.transport_error == "explorer request failed at 822222"
+    assert ots.failed_lookup_count(result.transport_error) == 1
+
+
+def test_explorer_proof_mismatch_still_carries_a_swallowed_fetch_error(tmp_path, monkeypatch):
+    from src.services import ots
+
+    digest_hex = "ab" * 32
+    proof = tmp_path / "x.ots"
+    _write_btc_proof_multi(proof, bytes.fromhex(digest_hex), heights=(811111, 822222))
+
+    def fake_fetch(api, height, timeout):
+        if height == 811111:
+            return bytes.fromhex("cd" * 32), 1707935720  # the one we could fetch, and it is wrong
+        raise ots.OtsError("explorer request failed at 822222")
+    monkeypatch.setattr(ots, "_fetch_block_merkleroot", fake_fetch)
+
+    result = ots.verify(proof, digest_hex)
+    assert result.proof_mismatch is True
+    # "this proof is bad" vs "this proof is bad as far as the half of it I could see".
+    assert result.transport_error == "explorer request failed at 822222"
+
+
+def test_node_backend_non_success_exit_is_inconclusive_not_pending(tmp_path, monkeypatch):
+    from src.services import ots
+
+    proof = tmp_path / "x.ots"
+    proof.write_bytes(b"stub")
+
+    def fake_run(args, timeout=ots.DEFAULT_TIMEOUT):
+        if args[0] == "info":
+            return 0, INFO_PENDING, ""
+        return 1, "", VERIFY_PENDING
+    monkeypatch.setattr(ots, "_run_ots", fake_run)
+
+    result = ots.verify(proof, "deadbeef", backend="node")
+    assert result.verified is False
+    assert result.inconclusive is True
+    # `ots verify -d` reports an unanchored proof, a changed file and a dead node identically, so
+    # this backend must never guess a mismatch from the CLI's wording.
+    assert result.digest_mismatch is False and result.proof_mismatch is False
+
+
+def test_node_backend_unrunnable_binary_is_a_transport_error(tmp_path, monkeypatch):
+    from src.services import ots
+
+    proof = tmp_path / "x.ots"
+    proof.write_bytes(b"stub")
+
+    def fake_run(args, timeout=ots.DEFAULT_TIMEOUT):
+        if args[0] == "info":
+            return 0, INFO_COMPLETE, ""
+        raise ots.OtsError("ots binary not found")
+    monkeypatch.setattr(ots, "_run_ots", fake_run)
+
+    result = ots.verify(proof, "ab" * 32, backend="node")
+    assert result.verified is False
+    assert result.transport_error == "ots binary not found"
+    assert result.state == "none"       # never the proof's own state (that read as "pending")
+    assert result.inconclusive is False
+
+
+def test_failed_lookup_count_reads_the_joined_transport_error():
+    from src.services import ots
+
+    assert ots.failed_lookup_count(None) == 0
+    assert ots.failed_lookup_count("") == 0
+    assert ots.failed_lookup_count("one failure") == 1
+    assert ots.failed_lookup_count("one failure; another failure") == 2

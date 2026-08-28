@@ -1356,9 +1356,13 @@ async def verify_run(
                 explorer_url=settings.explorer_url,
                 node_rpc_url=settings.node_rpc_url,
             )
-        except ots_svc.OtsError as exc:  # pragma: no cover - surfaced as a failed verdict
+        except ots_svc.OtsError as exc:
+            # Belt-and-braces net, no longer the primary path: `verify` now *returns* an
+            # unreachable backend as a `transport_error` result rather than raising. Drop
+            # `fe.ots_state` entirely — inheriting it is what rendered a dead node/binary as
+            # "Proof pending confirmation".
             result = ots_svc.VerifyResult(
-                verified=False, state=fe.ots_state, message=str(exc)
+                verified=False, state="none", transport_error=str(exc), message=str(exc)
             )
 
     if settings.verify_backend == "node":
@@ -1367,16 +1371,40 @@ async def verify_run(
         host = settings.explorer_url.replace("https://", "").replace("http://", "").rstrip("/")
         verified_via = f"{host} (explorer lookup)"
 
+    # Verdict by *reason*, in the order of design D2. Branching on the proof's lifecycle state
+    # before asking why verification failed is what let a changed file read "pending confirmation".
     if live_unavailable is not None:
         # No live bytes to verify against — distinct danger state, never a green VERIFIED.
         verdict = "danger"
         title = "File unavailable — cannot verify"
+    elif result is not None and result.digest_mismatch:
+        verdict = "danger"
+        title = "File no longer matches its proof"
     elif result is not None and result.verified:
+        # Above `proof_mismatch` as belt-and-braces on the source-level rule: one attestation
+        # confirmed against its real block is proof, and no caller may turn a bad sibling into a
+        # verdict.
         verdict = "ok"
         title = "Proof verified"
-    elif result is not None and result.state in ("incomplete", "pending"):
+    elif result is not None and result.proof_mismatch:
+        # Before `transport_error`: a mismatch established before the network failed is knowledge.
+        verdict = "danger"
+        title = "This proof does not check out"
+    elif result is not None and result.transport_error:
+        # Neutral, never red — an unreachable backend is not evidence against the file, and crying
+        # wolf in red teaches the operator to dismiss the red card that means a real mismatch.
+        verdict = "unavailable"
+        title = "Couldn't check right now"
+    elif result is not None and result.inconclusive:
+        verdict = "unavailable"
+        title = "Couldn't confirm — pending, changed, or unreachable"
+    elif result is not None and result.state == "incomplete":
         verdict = "warn"
-        title = "Proof pending confirmation"
+        title = "Pending confirmation"
+    elif result is not None and result.state == "pending":
+        # Two states, two branches (design D13): queued-but-not-submitted is not awaiting Bitcoin.
+        verdict = "warn"
+        title = "Queued to stamp"
     else:
         verdict = "danger"
         title = "Could not verify"
@@ -1395,6 +1423,14 @@ async def verify_run(
         "verdict": verdict,
         "title": title,
         "verified": bool(result and result.verified),
+        "ots_state": result.state if result else None,
+        # Reason flags travel on every branch, not only the one that won: a transport failure under
+        # a verdict that outranks it is still disclosed as a diagnostic line (design D2).
+        "digest_mismatch": bool(result and result.digest_mismatch),
+        "proof_mismatch": bool(result and result.proof_mismatch),
+        "transport_error": (result.transport_error if result else None),
+        "failed_lookups": ots_svc.failed_lookup_count(result.transport_error if result else None),
+        "inconclusive": bool(result and result.inconclusive),
         "existed_by": result.existed_by if result else None,
         "block_height": result.block_height if result else None,
         "block_hash": block_hash,

@@ -280,14 +280,69 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                 explorer_url=settings.explorer_url,
                 node_rpc_url=settings.node_rpc_url,
             )
+            # Branch by *reason*, in the same order as the panel's verdict chain (design D2).
+            # `VerifyResult` has two consumers; reading the proof's lifecycle state before asking
+            # why verification failed is what printed "pending" for a file whose bytes had changed.
+            n = ots.failed_lookup_count(result.transport_error)
+            note = (
+                f"  {n} attestation lookup{'' if n == 1 else 's'} failed; "
+                f"the verdict is based on the attestations reached"
+                if n
+                else None
+            )
+
+            if result.digest_mismatch:
+                print(
+                    f"[{args.relpath}] CHANGED — the live bytes are not the bytes this proof was "
+                    f"made from; the proof still attests the earlier version of the file",
+                    file=sys.stderr,
+                )
+                return 1
             if result.verified:
                 print(
                     f"[{args.relpath}] VERIFIED — Bitcoin block {result.block_height}, "
                     f"existed by {result.existed_by}"
                 )
+                # Disclosure survives losing the verdict: a transport failure under a verdict that
+                # outranks it is still printed, and never changes the exit status.
+                if note:
+                    print(note)
                 return 0
+            if result.proof_mismatch:
+                print(
+                    f"[{args.relpath}] PROOF DOES NOT CHECK OUT — a Bitcoin attestation does not "
+                    f"match the block it points at; the proof (or the explorer's block data) may "
+                    f"be wrong. This is NOT evidence the file changed — its fingerprint still "
+                    f"matches what the proof records",
+                    file=sys.stderr,
+                )
+                if note:
+                    print(f"{note} (the mismatch is established only over those)", file=sys.stderr)
+                return 1
+            if result.transport_error:
+                print(
+                    f"[{args.relpath}] COULD NOT CHECK — {result.transport_error}; nothing was "
+                    f"established about the file, retry when the backend is reachable",
+                    file=sys.stderr,
+                )
+                return 1
+            if result.inconclusive:
+                print(
+                    f"[{args.relpath}] INCONCLUSIVE — the proof is not yet confirmed, OR the file "
+                    f"no longer matches it, OR the Bitcoin node could not be reached; the "
+                    f"bitcoin-node backend cannot tell these apart",
+                    file=sys.stderr,
+                )
+                return 1
             if result.state == "incomplete":
-                print(f"[{args.relpath}] pending (proof not yet anchored to Bitcoin)")
+                # Two states, two lines (design D13): `incomplete` is submitted and awaiting
+                # Bitcoin; `pending` was never submitted, so it must not read as awaiting anything.
+                print(
+                    f"[{args.relpath}] pending confirmation "
+                    f"(submitted to a calendar, awaiting Bitcoin confirmation)"
+                )
+            elif result.state == "pending":
+                print(f"[{args.relpath}] queued to stamp — not yet submitted to a calendar")
             else:
                 print(f"[{args.relpath}] NOT VERIFIED — {result.message or result.state}")
             return 1
