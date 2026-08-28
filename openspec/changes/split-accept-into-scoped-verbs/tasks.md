@@ -25,8 +25,9 @@ Standing guardrails for both slices:
   `events.detail` already exists. If a task appears to need a schema change, **stop and escalate** —
   do not add one.
 - **Do not weaken the D14 guard.** Every existing scenario in `tests/test_ux_dashboard.py`'s D14
-  suite survives, re-pointed at the new verbs. Removing one is a regression, not a consequence of
-  the split.
+  suite survives, re-pointed per the **matrix in task 2.10** — not blanket-parameterized across all
+  four verbs. Removing a scenario is a regression; re-pointing an *event* scenario at the population
+  its verb actually hashes is the split working, and the matrix says which is which.
 - **Honour `proposal.md`'s Non-goals and #12's "Do NOT implement these".** No `status='gone'`
   (rejected fix 3); the two forbidden strings (rejected fix 5 / #16) must not appear anywhere; the
   *restore* branch's `kind='missing'` ack scoping is untouched (rejected fix 7); the review page's
@@ -111,15 +112,52 @@ Standing guardrails for both slices:
   `panel.css`: the one new modifier (design D10).
 - [ ] 2.9 `collection_detail.html`: reconcile the comment block — the existing form **is** the
   baseline scope; its label and light confirm already match #16's baseline row. No behaviour change.
-- [ ] 2.10 Re-point the D14 suite in `tests/test_ux_dashboard.py`: every existing scenario (reused
-  row id, recreated collection, ABA event, replaced alert, lock contention, absent/empty
-  fingerprint, in-flight operation, refusal banner, all-clear refusal banner) runs once per scoped
-  verb **and** for the per-file verb.
-- [ ] 2.11 New route tests: a stop-tracking submission is **not** refused by an unrelated
-  `modified` alert opening after render (the narrowed population, design D3); an adopt submission
-  **is** refused when a file enters or leaves the `modified` set; a per-file submission is refused
-  when that row was already accepted, and when it went `missing -> ok` between render and submit; a
-  per-file POST at a row belonging to another collection or another user 404s.
+- [ ] 2.10 Re-point the D14 suite in `tests/test_ux_dashboard.py` **per the matrix below**. The
+  event term is not the same for every verb (design D2/D3), so the suite does **not** blanket-run
+  every scenario against every verb: a blanket re-point would assert that a scoped verb refuses on
+  drift it cannot reach, which is what the delta's *"is not refused by drift it cannot reach"*
+  scenarios forbid. Each row names its 1:1 delta scenario.
+
+  **(a) Form-independent scenarios — parameterize across all four form scopes** (`baseline-new`,
+  `adopt-changed`, `stop-tracking`, `accept-file`), unchanged in substance:
+
+  | Scenario | Delta scenario |
+  |---|---|
+  | reused row identifier | *A reused row identifier does not validate a stale fingerprint* |
+  | re-created record (same path + digest, reused id) | *A re-created record does not validate a form minted for its predecessor* |
+  | recreated collection | *A recreated collection does not validate its predecessor's fingerprint* |
+  | absent / empty fingerprint | *A submission with no fingerprint is refused* |
+  | lock contention → refusal, not 500 | *Lock contention is a refusal, not a server error* |
+  | non-contention DB failure → error, not staleness | *A datastore failure that is not contention is not reported as staleness* |
+  | in-flight operation → refusal | *An accept is refused while an operation is in flight* |
+  | refusal banner / all-clear refusal banner | *A refused submission is explained…* / *A refusal landing on an all-clear view…* |
+
+  **(b) Event scenarios — one per verb, against the population that verb actually hashes.** Do not
+  parameterize these together; each is a different assertion:
+
+  | Verb | Event-ABA test | Outside-scope **non**-refusal test |
+  |---|---|---|
+  | `baseline-new` | **collection-wide** open-event emptiness: an unrelated file goes `ok → modified → missing → restored`, ending `ok` with its `modified` event still open while the `new` set and the issue counts return to their rendered values ⇒ **refuse** (delta: *A stale baseline form is refused by an alert opening on a file it does not name*) | **none — by design.** `baseline-new` has no outside scope: *any* open event on the collection, including a detached one, refuses it. Assert that explicitly rather than omitting it. |
+  | `adopt-changed` | ABA on a **modified** file in its own population (alert acked, same-kind alert reopened, count restored) ⇒ refuse (delta: *…stale adopt form*) | a further file goes **missing** and opens an alert; the modified set is unchanged ⇒ **proceed**, and the missing alert stays open (delta: *Adopt is not refused by drift it cannot reach*) |
+  | `stop-tracking` | ABA on a **missing** file in its own population ⇒ refuse (delta: *…stale stop-tracking form*) | a further file goes **modified** and opens an alert; the missing set is unchanged ⇒ **proceed**, and the modified alert stays open (delta: *Stop tracking is not refused by drift it cannot reach*) |
+  | `accept-file` | ABA on **that row's own** events ⇒ refuse (delta: *…stale per-file form*) | an alert opens on a **different** row, and that row's state changes; the submitted row has not moved ⇒ **proceed**, touching only the submitted row (delta: *A per-file action is not refused by drift on another row*) |
+
+  **(c) Cross-form replay — pairwise, all four scope strings.** Parameterize over every ordered pair
+  of the four form scopes (12 pairs): a fingerprint minted for form X submitted to form Y's endpoint
+  ⇒ refuse, mutate nothing. Include at least one pair whose two populations are byte-identical, so
+  the test proves the *scope string* is doing the work and not a coincidental population difference.
+  (delta: *No accept form validates any action but its own*)
+
+  **(d) Cross-row replay for `accept-file`.** A fingerprint minted for row A submitted at row B's
+  address ⇒ refuse, mutate neither row — including where A and B share status, digest and size, so
+  only the `file={id}` header term separates them. (delta: *A per-file form does not validate a
+  submission at another row*)
+- [ ] 2.11 New route tests, beyond the 2.10 matrix: an adopt submission **is** refused when a file
+  enters or leaves the `modified` set; a per-file submission is refused when that row was already
+  accepted, and when it went `missing -> ok` between render and submit; a per-file POST at a row
+  belonging to another collection or another user 404s; a **detached** open event
+  (`file_id IS NULL`) refuses `baseline-new` and is invisible to the three narrowed verbs
+  (design D3).
 - [ ] 2.12 `tests/test_ux_review.py`: the review page renders the applicable buttons with their live
   counts, renders none whose count is zero, renders no "Accept all changes", and contains neither
   forbidden string.
@@ -131,7 +169,8 @@ Standing guardrails for both slices:
   `review-accept`; no caller passes a scope the service does not accept; `cairn accept` still
   reaches the unscoped path.
 - [ ] 3.2 Full local gates on the merged result: `PYTHONPATH=. pytest -q`, `ruff check .`,
-  `make audit`, `openspec validate split-accept-into-scoped-verbs --strict`.
+  `make audit`, `openspec validate split-accept-into-scoped-verbs --strict`. This is the gate that
+  **admits the change to review**, not the one that admits it to deploy — see 3.4a.
 - [ ] 3.3 **`openspec-verifier` subagent** (non-author) against the spec deltas. Iterate to zero
   blocking gaps.
 - [ ] 3.4 **Adversarial Codex** (mandatory — this is the accept path, data integrity, multiple call
@@ -139,8 +178,18 @@ Standing guardrails for both slices:
   that the operator was never shown, a file record removed that no button named, a guard that
   validates a stale form. Point it at `scanner.py`, `routes.py`, the two templates and the deltas.
   Fix BLOCKER/MAJOR before shipping; record accepted limitations.
+- [ ] 3.4a **Final gate — mandatory, on the final tree, after every verifier and adversarial fix has
+  landed and immediately before deploy.** 3.3 and 3.4 both *require* fixes, and those fixes are
+  committed after 3.2 ran; on the accept path a guard-query or fingerprint-encoding edit made under
+  review pressure is exactly the kind that breaks a sibling test, so the pre-review run is not
+  evidence about the tree being shipped. Re-run **all four** on the final commit:
+  `PYTHONPATH=. pytest -q`, `ruff check .`, `make audit`,
+  `openspec validate split-accept-into-scoped-verbs --strict`. All four green, or deploy does not
+  proceed. If a fix lands *after* this checkpoint for any reason, this checkpoint runs again — it is
+  the last thing before 3.5, always.
+
 - [ ] 3.5 Deploy: commit → push → `make deploy`. **No `make migrate`** — this change adds no
-  revision.
+  revision. Gated on 3.4a being green on the commit being pushed.
 - [ ] 3.6 **`user-representative` pass** on the live panel: a collection with new + modified +
   missing files. Check that each button's count matches what the page lists, that the confirms name
   the right consequence, that the per-row controls resolve one file without touching the others,

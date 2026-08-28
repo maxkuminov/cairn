@@ -76,9 +76,30 @@ So the two concepts are separated:
   four values instead of two to keep apart).
 
 Between them sits one **pure** helper, `_narrow(pop, form, statuses, file_id=None) -> _Population`:
-it filters `pop.files` to the form's statuses (or to the single `file_id`), filters `pop.open_events`
-to the events belonging to those files, and returns a `_Population` whose `scope` field is the form
-scope string. `_population_fingerprint` is unchanged apart from reading that field.
+it filters `pop.files` to the form's statuses (or to the single `file_id`), narrows `pop.open_events`
+per the rule below, and returns a `_Population` whose `scope` field is the form scope string.
+`_population_fingerprint` is unchanged apart from reading that field.
+
+**The event term has two rules, not one, and `_narrow` branches on the form:**
+
+| Form | File term | Event term |
+|---|---|---|
+| `baseline-new` | files with status `new` | **the wide read's entire open-event set, un-narrowed** |
+| `adopt-changed` | files with status `modified` | open events whose `file_id` is in that file term |
+| `stop-tracking` | files with status `missing` | open events whose `file_id` is in that file term |
+| `accept-file` | the single `file_id` | open events whose `file_id` is that file |
+
+`baseline-new` is an **explicit exception** and `_narrow` encodes it as such — a branch on the form
+string, not an emergent property of the filter. Its wide read (`_read_population(…, "baseline-new")`)
+already fetches the collection's whole open-event set; `_narrow` passes that set through untouched,
+and `_guarded_accept` **refuses when it is non-empty**, so the emptiness the D7 gate asserts is
+carried by the same identity-and-generation hash the other forms use, not by a re-read or a count.
+
+Why it cannot be the generic rule: `new` files essentially never carry open events (`added` is born
+acknowledged), so narrowing the baseline form's event term to *its own* files would collapse the
+term to the empty set for every input — hashing a constant, and erasing the assertion D5 and the
+web-panel delta both require the form to carry. The failure that buys is real, not theoretical: see
+D3's ABA case below.
 
 **The recount side reads the same wide read scope and applies the same `_narrow`.** It does *not*
 narrow in SQL. D14 requires that "the same single-read derivation SHALL be used when the endpoint
@@ -86,7 +107,7 @@ recomputes the fingerprint, so the two sides cannot encode the same state differ
 different narrowings (Python on the mint side, SQL on the recount side) is precisely the divergence
 that requirement forbids, even where they look equivalent.
 
-## D3 — The open-event term narrows with the verb
+## D3 — The open-event term narrows with the *mutating* verbs; baseline-new is the exception
 
 Today the fingerprint's event component is *every* open event on the collection, because the verb
 acknowledges every open event on the collection. Once the ack is scoped, that is no longer the
@@ -94,12 +115,30 @@ population being mutated, and keeping it would make the guard refuse on drift th
 — a `modified` alert opening elsewhere would refuse a *stop-tracking* submission whose own
 population never moved. Refusals the operator cannot explain are how a guard gets worked around.
 
-**Chosen:** the event component covers the open events of the files in the *narrowed* population —
-exactly the events the verb will acknowledge — still by identity **and** generation
-(`id`, `kind`, `detected_at`).
+**Chosen, for `adopt-changed` / `stop-tracking` / `accept-file`:** the event component covers the
+open events of the files in the *narrowed* population — exactly the events the verb will
+acknowledge — still by identity **and** generation (`id`, `kind`, `detected_at`).
 
-The two replays D14 introduced the component for are both still closed, because both are about the
-alerts the verb clears:
+**Chosen, for `baseline-new`:** the component stays the collection's **whole** open-event set, and a
+non-empty set is a refusal. Here the term is not "the alerts this verb clears" (it clears none) — it
+is the **D7 gate's precondition**, the assertion that the operator is not baselining in front of an
+unread alarm. That is a claim about the collection, so it is hashed over the collection. The
+distinction is *why the term exists*, and the two forms have different answers: for the scoped verbs
+it binds the mutation to what it will touch; for baseline it binds the render-time gate to the state
+that justified rendering the control at all.
+
+Narrowing it generically would silently unbind that gate. **The ABA that opens:** the detail page
+renders the baseline form for a collection with `new` files, no missing/modified and no open events.
+An unrelated file B then goes `ok → modified → missing → restored`. Restoration acknowledges only
+B's `missing` event (the restore branch's `kind='missing'` scoping, #12 rejected fix 7 — untouched
+by this change), so B's earlier `modified` event is **still open**, while B itself is back to `ok`.
+The `new` set is unchanged, the issue counts are back to zero — and under a generic narrowing the
+event term would drop B's open event, because B is not `new`. The stale form validates and baselines
+beside an alarm nobody has read, which is the precise thing D7 exists to prevent. Retaining the wide
+set refuses it. This gets its own regression test (tasks 2.10) and its own delta scenario.
+
+The two replays D14 introduced the component for are both still closed for the scoped verbs, because
+both are about the alerts those verbs clear:
 
 - *ABA on the same file* — a file's open `missing` event is acknowledged in another tab and a fresh
   incident opens; the count returns to 1 while the incident is a different one. The file is in the
@@ -110,9 +149,12 @@ alerts the verb clears:
 
 This requires `_PopEvent` to carry `file_id`. The `UNION ALL`'s event leg has spare padded columns;
 `Event.file_id` goes into the `n2` slot (`size`), which is already an integer column on the file
-leg, so no result-type coercion changes. Detached open events (`file_id IS NULL`) enter no scoped
-verb's hash and are acknowledged by no scoped verb — they are cleared by *Mark all reviewed*, which
-is unchanged and is not fingerprint-guarded (it mutates no file record).
+leg, so no result-type coercion changes. Detached open events (`file_id IS NULL`) enter no *narrowed*
+hash and are acknowledged by no scoped verb — they are cleared by *Mark all reviewed*, which is
+unchanged and is not fingerprint-guarded (it mutates no file record). They **do** enter
+`baseline-new`'s un-narrowed set and refuse it, which is correct and is the same rule as before this
+change: a detached open event is still an unread alarm, and the D7 gate is about unread alarms, not
+about reachability.
 
 ## D4 — What happens to the `review-accept` scope string
 
@@ -122,10 +164,14 @@ leaving a live scope string with no form to mint it is a loaded gun for the next
 
 Consequence for the existing test suite: `tests/test_ux_dashboard.py`'s D14 parameterization
 (`("/collection/1/accept", "baseline-new"), ("/collection/1/review/accept", "review-accept")`) is
-re-pointed at the two new review routes. Every scenario in that suite — reused row id, recreated
-collection, ABA event, lock contention, missing/empty fingerprint, in-flight operation — must still
-run, once per scoped verb, and once for the per-file verb. Deleting any of them is a regression in
-the guard, not a consequence of the split.
+re-pointed at the four new form scopes. **The re-pointing is not uniform**, because the event term
+is not uniform (D3): the *form-independent* scenarios — reused row id, recreated collection, lock
+contention, missing/empty fingerprint, in-flight operation, refusal banner — parameterize across all
+four verbs unchanged, while the *event* scenarios split by which term the verb hashes. The per-verb
+matrix is written out in tasks 2.10; a blanket "run everything everywhere" would assert that a
+scoped verb refuses on drift it cannot reach, which is exactly what this change's spec forbids.
+Deleting a scenario is a regression in the guard; re-pointing one at the population its verb
+actually hashes is the split working.
 
 ## D5 — Where each verb is offered
 
@@ -141,9 +187,16 @@ the guard, not a consequence of the split.
 verb's second population ("it promotes not-yet-baselined files **and** it marks every open event on
 the collection reviewed"). With the ack scoped to touched files, and `added` events born
 acknowledged, the baseline verb now mutates no event at all — so the zero assertions are no longer
-load-bearing. They are **retained** anyway: they are already hashed, already spec'd, already tested,
-and removing them buys nothing this change needs while widening the destructive surface under
-review. The spec's *justification* for the gate is rewritten in the delta, because the old one ("the verb
+justified by *what the verb clears*. They are **retained** anyway: they are already hashed, already
+spec'd, already tested, and removing them buys nothing this change needs while widening the
+destructive surface under review.
+
+**Retained means retained at full width.** The gate's "no open events" condition is a claim about
+the **collection**, so `baseline-new` keeps hashing the collection's whole open-event set (D2's
+explicit `_narrow` exception, D3's rationale) and refuses when it is non-empty. Retaining the
+condition in the render gate while letting the fingerprint narrow it away would leave a *render-time*
+check with no *submit-time* binding — the render/submit gap this whole guard exists to close — and
+the ABA in D3 walks straight through it. The spec's *justification* for the gate is rewritten in the delta, because the old one ("the verb
 also marks every open event on the collection reviewed") lapses with the scoped ack; what remains
 is the ordering argument — a baseline control must not sit in front of an alarm nobody has read.
 *Whether the baseline control should become available beside open issues is a UX question for its

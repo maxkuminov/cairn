@@ -122,10 +122,16 @@ string identifying which verb it was minted for. The single-snapshot mint/recoun
 durable-identity record encoding, the write-locked check-and-act, the lock-contention-is-a-refusal
 classification and the `?stale=1` explanation are all preserved unchanged.
 
-The open-event component narrows with the verb: it covers the open events **of the files in that
-verb's population** — the events the verb will actually acknowledge — rather than the collection's
-whole open-event set. It still binds them by identity and generation (id + kind + `detected_at`), so
-the ABA replay it was introduced for stays closed.
+The open-event component narrows with the three **mutating** verbs: it covers the open events **of
+the files in that verb's population** — the events the verb will actually acknowledge — rather than
+the collection's whole open-event set, so a verb is not refused by drift it cannot reach.
+**`baseline-new` is the explicit exception**: it clears no event, so its event term is not a
+description of a mutation but the binding of the D7 gate's "no unread alarm" precondition — a claim
+about the *collection*. It therefore keeps the collection's whole open-event set and refuses when it
+is non-empty. In every case the term binds events by identity and generation
+(id + kind + `detected_at`), so the ABA replay it was introduced for stays closed — for the scoped
+verbs on their own files, and for baseline across the collection (design D3 walks the
+`modified → missing → restored` case that a generic narrowing would let through).
 
 ### Per-file accept (#30)
 
@@ -173,9 +179,11 @@ implementation appears to need one, **stop and escalate** rather than adding it.
   vocabulary work. It is documented as the unscoped legacy verb in its help text and in CLAUDE.md;
   splitting the CLI is deferred until the panel vocabulary has been used in anger.
 - **The D7 render gate on the collection-detail baseline form is not relaxed.** With scoped acks its
-  two zero assertions (`issues == 0`, no open events) are no longer *load-bearing*, but relaxing the
-  gate would put a baseline control beside an open alarm, which is a UX ordering decision, not a
-  consequence of scoping. See design D5.
+  two zero assertions (`issues == 0`, no open events) no longer describe *what the verb clears*, but
+  relaxing the gate would put a baseline control beside an open alarm, which is a UX ordering
+  decision, not a consequence of scoping. Retained means retained at full width: the baseline
+  fingerprint keeps hashing the collection's **whole** open-event set, so the gate is bound at submit
+  time and not only at render time. See design D3/D5.
 - **No fleet-wide review page (#27), no dashboard count relinking (R3), no vocabulary rename of
   "Acknowledge" → "Reviewed" beyond what sprint 1 already shipped.** Those are their own issues.
 - **No retroactive repair of already-detached events.** Rows detached by past accepts keep their

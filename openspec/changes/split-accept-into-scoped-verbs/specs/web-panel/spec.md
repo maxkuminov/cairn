@@ -149,8 +149,9 @@ The fingerprint SHALL cover the **whole population its own action acts on**, rat
 truncated list the page displayed and rather than the whole of what the page lists: for each of the
 review view's scoped actions, every file in the collection in that action's state; for the
 collection-detail baseline action, its entire not-yet-baselined set together with the assertion that
-the collection has no missing or modified files; for the per-file action, that single record. An
-absent or empty fingerprint SHALL be treated as a mismatch, so the check fails closed.
+the collection has no missing or modified files **and no open events**; for the per-file action,
+that single record. An absent or empty fingerprint SHALL be treated as a mismatch, so the check
+fails closed.
 
 The population a form's fingerprint is computed over and the population the page **renders** SHALL
 be derived from a **single, consistent read** — one snapshot covering the file records, the open-event
@@ -168,23 +169,40 @@ derived from that same snapshot rather than from an earlier count, so that a con
 committed between the two reads cannot leave the page reporting a healthy "all clear" for a
 collection it has just emptied.
 
-Because each action also marks events reviewed, the fingerprint SHALL additionally cover, **by
-identity**, the set of open (unreviewed) events **belonging to the files in that action's own
-population** — each event's identifier, its kind and the time it was detected — recomputed inside
-the same guarded transaction as the file records, so that any change to *which* of the alerts this
-action would clear is a refusal. Covering that set by **count** is not sufficient: an open alert may
-be acknowledged and a different one opened on the same file with the same kind, returning the count
-to what it was while the incident the operator is being asked to clear is a different one. Event
-identifiers may themselves be reused after a record is deleted, so identity alone is not sufficient
-either — hence the detection time, which separates one generation of an alert from the next.
+The fingerprint SHALL additionally cover a set of open (unreviewed) events **by identity** — each
+event's identifier, its kind and the time it was detected — recomputed inside the same guarded
+transaction as the file records. Covering that set by **count** is not sufficient: an open alert may
+be acknowledged and a different one opened with the same kind, returning the count to what it was
+while the incident the operator is being asked to clear, or being told does not exist, is a
+different one. Event identifiers may themselves be reused after a record is deleted, so identity
+alone is not sufficient either — hence the detection time, which separates one generation of an
+alert from the next.
 
-That term SHALL follow the action's scope rather than the collection: an action acknowledges only
-the events of the files it touches, so binding it to every open event on the collection would refuse
+**Which** events that set contains SHALL depend on the action, because the term answers a different
+question for each:
+
+For the review view's scoped actions and the per-file action, the set SHALL be the open events
+**belonging to the files in that action's own population** — the alerts the action itself will mark
+reviewed — so that any change to *which* of them the action would clear is a refusal. That term
+SHALL follow the action's scope rather than the collection: an action acknowledges only the events
+of the files it touches, so binding it to every open event on the collection would refuse
 submissions over drift the action cannot reach — an alert opening on a file in a different state
 would refuse an action whose own population never moved — and refusals the operator cannot account
-for are how a guard gets worked around. For the collection-detail baseline action the collection's
-open-event set SHALL be empty, and the fingerprint SHALL carry that emptiness assertion, so the
-action cannot be taken beside an unread alarm.
+for are how a guard gets worked around.
+
+For the collection-detail baseline action the set SHALL be the **collection's entire open-event
+set**, un-narrowed, and the endpoint SHALL refuse when it is non-empty. This is a deliberate
+exception to the scoping rule above, and it SHALL NOT be narrowed to the not-yet-baselined files'
+own events. The baseline action clears no alert, so its event term is not a description of what it
+will mutate; it is the **binding of the precondition that permits the action to be offered at all**
+— that the operator is not baselining in front of an unread alarm — and that precondition is a claim
+about the collection. Files that are merely not yet baselined essentially never carry open events of
+their own, so a narrowed term would be empty for every input and would assert nothing, leaving the
+render-time gate with no submit-time binding. It SHALL cover open events that belong to no file
+record as well, since a detached alert is still unread.
+
+Both of these are assertions about a population's alerts as it stood when the form was rendered, and
+both SHALL be recomputed from the endpoint's own read rather than trusted from the submission.
 
 Each action SHALL act on **only the population its own label names**. The earlier accepted
 limitation — that a re-baseline from the review view also promoted not-yet-baselined files, which
@@ -259,6 +277,19 @@ one.
   leave the new missing file's event unacknowledged, and SHALL redirect to the review view with the
   marker that makes the refusal visible
 
+#### Scenario: A stale baseline form is refused by an alert opening on a file it does not name
+
+- **WHEN** the baseline form is rendered for a collection whose only non-baselined files are new,
+  with no missing or modified files and no open events, and an **unrelated** file then goes modified,
+  then missing, and is then restored — so that it ends healthy, the collection again has no missing
+  or modified files and the not-yet-baselined set is untouched, while the alert raised when it was
+  modified remains open because restoring a file clears only its missing alert — and the user submits
+  the already-rendered baseline form
+- **THEN** the endpoint SHALL refuse, SHALL baseline nothing and SHALL leave the open alert
+  unacknowledged, and SHALL redirect to the review view with the staleness marker — the baseline
+  action's no-open-alert assertion SHALL be bound to the whole collection, so an alert on a file the
+  action would never touch SHALL still refuse it
+
 #### Scenario: A scoped action is refused after its own population goes stale
 
 - **WHEN** the user opens the review view listing one missing file, a scan then records a second
@@ -266,7 +297,7 @@ one.
 - **THEN** the endpoint SHALL refuse, SHALL NOT remove either missing file's record or acknowledge
   either event, and SHALL redirect to the review view with the marker that makes the refusal visible
 
-#### Scenario: A scoped action is not refused by drift it cannot reach
+#### Scenario: Stop tracking is not refused by drift it cannot reach
 
 - **WHEN** the user opens the review view, a scan then records a further file **modified** and opens
   its alert, and the user submits the already-rendered stop-tracking form whose own missing
@@ -274,10 +305,35 @@ one.
 - **THEN** the endpoint SHALL perform the removal, and SHALL NOT acknowledge the newly opened
   modified alert
 
-#### Scenario: One scoped form does not validate another action
+#### Scenario: Adopt is not refused by drift it cannot reach
 
-- **WHEN** the fingerprint minted for the adopt action is submitted to the stop-tracking endpoint
-- **THEN** the endpoint SHALL refuse and SHALL mutate nothing
+- **WHEN** the user opens the review view, a scan then records a further file **missing** and opens
+  its alert, and the user submits the already-rendered adopt form whose own modified population is
+  unchanged
+- **THEN** the endpoint SHALL adopt the changed files, and SHALL NOT acknowledge the newly opened
+  missing alert or remove the newly missing record
+
+#### Scenario: A per-file action is not refused by drift on another row
+
+- **WHEN** the user opens the review view, an alert is then opened on a **different** file — and
+  that file's own state changes — and the user submits the already-rendered per-file action for a row
+  that has not moved
+- **THEN** the endpoint SHALL accept that one row, and SHALL neither acknowledge the other file's
+  alert nor touch its record
+
+#### Scenario: No accept form validates any action but its own
+
+- **WHEN** the fingerprint minted for any one of the four accept actions — baseline, adopt, stop
+  tracking, per-file — is submitted to any of the other three endpoints, for every such ordered pair
+- **THEN** the endpoint SHALL refuse and SHALL mutate nothing, in every pair, including where the
+  two actions' populations happen to be identical
+
+#### Scenario: A per-file form does not validate a submission at another row
+
+- **WHEN** the fingerprint minted for one row's per-file action is submitted at a different row's
+  per-file address, including where the two rows share a status, a content digest and a size
+- **THEN** the endpoint SHALL refuse, SHALL mutate neither row, and SHALL redirect to the review
+  view with the staleness marker
 
 #### Scenario: A refused submission is explained on the review view
 
@@ -311,7 +367,7 @@ one.
   its event, and SHALL redirect to the review view with the staleness marker — a reused identifier
   SHALL NOT be sufficient for a fingerprint to still match
 
-#### Scenario: Replacing one open alert with another does not validate a stale form
+#### Scenario: Replacing one open alert with another does not validate a stale stop-tracking form
 
 - **WHEN** the review view is rendered for a collection with one missing file and one open alert on
   it, that alert is then acknowledged and a **new** alert of the same kind is opened on the same
@@ -319,6 +375,24 @@ one.
   move — and the operator submits the already-rendered stop-tracking form
 - **THEN** the endpoint SHALL refuse, SHALL NOT acknowledge the newly opened alert and SHALL NOT
   remove the file's record
+
+#### Scenario: Replacing one open alert with another does not validate a stale adopt form
+
+- **WHEN** the review view is rendered for a collection with one modified file and one open alert on
+  it, that alert is then acknowledged and a **new** alert of the same kind is opened on the same
+  file, so the count of open alerts returns to what it was while the file records never move, and the
+  operator submits the already-rendered adopt form
+- **THEN** the endpoint SHALL refuse, SHALL NOT acknowledge the newly opened alert and SHALL NOT
+  re-baseline the file
+
+#### Scenario: Replacing one open alert with another does not validate a stale per-file form
+
+- **WHEN** a row's per-file action is rendered for a file with one open alert, that alert is then
+  acknowledged and a **new** alert of the same kind is opened on that same file, so the count returns
+  to what it was while the row itself never moves, and the operator submits the already-rendered
+  per-file form
+- **THEN** the endpoint SHALL refuse, SHALL NOT acknowledge the newly opened alert and SHALL NOT
+  accept the row
 
 #### Scenario: A record that appears after the page's read is in neither the list nor the fingerprint
 
