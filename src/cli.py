@@ -349,9 +349,11 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             # first produces the A/B/C false reassurance — recorded provenance A, live == baseline
             # B, an on-disk proof committing to a third digest C — where `ots_digest != live` holds
             # and the card would say "simply an older proof of your file" about an `.ots` that is
-            # neither the recorded proof nor this file's proof. Staleness may only be concluded once
-            # the on-disk proof has been shown to BE the recorded proof. Rows with no recorded
-            # provenance keep sprint 1's heuristic and its explicit undecidability, verbatim.
+            # neither the recorded proof nor this file's proof. The staleness reading is reachable
+            # only once the on-disk proof has been shown to commit to exactly the recorded
+            # provenance — and even then it establishes only WHICH DIGEST that `.ots` commits to.
+            # Rows with no recorded provenance keep sprint 1's heuristic and its explicit
+            # undecidability, verbatim.
             # Mirrors the panel's `mismatch_blame` — the two surfaces must never disagree.
             stored_sha = (entry.sha256 or "").strip().lower()
             live_sha = (digest or "").strip().lower()
@@ -396,8 +398,12 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
-            # D7 row 5: the on-disk proof IS the proof Cairn recorded placing, and it was made from
-            # earlier bytes. Established without the `pending`/status heuristic.
+            # D7 row 5: the `.ots` on disk commits to exactly the digest Cairn recorded for the
+            # proof it placed here — this file's PREVIOUSLY recorded fingerprint. That, and only
+            # that, is what the comparison establishes: digest equality is not artifact identity
+            # (any `.ots` over the same earlier bytes commits to the same digest), and verification
+            # exits on the digest disagreement before any attestation is checked, so nothing about
+            # Bitcoin was validated. The line claims neither.
             if (
                 result.digest_mismatch
                 and live_sha
@@ -406,16 +412,22 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                 and recorded_proof_sha != live_sha
                 and parsed_proof_sha == recorded_proof_sha
             ):
+                # From the proof state alone, never from the status: a `perfile` collection
+                # switched to `ots_mode="none"` after a modification stays `modified` with nothing
+                # queued, and promising a re-stamp there is a promise nothing will keep.
                 pending_clause = (
-                    " and a re-stamp is still pending"
-                    if (entry.ots_state == "pending" or entry.status in ("modified", "new"))
+                    "; a re-stamp is queued, and once it runs the contents on disk today will get "
+                    "their own proof"
+                    if entry.ots_state == "pending"
                     else ""
                 )
                 print(
-                    f"[{args.relpath}] PROOF PREDATES THIS VERSION — the file matches its current "
-                    f"recorded baseline, and the stored proof is the one Cairn placed for an "
-                    f"earlier version of it{pending_clause}. This is NOT evidence against the "
-                    f"current file",
+                    f"[{args.relpath}] PROOF COMMITS TO THE PREVIOUSLY RECORDED FINGERPRINT — the "
+                    f"file matches its current recorded baseline, and the .ots stored for it "
+                    f"commits to {recorded_proof_sha}, the fingerprint Cairn previously recorded "
+                    f"for this file, not to the current one. That is all this check established: "
+                    f"the proof's Bitcoin attestations were not validated here{pending_clause}. "
+                    f"This is NOT evidence against the current file",
                     file=sys.stderr,
                 )
                 return 1
@@ -434,6 +446,8 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                     f"[{args.relpath}] PROOF PREDATES THIS VERSION — the file matches its current "
                     f"recorded baseline, but the stored proof commits to different bytes; the "
                     f"proof predates this version of the file and a re-stamp is still pending. "
+                    f"Cairn has no record of which fingerprint the proof it placed here commits "
+                    f"to, and did not validate that proof's Bitcoin attestations here. "
                     f"This is NOT evidence against the current file",
                     file=sys.stderr,
                 )

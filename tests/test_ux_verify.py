@@ -600,6 +600,11 @@ def test_a_disagreement_in_the_restamp_window_reads_as_a_proof_that_predates_the
     assert "It is not evidence against the current file." in html
     assert "verdict--warn" in html
     assert "verdict--danger" not in html
+    # ...and it does not vouch for the older proof while doing so: nothing on this path validated
+    # it, so "the older proof keeps covering the earlier version" was a promise about an artifact
+    # this check never looked at.
+    assert "keeps covering" not in html
+    assert "did not validate that proof's Bitcoin attestations" in html
     # Neither accusation: not the file, and not the proof.
     assert "has changed since it was stamped" not in html
     assert "may be corrupted" not in html

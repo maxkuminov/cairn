@@ -1252,7 +1252,14 @@ async def test_upgrade_leaves_recorded_provenance_and_unreadable_proofs_alone(
 LIVE = _sha(b"hello")  # the on-disk bytes every blame fixture below uses
 
 
-async def _seed_for_blame(root: Path, *, ots_digest: str | None, baseline: str = LIVE) -> int:
+async def _seed_for_blame(
+    root: Path,
+    *,
+    ots_digest: str | None,
+    baseline: str = LIVE,
+    status: str = "ok",
+    ots_state: str = "complete",
+) -> int:
     from src.database import get_sessionmaker
     from src.models.db import FileEntry
 
@@ -1267,8 +1274,8 @@ async def _seed_for_blame(root: Path, *, ots_digest: str | None, baseline: str =
                 relpath="doc.txt",
                 size=5,
                 sha256=baseline,
-                status="ok",
-                ots_state="complete",
+                status=status,
+                ots_state=ots_state,
                 ots_path=str(root.parent / "p" / "doc.txt.ots"),
                 ots_digest=ots_digest,
                 ots_stamped_at=now,
@@ -1280,7 +1287,9 @@ async def _seed_for_blame(root: Path, *, ots_digest: str | None, baseline: str =
     return cid
 
 
-def _panel_blame(cairn_env, monkeypatch, *, ots_digest, result):
+def _panel_blame(
+    cairn_env, monkeypatch, *, ots_digest, result, status="ok", ots_state="complete"
+):
     """POST /verify with `ots.verify` stubbed; return the rendered card."""
     from fastapi.testclient import TestClient
 
@@ -1288,7 +1297,11 @@ def _panel_blame(cairn_env, monkeypatch, *, ots_digest, result):
     from src.main import app
     from src.services import ots as ots_svc
 
-    asyncio.run(_seed_for_blame(cairn_env / "vault", ots_digest=ots_digest))
+    asyncio.run(
+        _seed_for_blame(
+            cairn_env / "vault", ots_digest=ots_digest, status=status, ots_state=ots_state
+        )
+    )
     database.reset_engine()
     monkeypatch.setattr(ots_svc, "verify", lambda *a, **k: result)
     with TestClient(app) as client:
@@ -1303,7 +1316,7 @@ def _panel_blame(cairn_env, monkeypatch, *, ots_digest, result):
 _CLI_BLAME_SEQ = iter(range(1, 100))
 
 
-def _cli_blame(cairn_env, capsys, *, ots_digest, result):
+def _cli_blame(cairn_env, capsys, *, ots_digest, result, status="ok", ots_state="complete"):
     """Run `cairn verify` over a freshly seeded collection; return (rc, stdout+stderr).
 
     Each call seeds its OWN collection (the CLI refuses a bare `verify` once more than one exists),
@@ -1315,7 +1328,11 @@ def _cli_blame(cairn_env, capsys, *, ots_digest, result):
     from src.services import ots as ots_svc
 
     name = f"vault{next(_CLI_BLAME_SEQ)}"
-    asyncio.run(_seed_for_blame(cairn_env / name, ots_digest=ots_digest))
+    asyncio.run(
+        _seed_for_blame(
+            cairn_env / name, ots_digest=ots_digest, status=status, ots_state=ots_state
+        )
+    )
     database.reset_engine()
     real = ots_svc.verify
     ots_svc.verify = lambda *a, **k: result
@@ -1344,7 +1361,15 @@ def test_panel_blame_with_provenance_for_these_bytes(cairn_env, monkeypatch):
 def test_panel_blame_established_stale_needs_the_proof_to_be_the_recorded_one(
     cairn_env, monkeypatch
 ):
-    """2.23: `ots_digest != live` AND the parsed proof IS the recorded one ⇒ `proof-stale`."""
+    """2.23: `ots_digest != live` AND the parsed proof commits to the recorded one ⇒ `proof-stale`.
+
+    And the card says only what that comparison establishes. Matching digests are NOT artifact
+    identity — any `.ots` built over the same earlier bytes commits to the same digest, so a
+    fabricated or unanchored proof dropped at this path passes the same test — and no attestation
+    was validated: the ladder exits on the digest disagreement first. Claiming "this is the proof
+    Cairn placed" or that it "keeps covering" the earlier version would launder exactly that
+    substitution into a reassurance.
+    """
     earlier = _sha(b"an earlier version")
     html = _panel_blame(
         cairn_env,
@@ -1352,10 +1377,52 @@ def test_panel_blame_established_stale_needs_the_proof_to_be_the_recorded_one(
         ots_digest=earlier,
         result=_verify_result(digest_mismatch=True, proof_digest=earlier),
     )
-    assert "Proof predates this version of the file" in html
+    assert "Proof commits to the previously recorded fingerprint" in html
+    assert "commits to the fingerprint Cairn previously recorded for this file" in html
+    assert "Bitcoin attestations were not validated here" in html
     assert "not evidence against the current file" in html
+    assert "verdict--warn" in html and "verdict--danger" not in html
+    # The claims the check did not establish, on either artifact:
+    assert "the proof Cairn placed" not in html
+    assert "keeps covering" not in html
     # No re-stamp is queued on this row, so the card must not claim one is.
     assert "a re-stamp is still pending" not in html
+    assert "A re-stamp is queued" not in html
+
+
+def test_panel_established_stale_takes_its_pending_clause_from_the_proof_state(
+    cairn_env, monkeypatch
+):
+    """The pending clause is a fact about the ROW's proof state, not about its status.
+
+    A `perfile` collection switched to `ots_mode="none"` after a modification sits at
+    `status="modified"`, `ots_state="complete"` forever: nothing is queued and nothing ever will
+    be. The status-derived heuristic promised that operator a re-stamp that will never run — on the
+    page they opened to find out where their evidence stands.
+    """
+    earlier = _sha(b"an earlier version")
+    stale = _verify_result(digest_mismatch=True, proof_digest=earlier)
+
+    # Stamping disabled after the change: `modified`, but nothing queued.
+    html = _panel_blame(
+        cairn_env, monkeypatch, ots_digest=earlier, result=stale,
+        status="modified", ots_state="complete",
+    )
+    assert "Proof commits to the previously recorded fingerprint" in html
+    assert "A re-stamp is queued" not in html
+    assert "Re-stamp the file if you want a proof over the bytes on disk today" in html
+
+
+def test_panel_established_stale_does_claim_a_restamp_when_one_is_queued(cairn_env, monkeypatch):
+    """The other half: `ots_state="pending"` is a queued re-stamp, and the card may say so."""
+    earlier = _sha(b"an earlier version")
+    html = _panel_blame(
+        cairn_env, monkeypatch, ots_digest=earlier,
+        result=_verify_result(digest_mismatch=True, proof_digest=earlier),
+        status="modified", ots_state="pending",
+    )
+    assert "Proof commits to the previously recorded fingerprint" in html
+    assert "A re-stamp is queued" in html
 
 
 def test_panel_abc_case_is_not_reported_as_staleness(cairn_env, monkeypatch):
@@ -1419,8 +1486,13 @@ def test_cli_blame_matches_the_panel_on_all_three_readings(cairn_env, capsys):
         cairn_env, capsys, ots_digest=earlier,
         result=_verify_result(digest_mismatch=True, proof_digest=earlier),
     )
-    assert rc == 1 and "PROOF PREDATES THIS VERSION" in out
-    assert "a re-stamp is still pending" not in out
+    assert rc == 1 and "PROOF COMMITS TO THE PREVIOUSLY RECORDED FINGERPRINT" in out
+    assert "Bitcoin attestations were not validated here" in out
+    assert "NOT evidence against the current file" in out
+    # The identity and validity claims the digest comparison does not support:
+    assert "the proof Cairn placed for an earlier version" not in out
+    assert "PROOF PREDATES THIS VERSION" not in out
+    assert "a re-stamp is queued" not in out
 
     rc, out = _cli_blame(
         cairn_env, capsys, ots_digest=None,
@@ -1444,3 +1516,23 @@ def test_cli_abc_case_and_missing_parsed_digest(cairn_env, capsys):
     )
     assert rc == 1 and "PROOF DOES NOT MATCH THIS FILE" in out
     assert "PROOF PREDATES THIS VERSION" not in out
+
+
+def test_cli_established_stale_takes_its_pending_clause_from_the_proof_state(cairn_env, capsys):
+    """Mirrors the panel: `modified` + nothing queued must not promise a re-stamp."""
+    earlier = _sha(b"an earlier version")
+    stale = _verify_result(digest_mismatch=True, proof_digest=earlier)
+
+    rc, out = _cli_blame(
+        cairn_env, capsys, ots_digest=earlier, result=stale,
+        status="modified", ots_state="complete",
+    )
+    assert rc == 1 and "PROOF COMMITS TO THE PREVIOUSLY RECORDED FINGERPRINT" in out
+    assert "a re-stamp is queued" not in out
+
+    rc, out = _cli_blame(
+        cairn_env, capsys, ots_digest=earlier, result=stale,
+        status="modified", ots_state="pending",
+    )
+    assert rc == 1 and "PROOF COMMITS TO THE PREVIOUSLY RECORDED FINGERPRINT" in out
+    assert "a re-stamp is queued" in out

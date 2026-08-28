@@ -1034,6 +1034,28 @@ def test_review_page_lists_missing_file_with_story_and_recovery(cairn_env):
         assert "Rewrites your baseline" in body
 
 
+def test_review_recovery_copy_matches_what_a_changed_restore_actually_does(cairn_env):
+    """The recovery guidance describes the scanner's real composition, not an invented one.
+
+    A file that comes back with different bytes ACKNOWLEDGES its now-obsolete `missing` event in
+    the same transaction and opens a `restored_changed` one in its place. The page used to tell the
+    operator the new alert was raised "instead of clearing the old one" — so someone who restored a
+    truncated file would go looking for a stale missing alert that the scan had already closed, on
+    the page whose whole job is telling them where they stand.
+    """
+    root = cairn_env / "photos"
+    root.mkdir()
+
+    async def seed():
+        cid = await _seed_collection(root)
+        await _seed_missing_with_event(cid, "2019/IMG_4421.jpg")
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/collection/1/review").text
+        assert "closes the now-obsolete <em>missing</em> alert and replaces it with a new" in body
+        assert "instead of clearing the old one" not in body
+
+
 def test_dashboard_issue_count_links_to_review(cairn_env):
     root = cairn_env / "photos"
     root.mkdir()

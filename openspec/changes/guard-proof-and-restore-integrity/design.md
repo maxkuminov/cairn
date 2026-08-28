@@ -592,8 +592,9 @@ recorded placing" branch is evaluated **first**, before any staleness reading. E
 first is the A/B/C false reassurance the round-1 audit found — recorded provenance `A`, live and
 baseline `B`, and an on-disk proof committing to `C`. `ots_digest` (`A`) ≠ live (`B`) is true, so a
 staleness-first ladder reports "this is simply an older proof of your file", when in fact the `.ots`
-at that path is neither the recorded proof nor this file's proof. Staleness may only be concluded
-once the on-disk proof has been shown to **be** the recorded proof.
+at that path is neither the recorded proof nor this file's proof. The staleness reading is reachable
+only once the on-disk proof has been shown to commit to exactly the recorded provenance — and even
+then it establishes only *which digest that artifact commits to* (see "what row 5 may claim" below).
 
 | # | condition (evaluated in order) | blame | reading |
 |---|---|---|---|
@@ -601,7 +602,7 @@ once the on-disk proof has been shown to **be** the recorded proof.
 | 2 | live ≠ recorded baseline | `file` | unchanged |
 | 3 | live == baseline, `ots_digest` known, `proof_digest` known and ≠ `ots_digest` | `proof` | the `.ots` at this path is **not the proof Cairn recorded placing** — corrupted, swapped or misfiled. Established. **This is the first provenance branch.** |
 | 4 | live == baseline, `ots_digest` == live | `proof` | Cairn recorded placing a proof for **these** bytes and the stored proof disagrees with them ⇒ the same conclusion, reachable without a parsed `proof_digest` (a digest mismatch already establishes proof ≠ live == `ots_digest`) |
-| 5 | live == baseline, `ots_digest` known and ≠ live, `proof_digest` known and **==** `ots_digest` | `proof-stale` | the on-disk proof **is** the proof Cairn recorded placing, and it was made from earlier bytes ⇒ it predates this version. Established, no `pending`/status heuristic needed |
+| 5 | live == baseline, `ots_digest` known and ≠ live, `proof_digest` known and **==** `ots_digest` | `proof-stale` | the `.ots` at this path commits to the digest Cairn recorded for the proof it placed here — i.e. to the file's **previously recorded fingerprint**, not its current one. Established without the `pending`/status heuristic. **Nothing more than that**: not artifact identity, not validity |
 | 6 | live == baseline, `ots_digest` known and ≠ live, `proof_digest` **unknown** | fall through to row 7 | nothing was parsed, so neither "swapped" nor "stale" is established; asserting staleness here is the A/B/C error with the evidence merely absent instead of contradictory |
 | 7 | live == baseline, `ots_digest` NULL | `proof-stale` if a re-stamp is owed, else `proof` (undecidable wording) | **unchanged** — sprint 1's heuristic, for legacy rows |
 
@@ -618,8 +619,39 @@ Two copy consequences:
   not claim anything about the **file**, whose bytes match their baseline.
 - The `proof-stale` verdict's *"a re-stamp is pending"* clause is only true when one is. With
   provenance the stale case can be established while nothing is queued (e.g. a collection switched
-  from `perfile` to `none` after a modification, so the scan never set `pending`). The copy states
-  the staleness always and the pending re-stamp only when the row says so.
+  from `perfile` to `none` after a modification, so the scan never set `pending` — the row then sits
+  at `status="modified"`, `ots_state="complete"` indefinitely and nothing will ever stamp it). The
+  copy states the staleness always, and the pending re-stamp **strictly from `ots_state ==
+  "pending"`**. The `modified`/`new` status heuristic survives only in the NULL-provenance legacy
+  branch (row 7), where it is the only signal that the row is in the re-stamp window at all.
+
+### What row 5 may claim — and why it is not "the proof Cairn placed"
+
+Round-2 audit finding, folded in here rather than in the code alone. `proof_digest == ots_digest`
+compares **digests**, and a digest identifies bytes, not an artifact. Any `.ots` built over the same
+earlier bytes — including a fabricated, unanchored or deliberately substituted one dropped into the
+proof store — commits to the same digest and satisfies row 5 identically. And the ladder is only
+reached *because* verification exited on the digest disagreement, which happens **before** any
+`BitcoinBlockHeaderAttestation` is checked against a real block: nothing on this path validated the
+proof at all.
+
+So the earlier wording — "the stored proof is the one Cairn placed for an earlier version", "the
+older proof keeps covering the earlier version" — asserted two things row 5 does not establish
+(artifact identity, continued good standing), and asserted them precisely where a swapped proof
+would produce them. That is the laundering path: substitute a bogus `.ots` over the old bytes and
+the panel calls it the operator's own good proof. Both surfaces now say only:
+
+> the proof at this path commits to the fingerprint previously recorded for this file, not to the
+> current one; its Bitcoin attestations were **not** validated in this check.
+
+**Why not simply validate the anchors here.** Verifying row 5's attestations would mean an extra
+explorer round-trip (or node RPC) on every stale verify, on the request path of a panel page, to
+answer a question the operator did not ask — they asked about the *file*, and the file is fine. The
+verdict is amber either way, and no action changes. The honest claim is the fix; validating the old
+proof is a separate feature (a "check this superseded proof" affordance), not a silent tax on every
+verify. Recording a fingerprint **of the `.ots` artifact itself** at placement time would settle
+identity cheaply and is the natural next step if that affordance is ever built — deliberately not
+taken here, because it is a schema change in a sprint whose point was to stop overclaiming.
 
 `proof_digest` is displayed nowhere new; it exists to make the attribution provable.
 

@@ -135,7 +135,8 @@
       <strong>Scan now</strong> on the collection to check what you restored: each returned file is
       re-read and compared against the fingerprint Cairn recorded before it went missing. Files that
       match are cleared; a file whose contents differ — the wrong snapshot, a truncated restore —
-      raises a new <em>came back changed</em> alert instead of clearing the old one. Or
+      closes the now-obsolete <em>missing</em> alert and replaces it with a new
+      <em>came back changed</em> alert. Or
       <strong>Accept all changes</strong> to stop tracking what's gone for good.
       {# Point at a route that exists: `cairn status` is not implemented, and the filtered file
          browser (already linked at the foot of the list) is where the full set actually lives. #}
@@ -149,7 +150,8 @@
         <li>Run <strong>Scan now</strong> on the collection page. Every file that reappeared is re-read
           and compared against the fingerprint recorded before it went missing: a file whose contents
           match flips back to <em>restored / OK</em>; a file whose contents differ is flagged
-          <em>came back changed</em> and raises a new alert — check that one before you trust it.</li>
+          <em>came back changed</em>, which closes the obsolete <em>missing</em> alert and raises a
+          new one in its place — check that one before you trust it.</li>
         <li>For anything you don't want back, <strong>Accept all changes</strong> to clear it from tracking.</li>
       </ol>
     </details>

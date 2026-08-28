@@ -142,10 +142,17 @@ artifact the operator is asking about:
   established even where the stored proof's own committed digest is unavailable: the system recorded
   placing a proof for exactly these bytes, and the proof at that path disagrees with them;
 - where the recorded provenance **differs** from the live digest **and** the stored proof's committed
-  digest is known to **equal** that recorded provenance — so the proof at that path is the one the
-  system recorded placing, made from earlier bytes — the command SHALL report **as established** that
-  the proof predates this version of the file, and that this is not evidence against the current
-  file. It SHALL state that a re-stamp is pending only where the record actually says one is owed;
+  digest is known to **equal** that recorded provenance, the command SHALL report **only what that
+  comparison established**: that the stored proof commits to the fingerprint previously recorded for
+  this file rather than to its current one, that this is not evidence against the current file, and —
+  explicitly — that the proof's Bitcoin attestations were **not** validated in this check. It SHALL
+  NOT report that artifact as the proof the system placed, nor as still covering or attesting the
+  earlier version: a committed digest identifies bytes, not an artifact, so any `.ots` built over the
+  same earlier bytes — fabricated, unanchored or substituted — satisfies the comparison identically,
+  and verification exits on the digest disagreement before any attestation is checked. It SHALL state
+  that a re-stamp is pending only where the file record's **proof state** says one is queued, never
+  from the file's status, which stays `modified` indefinitely in a collection whose stamping has since
+  been turned off;
 - where the recorded provenance differs from the live digest but the stored proof's committed digest
   is **not** available, neither of those findings is established and the command SHALL fall back to
   the wording used where no provenance is recorded. It SHALL NOT report the proof as predating this
@@ -200,14 +207,24 @@ wording.
   for this file, SHALL NOT print its changed-file wording, and SHALL NOT offer the
   proof-predates-this-version explanation
 
-#### Scenario: Recorded provenance establishes that the proof predates this version
+#### Scenario: Recorded provenance establishes which fingerprint the stored proof commits to
 
 - **WHEN** `cairn verify` receives a digest disagreement for a file whose live bytes still hash to
   the digest Cairn recorded for it, whose recorded proof provenance differs from that digest, and
   whose stored proof commits to exactly that recorded provenance
-- **THEN** the command SHALL report as established that the proof predates this version of the file,
-  SHALL state that this is not evidence against the current file, and SHALL claim a re-stamp is
-  pending only if the record says one is owed
+- **THEN** the command SHALL report that the stored proof commits to the fingerprint previously
+  recorded for this file rather than to its current one, SHALL state that its Bitcoin attestations
+  were not validated in this check, SHALL state that this is not evidence against the current file,
+  and SHALL NOT describe that artifact as the proof Cairn placed or as still covering the earlier
+  version
+
+#### Scenario: An established staleness reading claims no re-stamp that is not queued
+
+- **WHEN** `cairn verify` receives such a result for a file whose record carries a stamping-complete
+  proof state and a modified status — a collection whose per-file stamping was turned off after the
+  modification
+- **THEN** the command SHALL NOT state that a re-stamp is pending or queued, and SHALL claim one only
+  where the file record's proof state says one is queued
 
 #### Scenario: A proof matching neither the file nor the record is not reported as merely old
 

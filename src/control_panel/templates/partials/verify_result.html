@@ -25,14 +25,27 @@
           {# The live bytes no longer hash to the fingerprint Cairn recorded at the last scan, so
              the FILE moved. No claim is made about the proof: nothing validated it in this check. #}
           <span class="mono">{{ filename }}</span>'s bytes are not the bytes Cairn recorded for this file, and not the bytes this proof was made from &mdash; the file has changed since it was stamped. This check did not validate the proof itself, so it says nothing about whether the proof is still good.
+        {% elif mismatch_blame == "proof-stale" and proof_provenance %}
+          {# What the check actually compared: the digest the .ots at this path commits to, against
+             the digest Cairn recorded for the proof it placed there. Equal ⇒ that file commits to
+             this file's PREVIOUSLY recorded fingerprint. That is the whole finding. It is NOT
+             "this is the proof Cairn placed" (any .ots over the same earlier bytes has the same
+             committed digest, so a substituted one satisfies the test) and it is NOT "the proof is
+             still good" (verification exits on the digest disagreement before any attestation is
+             checked, so nothing about Bitcoin was validated here). Claiming either would let a
+             swapped proof launder itself into a reassurance on the one page an operator opens to
+             ask whether their evidence is sound. The "a re-stamp is queued" clause comes from the
+             row's own proof state, never from its status: a collection switched to ots_mode="none"
+             stays `modified` forever with nothing queued (design D7). #}
+          <span class="mono">{{ filename }}</span> matches its current recorded baseline. The proof stored at this path commits to the fingerprint Cairn previously recorded for this file, not to the current one &mdash; that is all this check established. <strong>Its Bitcoin attestations were not validated here</strong>, so nothing was confirmed about that proof itself. <strong>It is not evidence against the current file.</strong> {% if restamp_owed %}A re-stamp is queued: once it runs, the contents on disk today will get their own proof.{% else %}Re-stamp the file if you want a proof over the bytes on disk today.{% endif %}
         {% elif mismatch_blame == "proof-stale" %}
-          {# The stored proof was made from the previous version of this file. With recorded
-             provenance that is ESTABLISHED (the .ots on disk is the proof Cairn placed, and it
-             commits to earlier bytes); without it, it is sprint 1's reading of a row that says a
-             re-stamp is owed. Calling either corrupt would accuse a perfectly good proof of the
-             ordinary consequence of editing a file. The "a re-stamp is still pending" clause is
-             only true when one actually is (design D7). #}
-          <span class="mono">{{ filename }}</span> matches its current recorded baseline, but the stored proof commits to different bytes &mdash; the proof predates this version of the file{% if restamp_owed %} and a re-stamp is still pending{% endif %}. <strong>It is not evidence against the current file.</strong> {% if restamp_owed %}Once the re-stamp completes, the new proof will cover the bytes on disk today; the older proof keeps covering the earlier version.{% else %}Re-stamp the file if you want a proof over the bytes on disk today; the older proof keeps covering the earlier version.{% endif %}
+          {# Legacy row, no recorded provenance: sprint 1's reading of a row that says a re-stamp is
+             owed (this branch is unreachable unless one is), kept verbatim apart from dropping the
+             claim that the older proof "keeps covering" the earlier version — nothing here
+             validated that proof, so its continued good standing is not Cairn's to promise. Calling
+             it corrupt would be the opposite error: accusing a perfectly good proof of the ordinary
+             consequence of editing a file. #}
+          <span class="mono">{{ filename }}</span> matches its current recorded baseline, but the stored proof commits to different bytes &mdash; the proof predates this version of the file and a re-stamp is still pending. <strong>It is not evidence against the current file.</strong> Cairn has no record of which fingerprint the proof it placed here commits to, and this check did not validate that proof's Bitcoin attestations. Once the re-stamp completes, the contents on disk today will get their own proof.
         {% elif mismatch_blame == "proof" and proof_provenance %}
           {# ESTABLISHED, not a guess: Cairn recorded which digest the proof it placed at this path
              commits to, and the .ots there does not match that record. A positive finding about the

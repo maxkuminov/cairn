@@ -83,10 +83,20 @@ false reassurance on the very page an operator opens to ask whether their eviden
   established finding even where the digest the stored proof commits to is unavailable: the system
   recorded placing a proof for exactly these bytes and the proof at that path disagrees with them;
 - where the recorded provenance **differs** from the live digest **and** the stored proof is known
-  to commit to exactly that recorded provenance — so the proof at that path is the one the system
-  recorded placing, made from earlier bytes — the panel SHALL report as established that the proof
-  **predates this version** of the file and SHALL state that this is not evidence against the
-  current file. It SHALL claim a re-stamp is pending only where the record indicates one is owed;
+  to commit to exactly that recorded provenance, the panel SHALL report **only what that comparison
+  established**: that the proof stored at this path commits to the fingerprint previously recorded
+  for this file rather than to its current one, that this is not evidence against the current file,
+  and — explicitly — that the proof's Bitcoin attestations were **not** validated in this check.
+  It SHALL NOT report that artifact as the proof the system placed, nor that it still covers,
+  attests or is good evidence for the earlier version. A committed digest identifies bytes, not an
+  artifact: any `.ots` built over the same earlier bytes commits to the same digest, so a
+  fabricated, unanchored or substituted proof dropped at that path satisfies the comparison exactly
+  as the real one does, and verification exits on the digest disagreement before any attestation is
+  checked. Asserting identity or continued good standing there would launder a swapped proof into a
+  reassurance on the one page an operator opens to ask whether their evidence is sound. It SHALL
+  claim a re-stamp is pending only where the file record's **proof state** says one is queued —
+  never from the file's status, which stays `modified` forever in a collection whose stamping has
+  since been turned off;
 - where the recorded provenance differs from the live digest but the digest the stored proof commits
   to is **not** available, neither finding is established: the panel SHALL fall back to the wording
   it uses where no provenance is recorded, and SHALL NOT report the proof as predating this version
@@ -351,14 +361,23 @@ asserting a fixed backend.
   this file, SHALL NOT say the file's bytes changed, and SHALL NOT offer the
   proof-predates-this-version explanation
 
-#### Scenario: Recorded provenance establishes that the proof predates this version
+#### Scenario: Recorded provenance establishes which fingerprint the stored proof commits to
 
 - **WHEN** the panel verifies a file whose live bytes still hash to the digest Cairn recorded for it,
   whose recorded proof provenance differs from that digest, and whose stored proof commits to exactly
   that recorded provenance
-- **THEN** the panel SHALL report as established that the proof predates this version of the file,
-  SHALL state that this is not evidence against the current file, and SHALL claim a re-stamp is
-  pending only if the record indicates one is owed
+- **THEN** the panel SHALL report that the stored proof commits to the fingerprint previously
+  recorded for this file rather than to its current one, SHALL state that its Bitcoin attestations
+  were not validated in this check, SHALL state that this is not evidence against the current file,
+  and SHALL NOT describe that artifact as the proof Cairn placed or as still covering the earlier
+  version
+
+#### Scenario: An established staleness reading claims no re-stamp that is not queued
+
+- **WHEN** the panel verifies such a file whose record carries a stamping-complete proof state and a
+  modified status — a collection whose per-file stamping was turned off after the modification
+- **THEN** the panel SHALL NOT state that a re-stamp is pending or queued, and SHALL claim one only
+  where the file record's proof state says one is queued
 
 #### Scenario: A proof matching neither the file nor the record is not shown as merely old
 
@@ -459,7 +478,11 @@ alerts it describes a situation the page itself then contradicts.
 **Recovery guidance SHALL describe the check the scan actually performs, and both of its outcomes.**
 A restored file is compared against the digest recorded for it, so the guidance SHALL say that a
 rescan returns a file to a healthy state **only where the restored bytes match what was recorded**,
-and that a file which comes back different raises a **new** alert rather than clearing the old one.
+and that a file which comes back different **closes the now-obsolete missing alert and replaces it
+with a new "came back changed" alert**. It SHALL NOT say that the new alert is raised *instead of*
+clearing the old one: the scan acknowledges the missing event in the same transaction, so an
+operator sent looking for a still-open missing alert is sent after something the scan already
+closed.
 It SHALL NOT tell the operator that restoring a file and rescanning returns it to a healthy state
 unconditionally, and SHALL NOT describe a set of restored files as matching what was recorded unless
 that comparison established it. Promising a verification the product does not perform is the failure
@@ -470,7 +493,8 @@ same failure with a smaller blast radius.
 
 - **WHEN** the review view renders its recovery guidance
 - **THEN** it SHALL state that a restored file returns to a healthy state only where its bytes match
-  the digest recorded for it, and that a file restored with different bytes raises a new alert
+  the digest recorded for it, and that a file restored with different bytes closes its obsolete
+  missing alert and raises a new "came back changed" alert in its place
 
 #### Scenario: The restored-alerts card does not assert an unperformed match
 

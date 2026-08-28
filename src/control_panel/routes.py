@@ -1920,8 +1920,10 @@ async def verify_run(
     # produces the A/B/C false reassurance — recorded provenance `A`, live == baseline `B`, an
     # on-disk proof committing to a third digest `C`: `ots_digest != live` holds, so it would report
     # "simply an older proof of your file" about an `.ots` that is neither the recorded proof nor
-    # this file's proof. Staleness may only be concluded once the on-disk proof has been shown to BE
-    # the recorded proof (`proof_digest == ots_digest`).
+    # this file's proof. The staleness reading is reachable only once the on-disk proof has been shown
+    # to commit to exactly the recorded provenance (`proof_digest == ots_digest`) — and even then it
+    # establishes only WHICH DIGEST that `.ots` commits to, never that it is the artifact Cairn
+    # wrote nor that its attestations are good (design D7).
     #
     # With NO recorded provenance (a legacy row) nothing changes: a scan overwrites `files.sha256`
     # with the newly observed bytes BEFORE a replacement proof exists, so in the
@@ -1935,11 +1937,18 @@ async def verify_run(
     live_sha = (digest or "").strip().lower()
     recorded_proof_sha = (fe.ots_digest or "").strip().lower()
     parsed_proof_sha = ((result.proof_digest if result else None) or "").strip().lower()
-    # Whether a re-stamp is actually owed. With provenance, staleness can be established while
-    # nothing is queued (a collection switched to `ots_mode='none'` after a modification), so the
-    # "a re-stamp is pending" clause must be conditional on the row rather than implied by the
-    # verdict.
-    restamp_owed = fe.ots_state == "pending" or fe.status in ("modified", "new")
+    # Whether a re-stamp is actually owed. Two different questions, deliberately not one variable:
+    #
+    #   * `restamp_heuristic` — sprint 1's reading of a row with NO recorded provenance. There,
+    #     `modified`/`new` is the only signal that the row is in the re-stamp window at all, and it
+    #     is what selects the legacy staleness wording. Unchanged.
+    #   * `restamp_owed` — what the CARD is allowed to claim. With provenance, staleness is
+    #     established from the digests alone, and a `modified` status no longer implies a queued
+    #     re-stamp: a `perfile` collection switched to `ots_mode="none"` after a modification sits
+    #     at `status="modified"`, `ots_state="complete"` forever and nothing will ever stamp it.
+    #     Promising "a re-stamp is still pending" there is a promise the deployment cannot keep, so
+    #     with provenance the clause comes strictly from `ots_state == "pending"`.
+    restamp_heuristic = fe.ots_state == "pending" or fe.status in ("modified", "new")
     mismatch_blame = None
     # Whether the verdict rests on RECORDED provenance (an established finding) or on sprint 1's
     # heuristic (explicitly undecidable). The two get different copy.
@@ -1957,15 +1966,24 @@ async def verify_run(
             # disagrees with them. Reachable without a parsed digest.
             mismatch_blame, proof_provenance = "proof", True
         elif recorded_proof_sha and parsed_proof_sha == recorded_proof_sha:
-            # D7 row 5 — the on-disk proof IS the recorded proof, made from earlier bytes.
+            # D7 row 5 — the on-disk proof commits to the digest Cairn recorded for the proof it
+            # placed here, i.e. to the file's PREVIOUSLY recorded fingerprint. That is a fact about
+            # which digest the artifact commits to, and nothing more: digest equality is not
+            # artifact identity (any `.ots` over the same bytes matches), and no attestation was
+            # validated on this path — the ladder exits on the digest disagreement first. The copy
+            # on both surfaces states exactly that and no more (design D7).
             mismatch_blame, proof_provenance = "proof-stale", True
-        elif not recorded_proof_sha and restamp_owed:
+        elif not recorded_proof_sha and restamp_heuristic:
             # D7 row 7 — legacy heuristic, unchanged.
             mismatch_blame = "proof-stale"
         else:
             # D7 rows 6 and 7's fallback: provenance recorded but nothing parsed, or no provenance
             # at all and no re-stamp owed. Undecidable either way — never staleness.
             mismatch_blame = "proof"
+
+    # Only now that provenance is settled can the pending clause be derived: established staleness
+    # says nothing about whether a re-stamp is queued (design D7).
+    restamp_owed = (fe.ots_state == "pending") if proof_provenance else restamp_heuristic
 
     # Verdict by *reason*, in the order of design D2. Branching on the proof's lifecycle state
     # before asking why verification failed is what let a changed file read "pending confirmation".
@@ -1977,13 +1995,23 @@ async def verify_run(
         verdict = "danger"
         title = "File no longer matches its proof"
     elif mismatch_blame == "proof-stale":
-        # The stored proof was made from an earlier version of these bytes — established from the
-        # recorded provenance, or (legacy rows) inferred from the row saying a re-stamp is owed.
-        # Either way it is the expected state of that window, not a fault. Amber like the other
-        # "a stamp is owed" verdicts — red here would train the operator to dismiss the red card
-        # that means a real mismatch.
+        # The stored proof commits to the file's earlier fingerprint rather than to its current one
+        # — established from the recorded provenance, or (legacy rows) inferred from the row saying
+        # a re-stamp is owed. Either way it is the expected state of that window, not a fault. Amber
+        # like the other "a stamp is owed" verdicts — red here would train the operator to dismiss
+        # the red card that means a real mismatch.
+        #
+        # The two headlines differ because the two findings differ. With provenance the card may
+        # name only what was compared — which digest the `.ots` commits to — since neither the
+        # artifact's authorship nor its attestations were checked here; "predates" would smuggle in
+        # an age claim that a substituted proof over the same earlier bytes satisfies just as well.
+        # The legacy heuristic keeps sprint 1's wording verbatim.
         verdict = "warn"
-        title = "Proof predates this version of the file"
+        title = (
+            "Proof commits to the previously recorded fingerprint"
+            if proof_provenance
+            else "Proof predates this version of the file"
+        )
     elif mismatch_blame == "proof" and proof_provenance:
         # Established: the `.ots` at this path is not the proof Cairn recorded placing for these
         # bytes. A positive finding about the PROOF — and still no claim about the file, whose

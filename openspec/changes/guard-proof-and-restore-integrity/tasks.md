@@ -466,6 +466,51 @@ is scoped to the finding; none expands the change's scope.
   (`runs.heartbeat_at` + its migration scenario), `integrity-scanning` (the reaper requirement,
   rewritten around liveness), design "Crash-safety of the shuffle" and D10.
 
+## 4b. Post-audit hardening (adversarial Codex round 2 — 1 BLOCKER, 1 MAJOR, 2 MINOR)
+
+Round 2 found no defect in the scanner's classification or transaction ordering; every finding is
+about a **claim** the surfaces made that the check behind it did not establish. Same shape as round
+1 (evidence overstated rather than lost), scoped to the finding.
+
+- [x] 5.3g **B — the proof-stale reading asserted artifact identity and continued validity.**
+  `proof_digest == ots_digest` compares digests, and a digest identifies bytes, not an artifact: any
+  `.ots` over the same earlier bytes — fabricated, unanchored, substituted — satisfies it, and the
+  ladder is reached only because verification exited on the digest disagreement *before* checking any
+  attestation. "The stored proof is the one Cairn placed for an earlier version" and "the older proof
+  keeps covering the earlier version" therefore laundered a swapped proof into a reassurance. Both
+  surfaces now claim exactly what was compared — the proof at this path commits to the file's
+  previously recorded fingerprint, not its current one, and **its Bitcoin attestations were not
+  validated in this check** — with the amber verdict unchanged. Panel headline for the provenance
+  case becomes "Proof commits to the previously recorded fingerprint"; the CLI line becomes
+  `PROOF COMMITS TO THE PREVIOUSLY RECORDED FINGERPRINT`. The NULL-provenance legacy branch keeps
+  sprint 1's wording, minus the same "keeps covering" promise, plus the non-validation statement.
+  Anchor verification is deliberately **not** added here (design D7, "why not simply validate the
+  anchors"): an extra explorer round-trip per stale verify, on a panel request path, to answer a
+  question the operator did not ask and that changes no action. The honest claim is the fix.
+- [x] 5.3h **M — the pending clause came from `status`, not from the proof state.** With provenance,
+  staleness is established from the digests alone, so `status in ("modified","new")` no longer
+  implies a queued re-stamp: a `perfile` collection switched to `ots_mode="none"` after a
+  modification sits at `modified`/`complete` forever and nothing will ever stamp it. Both consumers
+  now derive the clause strictly from `ots_state == "pending"` when provenance is established; the
+  status heuristic survives **only** in the NULL-provenance legacy branch, where it is the only
+  signal that the row is in the re-stamp window at all.
+- [x] 5.3i **MINOR — the review page's recovery copy contradicted the scanner.** A changed restore
+  acknowledges the obsolete `missing` event in the same transaction, so "raises a new alert instead
+  of clearing the old one" sent the operator after an alert the scan had already closed. Both the
+  hint and step 3 of "How to recover" now say the missing alert is closed and replaced by a new
+  "came back changed" alert; the `web-panel` requirement and its scenario say the same.
+- [x] 5.3j **MINOR — `test_restored_changed.py`'s stamping stub no longer matched `stamp_pending`.**
+  The stub lacked the `settings` / `progress` parameters, so every per-file test reached `pending`
+  through a `TypeError` swallowed by the scanner's blanket `except` rather than through a successful
+  no-op — the post-scan tail could break for real and the suite would stay green. The stub now
+  mirrors the real signature (and drives the progress callback), and the fixture's teardown asserts
+  the scanner logged **no** stamp failure during the test.
+- [x] 5.3k Tests + specs updated to match: `test_proof_preservation.py` (softened established-stale
+  assertions, plus panel and CLI regressions for the `ots_mode="none"` mode-switch pending clause,
+  in both directions), `test_ux_verify.py` (the legacy branch no longer promises the old proof keeps
+  covering anything), `test_panel.py` (review recovery copy), and the `web-panel` /
+  `ots-notarization` deltas + design D7.
+
 ## 5. Gates
 
 - [x] 5.1 **`openspec-verifier` subagent** audits the implementation against the spec deltas.

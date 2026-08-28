@@ -12,6 +12,7 @@ Run from the repo root: ``PYTHONPATH=. pytest tests/test_restored_changed.py``
 from __future__ import annotations
 
 import hashlib
+import logging
 
 import pytest
 from sqlalchemy import select
@@ -70,13 +71,40 @@ def no_stamping(monkeypatch):
     ``scan_collection`` calls ``proofs.stamp_pending`` for a ``perfile`` collection, which would
     shell out to ``ots`` and hit a calendar. Stubbing it keeps ``ots_state='pending'`` observable —
     the queued-for-re-stamp assertion is the point.
+
+    The stub's signature must track the real ``stamp_pending`` exactly (``settings`` positional,
+    ``progress`` keyword). A stub that merely *looks* right raises ``TypeError`` at the call site,
+    which the scanner's blanket ``except`` around the stamp pass swallows: the tests would then
+    reach ``pending`` through a *failed* post-scan tail rather than a successful no-op, and would
+    keep passing if that tail broke for real. The teardown assertion below is what makes that
+    impossible — it fails the test if the scanner logged a stamp failure at all.
     """
     from src.services import proofs
 
-    async def _noop(session, collection):
+    async def _noop(session, collection, settings=None, *, progress=None):
+        if progress is not None:
+            await progress(0)  # exercise the heartbeat callback the real pass drives
         return 0
 
     monkeypatch.setattr(proofs, "stamp_pending", _noop)
+
+    swallowed: list[logging.LogRecord] = []
+
+    class _CatchStampFailures(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - trivial
+            swallowed.append(record)
+
+    handler = _CatchStampFailures(level=logging.ERROR)
+    logger = logging.getLogger("cairn.scanner")
+    logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+    assert not [r for r in swallowed if "stamp_pending" in r.getMessage()], (
+        "the scanner logged a stamp failure: the stub is not being called cleanly, so these "
+        "tests are observing a swallowed exception rather than the intended no-op"
+    )
 
 
 # --- the benign direction is untouched (task 3.9) -----------------------------------------------
