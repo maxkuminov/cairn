@@ -45,6 +45,15 @@ same population as the Open issues tile beside it (files that are missing or mod
 cannot disagree. That count SHALL be computed in one place and used by every render of the badge,
 including each out-of-band refresh, so a background scan keeps a long-open page's badge current.
 
+The dashboard's **last activity** tile summarises the newest finished run of **any** kind across the
+user's collections. It SHALL therefore name the operation it is describing — the collection and the
+kind of run (`scan`, `stamp`, `upgrade`) — and SHALL state that run's result whenever the result is
+anything other than a clean completion. It SHALL NOT describe every finished run as a scan: a
+`stamp` or `upgrade` run says nothing about when the files were last checked, and presenting one as
+a scan is the same false assurance in a smaller box. A `partial` run SHALL be named partial, a run
+that ended in `error` SHALL be named a failure, and an `interrupted` run SHALL be named neutrally
+(it is the routine record of a reclaimed claim, never an alarm).
+
 The dashboard tiles SHALL account for every tracked file, including files that are watched but not
 yet baselined, so that the total does not silently exceed the sum of the tiles that explain it.
 Status indicators SHALL use visually distinct icons for the "attention" and "alert" states.
@@ -115,6 +124,23 @@ Status indicators SHALL use visually distinct icons for the "attention" and "ale
 - **THEN** the dashboard SHALL show their count in its own tile, so the monitored-file total is
   accounted for by the tiles beside it
 
+#### Scenario: The last-activity tile names a non-scan run for what it is
+
+- **WHEN** the newest finished run across the user's collections is a `stamp` or an `upgrade` run
+- **THEN** the last-activity tile SHALL name that operation's kind and SHALL NOT describe it as a
+  scan
+
+#### Scenario: The last-activity tile names a partial or failed run
+
+- **WHEN** the newest finished run ended `partial` or `error`
+- **THEN** the tile SHALL state that result alongside the collection and the kind, rather than
+  presenting the run as a clean completion
+
+#### Scenario: The last-activity tile treats an interrupted run neutrally
+
+- **WHEN** the newest finished run ended `interrupted`
+- **THEN** the tile SHALL name it neutrally and SHALL NOT present it as a failure
+
 ## ADDED Requirements
 
 ### Requirement: Fleet-wide review of every collection's open issues
@@ -128,10 +154,13 @@ count of unreviewed events, and offer a link to that collection's own review vie
 missing files SHALL be listed before modified files. Groups SHALL be ordered worst-first (by missing
 count, then modified count, then name).
 
-Every number a group shows and every action a row authorises SHALL be derived from **one read** of
-that collection's review population — the same single-snapshot property the per-collection review
-view depends on, because a control authorised against a population the page did not display is the
-failure that guard exists to prevent.
+Every number a group shows, every action a row authorises **and the open-event state each row
+displays and acts on** SHALL be derived from **one read** of that collection's review population —
+the same single-snapshot property the per-collection review view depends on, because a control
+authorised against a population the page did not display is the failure that guard exists to
+prevent. In particular the row's open event SHALL come from that same read rather than from a second
+query: a scan or an acknowledgement committing between two reads would otherwise let a row's
+"mark reviewed" control and its accept fingerprint describe two different states of the same file.
 
 Each row SHALL offer the same **per-file** actions as the collection's own review view: marking the
 file's open event reviewed, and the scoped per-file accept, each carrying the fingerprint minted from
@@ -162,6 +191,14 @@ no collections at all.
 - **THEN** the page SHALL render one group per affected collection, each naming its collection and
   its missing/modified counts, with its rows listed missing-first
 
+#### Scenario: A row's event and its fingerprint come from the same read
+
+- **WHEN** an event is inserted or acknowledged for one of the listed files while the fleet-wide page
+  is being rendered
+- **THEN** the row's displayed reviewed state and the fingerprint its accept control carries SHALL
+  both describe the single population read that produced the row, and SHALL NOT be drawn from two
+  different snapshots
+
 #### Scenario: A row acts on one file without leaving the page's snapshot
 
 - **WHEN** the user accepts a single file from a fleet-wide review row
@@ -175,6 +212,15 @@ no collections at all.
 - **THEN** the request SHALL be refused without mutating anything, and the operator SHALL be
   returned to the fleet-wide page with the changed-since-loaded notice rather than to a different
   page
+
+#### Scenario: The return destination is chosen from a fixed set, never supplied
+
+- **WHEN** a per-file accept is submitted carrying a return-destination value that is not the
+  fleet-page literal — including an absolute URL to another host, a scheme-relative or
+  protocol-bearing string, or any other arbitrary text
+- **THEN** the request SHALL still perform exactly the same scoped, fingerprint-guarded accept, and
+  SHALL redirect to the collection's own review view; no supplied value SHALL ever become part of
+  the redirect target
 
 #### Scenario: No collection-spanning bulk verb is offered
 
@@ -213,6 +259,15 @@ The panel's health indicator SHALL be an interactive link to the collections lis
 never shown on a touch device and the panel hides the pill's hint at phone widths, which leaves a
 single word with no way to learn more.
 
+Every health figure the **panel** renders — the indicator's verdict, its count, and the per-card
+stale markers — SHALL be computed over the **current user's own collections** only. The indicator
+names a number and then sends the operator to a list where the collections behind that number are
+supposed to be identified; a fleet-global count rendered above an owner-scoped list is a number with
+no referent on the page it links to, which is the same "computes one thing, shows another" defect
+this indicator is being fixed for. The machine-facing `GET /healthz` endpoint SHALL remain
+fleet-global (see the app-runtime capability): it monitors the installation, and the two surfaces
+answer different questions.
+
 The indicator SHALL NOT assert a health verdict it has not computed. Before the first health poll of
 a page has answered, it SHALL render a neutral "checking" state; it SHALL NOT render a healthy state
 as a placeholder. There SHALL be exactly one health indicator implementation in the panel: no page
@@ -241,6 +296,19 @@ collection's identifier, so a card can be matched to its freshness without match
 - **WHEN** the operator follows the degraded health indicator to the collections list
 - **THEN** the stale collection's card SHALL carry a marker naming its scan as overdue
 
+#### Scenario: The panel's health is scoped to the viewer
+
+- **WHEN** another user's collection is stale in multi-user mode while every collection the viewer
+  owns is fresh
+- **THEN** the viewer's health indicator SHALL report healthy and none of the viewer's collection
+  cards SHALL carry a stale marker, while `/healthz` SHALL still report the installation degraded
+
+#### Scenario: A card is matched to its freshness by identity, not by name
+
+- **WHEN** two collections owned by different users share the same name and one of them is stale
+- **THEN** the stale marker SHALL appear only on the card of the collection whose identifier the
+  freshness record carries
+
 #### Scenario: No page shows a fabricated health status
 
 - **WHEN** the settings page's health-endpoint documentation is rendered
@@ -258,10 +326,14 @@ Because a skipped file may be one the datastore could not store at all, the samp
 as a diagnostic rendering of the offending names rather than as usable paths, and SHALL NOT be offered
 as a copyable path list.
 
-Scan freshness SHALL continue to be derived from **completed** scan runs only (`ok` or `partial`), so
-that a run which never finished cannot refresh the panel's "last scan" claim. Separately from that,
-where a collection's newest scan run ended `interrupted` or `error` more recently than its last
-completed scan, the panel SHALL disclose it.
+The panel's **"last scan"** claim SHALL continue to be derived from **completed** scan runs only
+(`ok` or `partial`), so that a run which never finished cannot refresh a statement about when the
+collection was last checked. This is deliberately narrower than dead-man's-switch freshness, which
+additionally honours a scan that is in flight and demonstrably alive (see the app-runtime
+capability): the switch answers "is this collection still being watched", while "last scan" answers
+"when did a scan last finish", and only the second may be refreshed by a run that has not finished.
+Separately from both, where a collection's newest scan run ended `interrupted` or `error` more
+recently than its last completed scan, the panel SHALL disclose it.
 
 An `interrupted` run SHALL be rendered **neutrally and never as a failure or an alarm**. It is the
 ordinary record of an operation claim that was abandoned and reclaimed — the routine outcome of

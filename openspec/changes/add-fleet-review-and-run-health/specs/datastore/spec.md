@@ -17,8 +17,10 @@ digests of a `restored_changed` file). `runs` SHALL carry an
 integer `moved` count and a nullable `heartbeat_at` timestamp recording when the run last reported
 progress, so that a claim held by a live process is distinguishable from one orphaned by a crash.
 `runs` SHALL additionally carry an integer `errors` count (default 0) and a nullable `error_sample`
-TEXT column holding a bounded JSON array of diagnostic renderings of the files the run skipped, so
-that a `partial` result is explainable rather than merely reported. The `files`, `runs`, and `events` tables SHALL reference their owning
+TEXT column holding a bounded, ASCII-only JSON array of diagnostic renderings of the files the run
+skipped — bounded in entry count, in per-entry size and in total serialized size — so that a
+`partial` result is explainable rather than merely reported, without letting a pathological set of
+filenames write an unbounded value into a diagnostic column. The `files`, `runs`, and `events` tables SHALL reference their owning
 collection through a `collection_id` foreign key. JSON-valued columns (`exclude_globs_json`,
 `alert_json`) SHALL be stored as TEXT. Deleting a collection SHALL cascade to its `files`, `runs`,
 and `events`.

@@ -70,7 +70,11 @@ already "N unreviewed" — sprint 1 shipped that half; this is the other half.
 
 `CollectionHealth` gains `id`; the pill becomes a link to `/collections` with a **visible** label
 ("Degraded · 2 collections" — visible, because touch never shows a `title`); each affected
-collection's card carries a **stale** marker naming its own state. `base.html`'s hardcoded green
+collection's card carries a **stale** marker naming its own state. The panel's health is computed
+**owner-scoped** (`compute_health(..., user_id=user.id)`) while `/healthz` stays fleet-global: a
+fleet count rendered above an owner-scoped `/collections` list would send user A to a page where the
+collection it named does not exist — this change's own defect class, manufactured by its fix (design
+**D5**). `base.html`'s hardcoded green
 pill is replaced by the shared partial in a neutral "Checking…" state — it must not assert *Healthy*
 before anything has been computed — and `settings.html`'s fake static Healthy pill is removed.
 
@@ -78,7 +82,17 @@ before anything has been computed — and `settings.html`'s fake static Healthy 
 
 Additive migration **0012** adds `runs.errors` and `runs.error_sample`; the scanner writes both;
 `_collection_view` exposes them; one shared macro renders the same honest line everywhere a scan
-result is shown: **"Last scan 2 h ago · partial — 3 files skipped"** with a capped path sample.
+result is shown: **"Last scan 2 h ago · partial — 3 files skipped"** with a bounded diagnostic
+sample (20 entries, 256 bytes each, 4 096 bytes serialized, ASCII-only, dropped entries counted —
+design **D6**). A run that skipped files also **logs** its count and that sample once at finalize,
+covering all three skip causes — two of which are silent today, which is what makes `0012`'s
+downgrade honest rather than lossy.
+
+The dashboard's **"last activity" tile** is included: it summarises the newest finished run of *any*
+kind and currently calls every one of them a "scan" with no result, so a `partial` scan, a failed
+scan, a reclaimed one and last night's `upgrade` pass all render identically to a clean scan. It
+becomes generic-and-correct — `Photos scan · partial`, `Max Docs upgrade` — rather than
+scan-shaped-and-wrong (design **D14**).
 
 `interrupted` gets its own, deliberately **neutral** rendering. Since the operation-claim lease
 landed, `interrupted` is what a *reclaimed abandoned claim* writes — the ordinary outcome of
@@ -124,9 +138,16 @@ implemented nearly all of it, and the live `web-panel` spec already requires it.
 
 - **No cross-collection mutation of any kind** — no fleet bulk accept, no fleet bulk acknowledge, no
   new fingerprint form scope. The dashboard's existing `POST /events/ack-all` is untouched.
-- **No change to `_collection_status`, `_alert_badge_count` or `compute_health`'s classification.**
-  A `partial` run still counts as a successful scan for freshness (it is one — the collection *was*
-  walked), and acknowledged-missing files still keep a collection red (#12 rejected fix 1).
+- **No change to `_collection_status` or `_alert_badge_count`.** A `partial` run still counts as a
+  completed scan for freshness (it is one — the collection *was* walked), and acknowledged-missing
+  files still keep a collection red (#12 rejected fix 1).
+- **`compute_health` *does* change**, in two specific ways, and this is deliberate (design **D13**;
+  an earlier draft of this proposal wrongly listed it as a non-goal). (1) Its `running` leg — the
+  fix for audit issue **#5**, which stops a long scan from ageing out its own freshness — is
+  **kept**, but gated on the run's claim actually being alive (`coalesce(heartbeat_at, started)`
+  within `RUN_HEARTBEAT_TIMEOUT_SECONDS`, the same test the reaper uses), so a crashed scanner's
+  leftover `running` row stops reading *fresh*. (2) It takes an optional `user_id`, so the panel can
+  scope it while `/healthz` does not. Nothing else about the classification moves.
 - **No alerting on `partial`.** Notifying an operator that a filename could not be encoded is a
   different product decision, and the alert channel is reserved for file-integrity alarms.
 - **No recovery panel / copy-paths on the fleet page.** Full paths are root-prefixed per collection;
@@ -144,15 +165,21 @@ implemented nearly all of it, and the live `web-panel` spec already requires it.
   `datastore` (1 MODIFIED), `app-runtime` (1 MODIFIED).
 - **Schema:** one additive Alembic revision, **0012** (head is `0011`): `runs.errors` (INTEGER NOT
   NULL DEFAULT 0) and `runs.error_sample` (TEXT NULL). No table rebuild, no CHECK change.
-- **Code:** `src/control_panel/routes.py` (new `/review` route; `dashboard`, `_event_feed`,
-  `ack_event`, `_collection_view`, `health_pill`, `collections_list`, `verify_run`),
-  `src/services/scheduler.py` (`CollectionHealth.id`), `src/services/scanner.py` (persist
+- **Code:** `src/control_panel/routes.py` (new `/review` route; `dashboard` incl. the last-activity
+  tile, `_event_feed`, `ack_event`, `_collection_view`, `health_pill`, `collections_list`,
+  `verify_run`), `src/services/scheduler.py` (`CollectionHealth.id`, `compute_health`'s `user_id`
+  scope and heartbeat-gated `running` leg), `src/services/scanner.py` (persist + log
   `errors`/`error_sample`), `src/main.py` (`/healthz` per-collection `id`), `src/models/db.py`.
 - **Templates:** new `review_fleet.html`; edits to `base.html`, `settings.html`, `dashboard.html`,
   `collection_detail.html`, `partials/health_pill.html`, `partials/_collection_card.html`,
   `partials/review_ack_row.html`, `partials/verify_result.html`, `_macros.html`.
-- **`/healthz` JSON** gains an `id` per collection — additive; no existing key changes type or
-  meaning, so an external monitor's parse is unaffected.
+- **`/healthz` JSON** gains an `id` per collection — additive; no key is renamed, retyped or
+  removed, so an external monitor's parse is unaffected. Two *values* can change, both toward
+  reporting rather than reassurance (design **D13**): a collection whose only recent scan run is a
+  `running` row with an abandoned claim now reports `stale` instead of `fresh`, and
+  `last_scan_age_seconds` now describes the newest *completed* scan (`null` when there is none)
+  rather than an unfinished run's elapsed time. `/healthz` remains **fleet-global** — the panel's
+  owner scoping does not reach it.
 - **Operator-visible:** a new nav-reachable page; a tile that finally lands somewhere; a feed that
   leads with what needs action; a health pill that says which collection; and collections that stop
   claiming a clean scan they did not have.

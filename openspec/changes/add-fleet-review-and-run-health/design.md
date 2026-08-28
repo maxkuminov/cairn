@@ -38,6 +38,25 @@ the population its row was rendered from; two reads is the hole the guard exists
 therefore issues *N* population reads for *N* affected collections, which is the same shape the
 dashboard already pays for (`_collection_view` per collection).
 
+**The row's open event comes out of the same snapshot too.** `collection_review` renders its rows
+from `_read_population` but fetches their events with a *second* statement
+(`_latest_events_by_file`). On the fleet page that second read is not taken: each rendered file's
+open event is `max(by id)` of the `pop.open_events` entries whose `file_id` matches — the same
+"highest id = newest generation" rule `ack_event` already applies to `narrowed.open_events[-1]`, and
+`_review_item` already accepts a `_PopEvent` in place of an ORM `Event`. Two consequences, both
+wanted:
+
+- A row's *displayed* reviewed state and the fingerprint it *authorizes* are then slices of one
+  statement. With two reads, a scanner insert or a concurrent acknowledgement between them lets the
+  row offer "Mark reviewed" for an event that is already acknowledged, or hide the control for one
+  that is open — the guard's own failure mode, reintroduced beside the guard.
+- `pop.open_events` holds **open** events only (the read selects `acknowledged_at IS NULL`), whereas
+  `_latest_events_by_file` returns the newest event acknowledged or not. So a fleet row whose events
+  are all acknowledged shows no open event (correct — the collection page would too, via
+  `_review_item`'s `acknowledged_at` test) and takes its "detected" time from `last_changed` rather
+  than from that acknowledged event. A slightly different relative timestamp on an already-reviewed
+  row is the whole cost, and it is paid for a snapshot property that authorizes a destructive verb.
+
 **No new route, no new fingerprint form scope.** The per-row forms post to the routes that already
 exist — `POST /collection/{cid}/file/{fid}/accept` and `POST /events/{eid}/ack` — because a row's
 fingerprint is already per-collection *and* per-row (`_FP_FORMS["accept-file"]`), minted here from
@@ -131,6 +150,29 @@ live on the cards in the list. One rule, one destination, and the marker does th
 without joining on a name that is not unique by constraint. `/healthz`'s per-collection objects gain
 `id` alongside `name` — additive; no existing key changes.
 
+**Panel health is owner-scoped; `/healthz` is not.** `compute_health` currently iterates
+`list_collections(session)` — every collection in the installation. That is right for `/healthz`,
+which is the machine monitor of the *deployment*: a dead-man's switch that skipped another user's
+collections would have a hole in it exactly where nobody is looking. It is wrong for the pill, whose
+entire fix here is *"say which collection and take me to it"*: in `multi` mode a fleet-global count
+renders **Degraded · 1 collection** above a `/collections` list that is `list_collections(user_id=…)`
+— owner-scoped — so user A is told a collection is stale and then shown a page where no such
+collection exists. That is the defect class of all five issues (compute one thing, show another),
+manufactured by the fix for one of them.
+
+**Chosen:** `compute_health(session, settings, user_id: int | None = None)`. `None` = fleet
+(`/healthz`, unchanged behaviour and unchanged signature at that call site); the panel's three call
+sites (`health_pill`, `dashboard`, `collections_list`) pass `user.id`. The scoping term is
+`list_collections`' existing `user_id` filter — no new query. In `single` mode there is one user, so
+the two are identical and nothing changes.
+
+**Not chosen — filtering the fleet report in the route.** The pill route would then read every
+collection's runs to render one user's number, and the "one `compute_health` call per render"
+property the cards depend on would quietly become "one fleet-wide query loop per render".
+
+**Not chosen — scoping `/healthz` too.** It is unauthenticated and machine-facing; there is no user
+to scope it to, and per-user monitoring endpoints are a Phase-2 auth question, not this change's.
+
 **Where the stale marker goes:** `_collection_card.html`'s "Last scan" meta cell (used by both the
 dashboard and `/collections`), fed by a `health_state` key that `dashboard()` and `collections_list()`
 attach from **one** `compute_health` call per render.
@@ -141,10 +183,43 @@ attach from **one** `compute_health` call per render.
 
 - `runs.errors` — `INTEGER NOT NULL DEFAULT 0`. `RunSummary.errors` already exists and already
   decides `partial`; this is the column it was always missing.
-- `runs.error_sample` — `TEXT NULL`, a **JSON array of strings**, capped at 20 entries and truncated
-  to a byte budget. JSON because it is this codebase's established shape for a blob column
-  (`exclude_globs_json`, `alert_json`) and it is SQLite-friendly; a count alone would tell the
-  operator that three files were skipped without telling them *which*, which is the whole ask.
+- `runs.error_sample` — `TEXT NULL`, a **JSON array of strings**. JSON because it is this codebase's
+  established shape for a blob column (`exclude_globs_json`, `alert_json`) and it is SQLite-friendly;
+  a count alone would tell the operator that three files were skipped without telling them *which*,
+  which is the whole ask.
+
+**The sample's exact bounds.** "Capped at 20 entries" is not a bound: one entry is a rendering of a
+*path*, `repr()` of `os.fsencode` output escapes each bad byte to four characters, and a deep tree of
+long names makes 20 entries arbitrarily large — in a column read on every collection card render.
+Three numbers, all enforced at write time:
+
+| Bound | Value | Enforcement |
+| --- | --- | --- |
+| entries | `RUN_ERROR_SAMPLE_MAX = 20` | stop appending past 20 |
+| bytes per entry | `RUN_ERROR_SAMPLE_ENTRY_BYTES = 256` | truncate the rendering to 253 UTF-8 bytes and append `...` |
+| bytes serialized | `RUN_ERROR_SAMPLE_TOTAL_BYTES = 4096` | append entries only while the serialized array stays within budget |
+
+- **Truncation is deterministic and marked**: cut on a byte boundary at 253 and append the ASCII
+  marker `...`, so a truncated rendering can never be mistaken for a whole name. The marker is ASCII
+  (`...`, not `…`) for the same reason the entries are: this column's invariant is that its stored
+  bytes cannot fail to bind for the class of reason the sample exists to report.
+- **Dropped entries are counted, not silent.** Whichever bound bites, the array's **last** element is
+  a marker string `"+N more skipped (sample truncated)"` — still a JSON string, so the column's shape
+  is unchanged and no reader needs a second type. `N` is `summary.errors` minus the number of real
+  entries stored, so it is the true remainder, not the remainder of the cap.
+- **Serialization is `json.dumps(entries)`** with the default `ensure_ascii=True`, which escapes any
+  non-ASCII to `\uXXXX` — belt and braces over the ASCII-safe rendering, and the reason the byte
+  budget can be measured on the encoded form.
+
+**Every skip is also logged, which is what makes the downgrade honest.** Today only the un-storable
+site logs (one batched WARNING); `stat` and hash `OSError` skips are **silent** (`scanner.py:424`,
+`:563` — bare `summary.errors += 1; continue`). So "no data is lost that is not derivable from the
+logs" would have been false for two of the three causes. The scan therefore emits **one** WARNING at
+finalize whenever `summary.errors > 0`, naming the count and the same capped sample across all three
+causes. It is bounded by construction (the sample is already capped, so the line is cheap), it runs
+once per run rather than once per file, and it means the `0012` downgrade drops only a *convenience*
+copy of information the operator's log already holds. The existing un-storable-specific WARNING stays
+as it is — it names its own cause and its own count.
 
 **The sample entries are a diagnostic rendering, not paths.** This matters and is easy to get wrong:
 the headline case of a skipped file is a **name that could not be stored as TEXT in the first place**
@@ -157,7 +232,8 @@ as a diagnostic sample. It must never be fed back to a filesystem call or offere
 
 **Three error sites, three reasons, one column.** `scanner.py:413` (un-storable name), `:424`
 (`stat` OSError), `:563` (hash OSError) all already `summary.errors += 1`; the sample records the
-path for each, capped. Nothing about classification changes.
+path for each, prefixed with its reason (`unstorable-name: …`, `stat: …`, `hash: …`), capped as
+above. Nothing about classification changes.
 
 **The finalize path's last-ditch fallback stays intact.** `tolerate-unencodable-paths` guarantees a
 run always reaches a terminal state, ending in a raw `UPDATE runs SET result='error', finished=…`.
@@ -180,10 +256,13 @@ restart is not conflated with a genuine scan failure".
 
 Therefore:
 
-- **The freshness query keeps its `IN ('ok','partial')` filter.** `last_scan` continues to mean "when
-  a scan last *completed*", which is what the dead-man's switch is about. Widening it would let an
-  abandoned run refresh the freshness display — the exact false-negative #29 is complaining about,
-  introduced by its own fix.
+- **`_collection_view`'s query keeps its `IN ('ok','partial')` filter.** `last_scan` continues to
+  mean "when a scan last *completed*", which is the only thing a sentence beginning "Last scan" can
+  honestly mean. Widening it would let an abandoned run refresh the display — the exact
+  false-negative #29 is complaining about, introduced by its own fix. This is a *narrower* rule than
+  the dead-man's-switch freshness in D13, deliberately: the switch asks "is this collection still
+  being watched" (a live in-flight scan answers yes), the panel line asks "when did a scan last
+  finish" (only a finish answers that). Two questions, two queries, both stated in the specs.
 - The run-health line is a **second, separate** read: the newest `kind='scan'` run in any terminal
   state. It renders a note **only when that newest run is `interrupted` or `error`** — i.e. only when
   something happened *after* the last completed scan that the operator cannot otherwise see.
@@ -270,3 +349,79 @@ in the list. This inherits, and does not worsen, `add-alert-deep-links`' accepte
 `multi` mode an alert recipient who is not the collection's owner still reaches "not found" at the
 per-collection review page. `/review` shows such a user *their own* collections' issues, which is the
 correct answer for a page keyed on the session, not on the alert.
+
+## D13 — Freshness has two legs, and the running leg must prove liveness
+
+`compute_health` today (`scheduler.py:118-131`) selects the newest `kind='scan'` run in
+`('ok','partial','running')` and dates a `running` one from `started`. The Codex pass read the
+proposal's "no change to `compute_health`'s classification" against the app-runtime requirement's
+"a successful scan run within the window" and found them contradictory — and it is the *requirement*
+that was wrong, not the code.
+
+**History (do not silently undo it).** The `running` leg is the deliberate fix for audit issue **#5**:
+before it, a scan that legitimately took longer than `max(2 × cadence, floor)` aged out **its own**
+freshness while it was still working, and `/healthz` flapped `degraded` for a collection that was
+being scanned at that very moment. A false `degraded` on a dead-man's switch is not a harmless
+conservative default: it is the alarm that teaches the operator to ignore the alarm. Restoring
+"completions only" would reintroduce it.
+
+**But the leg as written trusts `result='running'`, which is not evidence of life.** A process killed
+mid-scan leaves a `running` row behind until something reclaims it; if it was started recently, that
+row currently reports **fresh** — a crashed scanner reading healthy, which is precisely the
+false-negative the switch exists to prevent. Reclamation already knows better: `reclaim_stale_claim`
+and `reap_orphaned_runs` both test `coalesce(heartbeat_at, started) <= now - RUN_HEARTBEAT_TIMEOUT_SECONDS`
+(`collections.py:33`, `:160`; `scheduler.py:209`, `:222`).
+
+**Chosen — state both legs, and gate the second on the same liveness test the reaper uses:**
+
+- **(a)** newest `kind='scan'` run with `result IN ('ok','partial')` **finished** within
+  `max(2 × cadence, floor)` → fresh;
+- **(b)** a `kind='scan'` run is `running` **and** `coalesce(heartbeat_at, started)` is within
+  `RUN_HEARTBEAT_TIMEOUT_SECONDS` → fresh, regardless of the cadence window;
+- neither → `pending` inside the startup grace, else `stale`.
+
+Leg (b) is bounded by the **lease**, not by the cadence: a live scan is fresh for as long as it keeps
+heartbeating, and goes stale within one lease interval of the process dying. Reusing
+`RUN_HEARTBEAT_TIMEOUT_SECONDS` (already imported into `scheduler.py`) is not a convenience — if the
+switch and the reaper used different thresholds there would be a window in which a run is dead to one
+and alive to the other, which is a state nobody can reason about.
+
+**This IS a classification change**, so the proposal's non-goal and task 3.1's "no classification
+change" prohibition are both withdrawn. What it changes, concretely: an abandoned `running` scan with
+no recent completion now reads `stale` where it read `fresh`. That is the direction this product
+errs in — toward reporting, never toward reassurance.
+
+**`last_scan_age_seconds` follows the completion, not the run.** With two legs, "age" had two
+possible meanings; the honest one is the age of the newest *completed* scan, `None` when there is
+none. A collection fresh only by leg (b) therefore reports `state:"fresh"` with a `null` age, which
+is exactly true: it is being scanned, and no scan has finished yet. This is the one `/healthz` field
+whose *value* can change for an existing key (never its name or type) — an external monitor keying on
+`status` or `state` is unaffected, and one keying on the age already had to handle `null`.
+
+## D14 — The dashboard's "last activity" tile is generic, so it must say what it is describing
+
+`dashboard()` selects the newest **finished run of any kind** across the user's collections
+(`routes.py:618-624`) and labels it `f"{collection} scan"`. Three ways that lies, all live today:
+
+1. the run may be a `stamp` or an `upgrade` — the tile says "scan", and a stamp pass says nothing
+   about when the files were last *checked*;
+2. the run may have finished `partial` — the tile reads exactly as it does for a clean scan, which is
+   #29's defect in the one tile #29's task list did not name;
+3. the run may have finished `error` or `interrupted` — same.
+
+**Chosen: keep the tile generic and make it honest**, rather than restricting it to completed scans.
+Restricting it would silently drop the upgrade/stamp activity it exists to surface (a fleet whose
+only recent activity is the nightly upgrade would read "no scans yet"), and the collection cards
+already carry the per-collection scan story. So the sub-line becomes
+`"<collection> <kind>"` plus `" · <result>"` for any result other than `ok`:
+
+- `Photos scan` (ok) · `Photos scan · partial` · `Photos scan · failed` ·
+  `Photos scan · interrupted` · `Max Docs upgrade` · `Bob Tax stamp`.
+- `interrupted` is worded neutrally here for the same reason as everywhere else (D7): it is what a
+  deploy during a scan produces.
+- The existing `· N moved` suffix is kept.
+
+**Ownership:** the tile is built in `dashboard()`, which is **Slice A's** function (D9), so the tile
+is Slice A's task even though it closes a #29-shaped hole. It is a plain text sub-line and must
+**not** reach for Slice B's `run_health_note` macro — that would make `_macros.html` a shared file
+and put a merge conflict on the one seam D9 exists to keep clean.
