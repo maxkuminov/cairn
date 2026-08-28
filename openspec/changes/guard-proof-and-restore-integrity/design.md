@@ -756,6 +756,10 @@ after the walk under the same claim. The reaper reaps a `running` run only when
 `coalesce(heartbeat_at, started)` is older than `RUN_HEARTBEAT_TIMEOUT_SECONDS` (15 minutes),
 comfortably more than the gap between two progress writes of the slowest real operation.
 
+(Progress-driven heartbeats alone turned out **not** to be enough — one unit of work can outlast the
+interval by itself — so they are now backed by a keepalive on a timer and a fence before every
+write. See "The lease needs a keepalive and a fence, not just a timeout" below.)
+
 The trade is deliberate and one-directional. A crash now leaves a collection **claimed for up to the
 threshold**: the badge reads "in progress", the scheduler skips that collection, and the first
 stale-run reclamation clears it. That is a delay measured in minutes. Admitting a
@@ -811,6 +815,73 @@ reclaimers racing each other are equally safe — the loser matches zero rows an
 claim against a slot the winner already freed — and the reaper and the in-band path are the same
 compare-and-swap, so running both concurrently cannot revoke a live claim or double-reclaim a dead
 one. The DB write transaction serializes them; no application lock is involved.
+
+### The lease needs a keepalive and a fence, not just a timeout
+
+A lease has four moving parts, and the two above are only half of it: something takes it
+(`claim_run`), something revokes an abandoned one (`reclaim_stale_claim` + the reaper) — and the
+holder must **keep proving it is alive** while it works, and **check that it still holds the lease**
+before it writes. Without those last two the timeout is not a safety mechanism, it is a scheduled
+outage: the reclamation fires correctly against a live operation and the live operation carries on,
+unaware, as the second writer.
+
+**Every heartbeat used to ride on the completion of a unit of work** — a scan batch drain, a stamp
+batch, one upgraded proof. That measures the shape of the work, not the liveness of the process.
+Hashing one multi-terabyte file, or a single batch stalled on a slow NAS mount, takes longer than
+the 15-minute abandonment interval on its own; the scan is working perfectly and reports nothing, so
+the reaper legitimately reclaims it, the panel admits a "Stamp all", and the original scan walks
+straight into its stamp tail against a collection something else now owns. Two writers, one
+canonical proof path, one `os.replace` each: a submission destroyed with no trace.
+
+So the lease is refreshed **on a timer, not on progress**. `collections.run_keepalive(run_id)` is an
+async context manager wrapping every long operation body (`scan_collection`, `run_stamp_backfill`,
+`upgrade_collection`, and the CLI stamp that calls `stamp_pending` directly). It writes
+`heartbeat_at` every `KEEPALIVE_INTERVAL_SECONDS` (a third of the abandonment interval, so two
+missed ticks still leave a whole interval of margin) from **its own session** — the operation's
+session is busy and may sit inside a long read transaction, and a heartbeat that can only be written
+between units of work is the starvation being fixed. The write is guarded on `result='running'`, so
+it can neither revive nor rewrite the liveness of a run that was already reclaimed; when it stops
+matching, the keepalive stops. It never raises into the operation and gives up after a few
+consecutive failures rather than looping on a broken datastore — degrading to the pre-existing
+per-batch heartbeats plus the fence, never to a failed scan. The per-batch heartbeats stay: they are
+free, and `processed` has to be written there anyway.
+
+**And the holder checks before it writes.** `collections.lease_held(run_id)` is a fence, placed
+immediately before each point where an operation commits or mutates proofs:
+
+| fence | what it protects |
+|---|---|
+| `scanner._drain`, before each batch commit | the file index — nothing of ours lands on top of another writer's work |
+| the scan's stamp tail, before `stamp_pending` | the proof store; a reclaimed scan stamps nothing at all |
+| `proofs.stamp_pending`, before each batch's placement | the proof store, per calendar round-trip |
+| `proofs.upgrade_incomplete`, before each proof | `ots upgrade` rewrites the `.ots` in place |
+| `collections.finalize_if_held`, fused into the terminal UPDATE's `WHERE` | the run record |
+
+It reads in its **own session** deliberately. The operation's session has usually been inside one
+transaction since well before the reclamation was committed by another connection, so a read there
+could be answered from a snapshot that still shows the lease held — and a loaded ORM attribute could
+be answered from the identity map without touching the datastore at all. A datastore error answers
+"not held": stopping work is recoverable and the next pass takes it up; continuing under a lease we
+cannot show we hold is not. The cost is one indexed SELECT per unit whose own cost is a batch of
+hashes, an `ots` subprocess or a calendar round-trip.
+
+**What a fence hit does, and does not, undo.** Nothing commits after the fence sees a reclamation:
+the in-flight batch is rolled back and no further unit begins. But **already-placed proofs stand**,
+and so do the rows committed for them. They were placed while the lease was valid — correct work,
+correctly recorded, by the operation that legitimately held the collection at that moment — and
+`_place_proof` never destroys a proof, so nothing about them is in doubt. Deleting a `.ots` that
+exists on disk in order to tidy up the bookkeeping would be discarding evidence to resolve a
+bookkeeping question, which is the exact trade this product exists to refuse. The reclaiming
+operation re-reads them and either adopts them (design D1a) or preserves them and places its own.
+
+**Finalization is a guarded write, not a check-then-write.** `finalize_if_held` fuses the fence into
+the terminal UPDATE (`WHERE id = <run> AND result = 'running'`), so a reclamation that lands first
+simply leaves the row alone and the write reports zero rows. Overwriting the `interrupted` state
+would be worse than untidy: `compute_health` keys freshness on completed `ok`/`partial` scan runs,
+so a scan that was taken off the collection mid-flight and then wrote `ok` over its own reclamation
+would **refresh the dead-man's switch for a pass it never finished** — a false negative of exactly
+the kind Cairn exists to prevent. A scan that loses its lease reports `skipped`, the same word a
+refused claim uses, so `cairn scan` exits non-zero rather than recording a clean integrity pass.
 
 **What this does not claim to solve.** The claim serializes Cairn against Cairn. It is not a defence
 against a second, unrelated process writing into the proof store, nor against two Cairn deployments

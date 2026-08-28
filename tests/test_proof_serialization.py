@@ -282,3 +282,406 @@ def test_a_scan_that_examined_a_collection_exits_zero(cairn_env, capsys, no_cale
     rc, out = _cli(["scan"], capsys)
     assert rc == 0
     assert "SKIPPED" not in out and "-> ok" in out
+
+
+# ==============================================================================================
+# 5.3o — the lease's other two limbs: a keepalive that does not ride on work, and a fence
+# ==============================================================================================
+#
+# The claim is a LEASE, and a lease needs three things: something that takes it, something that
+# revokes an abandoned one, and — the part that was missing — a holder that keeps proving it is
+# alive independently of the work, plus a check before every mutation that it still holds it.
+#
+# Every heartbeat used to be written by the completion of a unit of work: a scan batch, a stamp
+# batch, one upgraded proof. Hashing a single multi-terabyte file, or one stalled NAS batch, takes
+# longer than the abandonment interval — so a scan that was working perfectly starved its own lease,
+# was legitimately reclaimed, and then carried straight on into its stamp tail as a SECOND writer
+# over a collection something else now owned. Two writers, one canonical proof path, one `os.replace`
+# each: a submission destroyed with no trace, which is evidence loss (design D10).
+
+
+def _run_row(cid: int):
+    """Read this collection's newest run row in a session of its own (never the operation's)."""
+    from sqlalchemy import desc
+
+    from src.database import get_sessionmaker
+    from src.models.db import Run
+
+    async def go():
+        async with get_sessionmaker()() as s:
+            return await s.scalar(
+                select(Run).where(Run.collection_id == cid).order_by(desc(Run.started)).limit(1)
+            )
+
+    return go()
+
+
+def _aware(dt):
+    return dt if dt is None or dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def test_the_keepalive_refreshes_the_lease_while_a_single_hash_runs_long(cairn_env, monkeypatch):
+    """The heartbeat advances during one long hash, with no batch completing — the starvation fix.
+
+    The scan is held inside `_hash` for the whole test, so not one batch drains and every
+    work-completion heartbeat the old design relied on is unreachable. The lease must still move,
+    or the reaper would revoke a claim this scan is actively working under.
+    """
+    root = cairn_env / "slow"
+    root.mkdir()
+    (root / "big.bin").write_bytes(b"pretend this is a terabyte")
+
+    async def go():
+        from src.database import get_sessionmaker
+        from src.models.db import Collection
+        from src.services import collections as coll
+        from src.services import scanner
+
+        cid = await seed_collection(root, ots_mode="none")
+
+        # Shrink the keepalive interval; the production default is five minutes, which no test can
+        # wait for. The mechanism under test — a timer in its own session — is unchanged.
+        real_keepalive = coll.run_keepalive
+        monkeypatch.setattr(
+            coll,
+            "run_keepalive",
+            lambda run_id, *, interval=0.05: real_keepalive(run_id, interval=interval),
+        )
+
+        released = asyncio.Event()
+
+        async def blocking_hash(path):
+            await asyncio.wait_for(released.wait(), timeout=15)
+            return "0" * 64
+
+        monkeypatch.setattr(scanner, "_hash", blocking_hash)
+
+        async with get_sessionmaker()() as s:
+            collection = await s.get(Collection, cid)
+            task = asyncio.create_task(scanner.scan_collection(s, collection))
+            try:
+                claimed = None
+                for _ in range(300):
+                    await asyncio.sleep(0.02)
+                    row = await _run_row(cid)
+                    if row is not None and row.result == "running":
+                        claimed = row
+                        break
+                assert claimed is not None, "the scan never claimed the collection"
+
+                advanced = None
+                for _ in range(300):
+                    await asyncio.sleep(0.02)
+                    row = await _run_row(cid)
+                    if row is not None and _aware(row.heartbeat_at) > _aware(claimed.heartbeat_at):
+                        advanced = row
+                        break
+                assert advanced is not None, (
+                    "the lease was never refreshed while the scan sat inside one hash — a long "
+                    "hash still starves its own claim"
+                )
+                assert not advanced.processed, (
+                    "a batch completed, so this proves nothing about a keepalive independent of work"
+                )
+                assert advanced.result == "running"
+            finally:
+                released.set()
+                await task
+
+    asyncio.run(go())
+    _dispose_engine()
+
+
+def test_a_reclaimed_scan_stamps_nothing_and_does_not_overwrite_the_reclamation(
+    cairn_env, monkeypatch, caplog
+):
+    """The fence: a scan whose lease is revoked mid-run stops, stamps nothing, and stays reclaimed.
+
+    Reclamation is simulated exactly as it happens in production — another session marks the run
+    `interrupted` (what `reclaim_stale_claim` and the reaper both write) while the scan is between
+    files. The scan must then: roll back its in-flight batch, skip the stamp pass entirely (that is
+    the proof-mutating half, and a second writer there is the loss), and leave the run row as the
+    reclamation wrote it rather than relabelling it `ok`, which would refresh the dead-man's switch
+    for a pass that never finished.
+    """
+    import logging
+
+    # `alembic`'s `fileConfig` (run by the `cairn_env` migration) applies `disable_existing_loggers`,
+    # which silently marks an already-created `cairn.*` logger disabled — a caplog assertion would
+    # then see nothing and pass or fail for the wrong reason.
+    scanner_log = logging.getLogger("cairn.scanner")
+    scanner_log.disabled = False
+    scanner_log.propagate = True
+
+    root = cairn_env / "fenced"
+    root.mkdir()
+    for i in range(4):
+        (root / f"f{i}.txt").write_bytes(f"payload {i}".encode())
+
+    async def go():
+        from sqlalchemy import update as sql_update
+
+        from src.database import get_sessionmaker
+        from src.models.db import Collection, Run
+        from src.services import proofs, scanner
+        from src.services.scanner import _utcnow
+
+        cid = await seed_collection(root, ots_mode="perfile")
+        monkeypatch.setattr(scanner, "BATCH", 1)  # drain (and so fence) after every file
+
+        stamp_calls: list[int] = []
+
+        async def recording_stamp(*args, **kwargs):
+            stamp_calls.append(1)
+            return 0
+
+        monkeypatch.setattr(proofs, "stamp_pending", recording_stamp)
+
+        real_hash = scanner._hash
+        hashed: list[str] = []
+
+        async def hash_then_reclaim(path):
+            hashed.append(str(path))
+            if len(hashed) == 2:
+                # Something decided this claim was abandoned and took it — the write the reaper
+                # and the in-band reclamation both make.
+                async with get_sessionmaker()() as other:
+                    await other.execute(
+                        sql_update(Run)
+                        .where(Run.collection_id == cid, Run.result == "running")
+                        .values(result="interrupted", finished=_utcnow())
+                    )
+                    await other.commit()
+            return await real_hash(path)
+
+        monkeypatch.setattr(scanner, "_hash", hash_then_reclaim)
+
+        with caplog.at_level(logging.WARNING, logger="cairn.scanner"):
+            async with get_sessionmaker()() as s:
+                collection = await s.get(Collection, cid)
+                summary = await scanner.scan_collection(s, collection)
+
+        assert summary.result == "skipped", (
+            "a scan that lost its claim reported a completed pass"
+        )
+        assert stamp_calls == [], "the reclaimed scan went on to mutate the proof store"
+
+        row = await _run_row(cid)
+        assert row.result == "interrupted", (
+            "the reclaimed run was relabelled by the scan that lost it"
+        )
+        assert not row.stamped
+        assert any("RECLAIMED" in r.getMessage() for r in caplog.records), (
+            "the reclamation was not reported"
+        )
+
+    asyncio.run(go())
+    _dispose_engine()
+
+
+def test_a_stamp_pass_stops_at_the_batch_boundary_when_its_claim_is_reclaimed(
+    cairn_env, monkeypatch, no_calendar
+):
+    """`stamp_pending` fences per batch: the reclaimed pass places no further proof, and says so.
+
+    Proofs already placed STAND. They were placed while the lease was valid, and unwinding a proof
+    that exists on disk to tidy up bookkeeping would destroy evidence — the one thing this product
+    must never do. What must stop is everything after the fence.
+    """
+    root = cairn_env / "batched"
+    root.mkdir()
+    for i in range(4):
+        (root / f"f{i}.txt").write_bytes(f"body {i}".encode())
+
+    async def go():
+        from sqlalchemy import update as sql_update
+
+        from src.database import get_sessionmaker
+        from src.models.db import Collection, FileEntry, Run
+        from src.services import collections as coll
+        from src.services import ots, proofs
+        from src.services.scanner import _utcnow
+
+        cid = await seed_collection(root, ots_mode="perfile")
+        now = _utcnow()
+        async with get_sessionmaker()() as s:
+            for i in range(4):
+                s.add(
+                    FileEntry(
+                        collection_id=cid,
+                        relpath=f"f{i}.txt",
+                        size=7,
+                        status="new",
+                        ots_state="pending",
+                        first_seen=now,
+                        last_checked=now,
+                    )
+                )
+            await s.commit()
+
+        monkeypatch.setattr(
+            proofs.get_settings(), "ots_stamp_batch_size", 1, raising=False
+        )
+
+        batches: list[int] = []
+
+        def fake_batch(pairs, calendars, staging, *, store_root=None, verdicts=None):
+            batches.append(len(pairs))
+            outcomes = []
+            for _real, out in pairs:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(b"proof")
+                outcomes.append(ots.StampOutcome(kind="placed", digest="d" * 64, state="incomplete"))
+            return outcomes
+
+        monkeypatch.setattr(ots, "stamp_batch_via_symlink", fake_batch)
+
+        async with get_sessionmaker()() as s:
+            collection = await s.get(Collection, cid)
+            run = Run(collection_id=cid, kind="stamp", started=now, result="running")
+            assert await coll.claim_run(s, run) is not None
+            run_id = run.id
+
+            async def reclaim_after_first(done: int) -> None:
+                # Progress landed for batch 1; now the claim is taken away, exactly as a reaper
+                # that judged this operation abandoned would take it.
+                async with get_sessionmaker()() as other:
+                    await other.execute(
+                        sql_update(Run)
+                        .where(Run.id == run_id)
+                        .values(result="interrupted", finished=_utcnow())
+                    )
+                    await other.commit()
+
+            with pytest.raises(coll.LeaseLost):
+                await proofs.stamp_pending(
+                    s,
+                    collection,
+                    progress=reclaim_after_first,
+                    run_id=run_id,
+                )
+
+        assert len(batches) == 1, (
+            f"the reclaimed stamp kept placing proofs: {len(batches)} batches ran"
+        )
+        # The proof placed under the valid lease is still on disk — reclamation stops further work,
+        # it does not retract completed work.
+        assert (Path(cairn_env / "proofs") / str(cid) / "f0.txt.ots").exists()
+
+    asyncio.run(go())
+    _dispose_engine()
+
+
+def test_an_unreclaimed_scan_is_completely_unaffected_by_the_fence(cairn_env, no_calendar):
+    """The control: with the lease intact, counts and the finalized run row are exactly as before."""
+    root = cairn_env / "normal"
+    root.mkdir()
+    (root / "a.txt").write_bytes(b"aaa")
+    (root / "b.txt").write_bytes(b"bbbb")
+
+    async def go():
+        from src.database import get_sessionmaker
+        from src.models.db import Collection
+        from src.services import scanner
+
+        cid = await seed_collection(root, ots_mode="none")
+        async with get_sessionmaker()() as s:
+            collection = await s.get(Collection, cid)
+            summary = await scanner.scan_collection(s, collection)
+
+        assert (summary.result, summary.added, summary.missing) == ("ok", 2, 0)
+        row = await _run_row(cid)
+        assert row.result == "ok"
+        assert row.added == 2 and row.processed == 2 and row.finished is not None
+        return cid
+
+    cid = asyncio.run(go())
+
+    async def rescan():
+        from src.database import get_sessionmaker
+        from src.models.db import Collection
+        from src.services import scanner
+
+        async with get_sessionmaker()() as s:
+            collection = await s.get(Collection, cid)
+            return await scanner.scan_collection(s, collection)
+
+    second = asyncio.run(rescan())
+    assert (second.result, second.added, second.ok, second.missing) == ("ok", 0, 2, 0)
+    _dispose_engine()
+
+
+def test_a_reclaimed_upgrade_pass_stops_and_leaves_the_reclamation_state(cairn_env, monkeypatch):
+    """`ots upgrade` REWRITES the `.ots` in place, so a reclaimed upgrade is a second proof writer.
+
+    The pass must stop at the next proof, keep what it already upgraded, and return without raising
+    — including through the session rollback the fence performs, which expires every ORM object the
+    finalizing write would otherwise read.
+    """
+    root = cairn_env / "upg"
+    root.mkdir()
+
+    async def go():
+        from sqlalchemy import update as sql_update
+
+        from src.database import get_sessionmaker
+        from src.models.db import Collection, FileEntry, Run
+        from src.services import ots, proofs
+        from src.services.scanner import _utcnow
+
+        cid = await seed_collection(root, ots_mode="perfile")
+        store = cairn_env / "proofs" / str(cid)
+        store.mkdir(parents=True, exist_ok=True)
+        now = _utcnow()
+        async with get_sessionmaker()() as s:
+            for i in range(3):
+                proof = store / f"f{i}.txt.ots"
+                proof.write_bytes(b"proof")
+                s.add(
+                    FileEntry(
+                        collection_id=cid,
+                        relpath=f"f{i}.txt",
+                        size=3,
+                        status="ok",
+                        ots_state="incomplete",
+                        ots_path=str(proof),
+                        first_seen=now,
+                        last_checked=now,
+                    )
+                )
+            await s.commit()
+
+        upgraded: list[str] = []
+
+        def fake_upgrade(path):
+            upgraded.append(path)
+            if len(upgraded) == 1:
+                # Between proof 1 and proof 2 the claim is judged abandoned and taken away.
+                async def reclaim():
+                    async with get_sessionmaker()() as other:
+                        await other.execute(
+                            sql_update(Run)
+                            .where(Run.collection_id == cid, Run.result == "running")
+                            .values(result="interrupted", finished=_utcnow())
+                        )
+                        await other.commit()
+
+                asyncio.run_coroutine_threadsafe(reclaim(), loop).result(timeout=10)
+            return True
+
+        loop = asyncio.get_running_loop()
+        monkeypatch.setattr(ots, "upgrade", fake_upgrade)
+
+        async with get_sessionmaker()() as s:
+            collection = await s.get(Collection, cid)
+            outcome = await proofs.upgrade_collection(s, collection)
+
+        assert len(upgraded) == 1, (
+            f"the reclaimed upgrade kept rewriting proofs: {len(upgraded)} touched"
+        )
+        assert not outcome.refused
+        row = await _run_row(cid)
+        assert row.result == "interrupted", "the loser of the reclamation relabelled the run"
+
+    asyncio.run(go())
+    _dispose_engine()

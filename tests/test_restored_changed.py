@@ -73,7 +73,7 @@ def no_stamping(monkeypatch):
     the queued-for-re-stamp assertion is the point.
 
     The stub's signature must track the real ``stamp_pending`` exactly (``settings`` positional,
-    ``progress`` keyword). A stub that merely *looks* right raises ``TypeError`` at the call site,
+    ``progress`` and ``run_id`` keyword). A stub that merely *looks* right raises ``TypeError`` at the call site,
     which the scanner's blanket ``except`` around the stamp pass swallows: the tests would then
     reach ``pending`` through a *failed* post-scan tail rather than a successful no-op, and would
     keep passing if that tail broke for real. The teardown assertion below is what makes that
@@ -81,7 +81,7 @@ def no_stamping(monkeypatch):
     """
     from src.services import proofs
 
-    async def _noop(session, collection, settings=None, *, progress=None):
+    async def _noop(session, collection, settings=None, *, progress=None, run_id=None):
         if progress is not None:
             await progress(0)  # exercise the heartbeat callback the real pass drives
         return 0

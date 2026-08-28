@@ -6,9 +6,11 @@ Root-jailing under an admin-provisioned base and per-user scoping arrive with mu
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import AsyncIterator, Iterable
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -29,6 +31,26 @@ log = logging.getLogger("cairn.collections")
 # short enough that a crash does not strand a collection for long. Fifteen minutes is both, by a
 # wide margin. Lives here, next to the claim it governs, and is re-exported by ``scheduler``.
 RUN_HEARTBEAT_TIMEOUT_SECONDS = 15 * 60
+
+# How often a claim holder refreshes its lease from a background keepalive task, independent of the
+# work it is doing. A third of the abandonment interval means two consecutive missed keepalive ticks
+# still leave a whole interval of margin before anything treats the claim as dead.
+KEEPALIVE_INTERVAL_SECONDS = RUN_HEARTBEAT_TIMEOUT_SECONDS / 3
+
+# Consecutive keepalive write failures tolerated before the keepalive gives up. One transient error
+# (a momentarily locked datastore) must not starve the lease, and a permanently broken datastore
+# must not produce an unbounded WARNING loop for the life of the operation. Giving up is safe by
+# construction: the operation keeps running, the lease simply ages out, and the fence below stops it
+# before it can mutate anything under a claim it no longer holds.
+_KEEPALIVE_MAX_CONSECUTIVE_FAILURES = 3
+
+
+class LeaseLost(RuntimeError):
+    """Raised when an operation finds its collection claim was reclaimed while it was working.
+
+    Not a failure of the operation: it is the fence doing its job (design D10). The operation stops
+    where it stands, commits nothing further, and leaves the terminal state the reclamation wrote.
+    """
 
 
 async def create_collection(
@@ -239,6 +261,150 @@ async def _attempt_claim(session: AsyncSession, run: Run) -> Run | None:
         await session.rollback()
         return None
     return run
+
+
+# --- The other two limbs of the lease: a keepalive, and a fence -------------------------------
+#
+# `claim_run` takes the lease and `reclaim_stale_claim` / the scheduler's reaper revoke an abandoned
+# one. On their own those two are not enough (design D10):
+#
+#   * every heartbeat used to ride on the completion of a unit of work — a scan batch, a stamp
+#     batch, one upgraded proof — so an operation that spends longer than the abandonment interval
+#     inside ONE unit (hashing a multi-terabyte file, a stalled NAS batch) starves its own lease and
+#     is legitimately reclaimed while it is still working. :func:`run_keepalive` refreshes the lease
+#     on a timer instead, so liveness tracks the process, not the shape of the work.
+#
+#   * a reclaimed operation used to keep going, unaware, straight into proof placement — the second
+#     writer the claim exists to exclude. :func:`lease_held` is the fence every mutation point tests
+#     first, and :func:`finalize_if_held` is the same test fused into the terminal write.
+
+
+async def touch_heartbeat(run_id: int | None) -> bool:
+    """Refresh ``run_id``'s lease; return whether it is still the collection's live claim.
+
+    The UPDATE is guarded on ``result='running'``, so it can neither resurrect the liveness of a run
+    that was already reclaimed nor race a reclamation into a half-state: either the row is still the
+    claim and its heartbeat moves, or nothing is written and the caller learns the lease is gone.
+    """
+    if run_id is None:
+        return False
+    async with get_sessionmaker()() as session:
+        result = await session.execute(
+            update(Run)
+            .where(Run.id == run_id, Run.result == "running")
+            .values(heartbeat_at=utcnow())
+        )
+        await session.commit()
+    return bool(result.rowcount)
+
+
+async def _keepalive_loop(run_id: int, interval: float) -> None:
+    """Refresh ``run_id``'s lease every ``interval`` seconds until it is no longer the live claim."""
+    failures = 0
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            still_held = await touch_heartbeat(run_id)
+        except Exception:
+            # Never raise into the operation: a keepalive is a liveness signal, not part of the
+            # work. Log the first failure with a traceback, then stop after a few in a row rather
+            # than looping on a broken datastore (see _KEEPALIVE_MAX_CONSECUTIVE_FAILURES).
+            failures += 1
+            log.warning(
+                "run %s: keepalive heartbeat failed (%d in a row)",
+                run_id,
+                failures,
+                exc_info=failures == 1,
+            )
+            if failures >= _KEEPALIVE_MAX_CONSECUTIVE_FAILURES:
+                log.warning(
+                    "run %s: keepalive giving up after %d consecutive failures — the lease will "
+                    "age out and this operation's fence will stop it before it mutates anything",
+                    run_id,
+                    failures,
+                )
+                return
+            continue
+        failures = 0
+        if not still_held:
+            # The claim is gone (reclaimed, or the run already finalized). Stop quietly: the fence
+            # at the operation's next mutation point is what acts on it.
+            log.info("run %s: keepalive stopping — the run is no longer the live claim", run_id)
+            return
+
+
+@asynccontextmanager
+async def run_keepalive(
+    run_id: int | None, *, interval: float = KEEPALIVE_INTERVAL_SECONDS
+) -> AsyncIterator[None]:
+    """Hold ``run_id``'s lease alive for the duration of the block, independent of work completion.
+
+    ``async with run_keepalive(run_id):`` around a long operation body. The task heartbeats in its
+    OWN session — the operation's session is busy (and may sit inside a long read transaction whose
+    snapshot predates any reclamation), and a heartbeat that can only be written between units of
+    work is the starvation this exists to fix. It is cancelled and awaited on exit, so no task
+    outlives the operation, and it never raises into the block: a keepalive failure degrades to the
+    pre-existing per-batch heartbeats plus the fence, never to a failed scan.
+
+    ``run_id is None`` (an unclaimed or test-constructed run) is a no-op.
+    """
+    task: asyncio.Task[None] | None = None
+    if run_id is not None:
+        task = asyncio.create_task(_keepalive_loop(run_id, interval))
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+
+async def lease_held(run_id: int | None) -> bool:
+    """The fence: does ``run_id`` still hold its collection's claim, according to the DATASTORE?
+
+    Called immediately before anything a second writer must not be able to do concurrently — a
+    scan's batch commit, a stamp batch's placement, an upgrade's rewrite of a proof. It reads in its
+    **own session** deliberately: the operation's session has usually been inside one transaction
+    since well before the reclamation was committed by another connection, so a read there could
+    answer from a snapshot that still shows the lease held; and a fresh SELECT of the column cannot
+    be served from the caller's identity map the way a loaded ORM attribute can.
+
+    A datastore error answers **not held**. The asymmetry is the same one the whole claim design
+    turns on: refusing to do work is recoverable and the next pass picks it up, while doing it under
+    a lease we cannot show we hold risks a second writer destroying a proof.
+    """
+    if run_id is None:
+        return False
+    try:
+        async with get_sessionmaker()() as session:
+            result = await session.scalar(select(Run.result).where(Run.id == run_id))
+    except SQLAlchemyError:
+        log.warning(
+            "run %s: could not confirm the operation claim — treating it as lost and stopping",
+            run_id,
+            exc_info=True,
+        )
+        return False
+    return result == "running"
+
+
+async def finalize_if_held(session: AsyncSession, run_id: int | None, **values) -> bool:
+    """Write a run's terminal state only while it is still the live claim; return whether it landed.
+
+    The fence and the finalizing write in one statement (``WHERE id=… AND result='running'``), so a
+    reclamation that lands first simply leaves the row alone: an operation whose lease was revoked
+    must never overwrite the ``interrupted`` state the reclamation wrote — that state is the record
+    that the work was cut short, and stamping ``ok`` over it would let a scan that was taken off the
+    collection mid-flight refresh the dead-man's switch.
+    """
+    if run_id is None:
+        return False
+    result = await session.execute(
+        update(Run).where(Run.id == run_id, Run.result == "running").values(**values)
+    )
+    await session.commit()
+    return bool(result.rowcount)
 
 
 async def get_collection_by_name(

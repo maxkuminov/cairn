@@ -365,3 +365,78 @@ same abandonment interval and the same terminal state, and SHALL be safe to run 
 - **WHEN** a blocked claim reads a blocking run as stale, and that run reports progress before the
   reclamation's write is applied
 - **THEN** the run SHALL remain in progress and the blocked claim SHALL be refused
+
+### Requirement: An operation reports its claim alive independently of the work it is doing
+
+An in-progress operation SHALL refresh the liveness of its collection claim on a schedule that does
+not depend on it finishing a unit of work, for as long as it is running. Liveness that is only
+written when a batch, a file or a proof completes measures the *shape of the work*, not whether the
+process is alive: hashing one multi-terabyte file, or a single batch stalled on slow storage, can
+exceed the abandonment interval on its own, so an operation that is working perfectly starves its
+own claim and is legitimately reclaimed — after which two operations hold the same collection and
+the second writer this claim exists to exclude is admitted by the machinery meant to prevent it.
+
+The refresh SHALL be written outside the operation's own transaction, so that it lands while the
+operation is mid-unit and is not held back by whatever the operation has open, and it SHALL be
+conditional on the claim still being in progress, so that it can neither revive nor rewrite the
+liveness of a run that has already been reclaimed or finished.
+
+A failure to refresh SHALL NOT fail the operation, and repeated failure SHALL NOT loop
+indefinitely: the refresh is a liveness signal, not part of the work. Where it can no longer be
+written the operation SHALL continue, its claim SHALL be allowed to age out, and the fence below is
+what prevents it from mutating anything afterwards. The refresh SHALL stop as soon as the run is no
+longer the collection's in-progress claim.
+
+#### Scenario: A single long unit of work does not starve the claim
+
+- **WHEN** an operation spends longer than the abandonment interval inside one unit of work, with no
+  batch, file or proof completing during that time
+- **THEN** its claim's liveness SHALL still advance, so that no reclamation path treats it as
+  abandoned
+
+#### Scenario: A liveness refresh that cannot be written does not fail the operation
+
+- **WHEN** the liveness refresh cannot be written
+- **THEN** the operation SHALL continue and SHALL NOT fail, and the refresh SHALL stop rather than
+  retry without limit
+
+### Requirement: An operation that has lost its claim stops instead of continuing to write
+
+An operation SHALL confirm, against the datastore, that it still holds its collection's claim
+immediately before each point at which it commits a change or mutates the collection's proofs, and
+SHALL stop where it stands if it does not. Reclamation is the correct response to a claim that has
+stopped reporting liveness, but an operation that is reclaimed and does not notice is exactly the
+second writer the claim exists to exclude: it goes on writing over a collection another operation
+now owns.
+
+The confirmation SHALL be read outside the operation's own open transaction, so it cannot be
+answered from a snapshot taken before the reclamation was committed by another connection, and a
+confirmation that cannot be obtained SHALL be treated as a claim that is no longer held — stopping
+work is recoverable and the next pass takes it up, while continuing under a claim that cannot be
+shown is not.
+
+Once the claim is found lost, the operation SHALL commit nothing further: work already committed
+under the valid claim stands, the unit in flight at the moment of detection SHALL be discarded, and
+no further unit SHALL begin. The operation SHALL NOT write its own terminal state over the state the
+reclamation recorded — that state is the record that the work was cut short, and replacing it with a
+completed result would let a pass that never finished refresh scan freshness. The event SHALL be
+reported prominently in the logs, naming the collection and the run whose claim was reclaimed, and
+the operation SHALL NOT report the pass as completed.
+
+#### Scenario: A scan whose claim is reclaimed mid-run stops without committing its in-flight batch
+
+- **WHEN** a scan's claim is reclaimed while it is running
+- **THEN** the scan SHALL discard the batch in flight, SHALL NOT commit any further batch, SHALL NOT
+  run its stamping pass, and SHALL NOT report the scan as a completed pass
+
+#### Scenario: A reclaimed run's terminal state survives the operation that lost it
+
+- **WHEN** an operation whose claim was reclaimed reaches the point where it would record its result
+- **THEN** the run SHALL keep the terminal state the reclamation wrote, the operation SHALL NOT
+  overwrite it, and the reclamation SHALL be reported in the logs
+
+#### Scenario: An operation that keeps its claim is unaffected
+
+- **WHEN** an operation runs to completion holding its claim throughout
+- **THEN** every commit, every proof placement and the recorded result SHALL be exactly as they were
+  before the confirmation was introduced

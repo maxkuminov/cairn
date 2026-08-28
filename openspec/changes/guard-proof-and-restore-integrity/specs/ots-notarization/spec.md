@@ -808,3 +808,39 @@ SHALL be logged naming the file, the digest, and the block the attestation was c
   than the one recorded for that file
 - **THEN** the system SHALL NOT adopt it, SHALL stamp the file normally, and SHALL preserve that
   existing proof
+
+### Requirement: Proof mutation stops when the claim it runs under has been reclaimed
+
+Every pass that places, preserves, adopts or upgrades proofs SHALL re-confirm the collection's
+operation claim against the datastore immediately before each batch it places and each proof it
+rewrites, and SHALL stop without mutating anything further if the claim is no longer held. Holding
+the claim at the *start* of a pass is not sufficient: a pass that runs longer than the abandonment
+interval can have its claim reclaimed while it works, and a reclaimed pass that keeps placing proofs
+is precisely the concurrent writer the claim exists to exclude — two processes finding one canonical
+proof path unoccupied and each writing to it, with one submission destroyed and no trace that it
+existed.
+
+Proofs already placed under the claim while it was valid SHALL be left exactly as they are. They are
+evidence that was correctly created at the time it was created, and the placement rules never
+destroy a proof; unwinding them to tidy up bookkeeping would discard evidence to resolve a
+bookkeeping question. The recorded state of the files whose proofs were placed before the stop SHALL
+likewise stand where it was already committed, and nothing SHALL be committed after the claim is
+found lost.
+
+#### Scenario: A reclaimed stamp pass places no further proof
+
+- **WHEN** a stamping pass's claim is reclaimed after it has placed one batch of proofs
+- **THEN** it SHALL stop before placing the next batch, SHALL leave the proofs already placed intact
+  on disk, and SHALL leave the files it did not reach queued for a later pass
+
+#### Scenario: A reclaimed upgrade pass stops rewriting proofs
+
+- **WHEN** the claim under which an upgrade pass is running is reclaimed part-way through
+- **THEN** it SHALL stop before rewriting the next proof, and the proofs it already upgraded SHALL
+  keep their upgraded state
+
+#### Scenario: A stamp pass that holds its claim throughout is unaffected
+
+- **WHEN** a stamping pass runs to completion holding the collection's claim
+- **THEN** every pending file SHALL be stamped and recorded exactly as it was before the
+  re-confirmation was introduced

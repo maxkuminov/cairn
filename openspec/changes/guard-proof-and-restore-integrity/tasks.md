@@ -570,6 +570,52 @@ about a **claim** the surfaces made that the check behind it did not establish. 
   delta's reaper requirement gains the guarded-write paragraph and the scenario **"A concurrent
   heartbeat defeats the startup reconciliation"**.
 
+- [x] 5.3o **The lease had a timeout but no keepalive and no fence — so the timeout was a scheduled
+  second writer.** Every heartbeat rode on the completion of a unit of work (a scan batch drain, a
+  stamp batch, one upgraded proof), which measures the shape of the work rather than the liveness of
+  the process: hashing one multi-terabyte file or a batch stalled on a slow NAS mount outlasts the
+  15-minute abandonment interval on its own, so a scan that was working perfectly starved its own
+  lease, was legitimately reclaimed — and then carried on, unaware, into its stamp tail as a second
+  writer over a collection the panel or the scheduler had already handed to someone else (design
+  D10: two writers, one canonical proof path, one `os.replace` each, one submission destroyed with
+  no trace). The two missing limbs of the lease pattern are now in place.
+- [x] 5.3o.1 **Keepalive, independent of work completion.** `collections.run_keepalive(run_id)` — an
+  async context manager wrapping every long operation body (`scanner.scan_collection`,
+  `proofs.run_stamp_backfill`, `proofs.upgrade_collection`, and `cli._cmd_stamp`'s direct
+  `stamp_pending` call; `cairn scan`/`--all`/`upgrade` inherit it through those service functions).
+  It refreshes `heartbeat_at` every `KEEPALIVE_INTERVAL_SECONDS` (`RUN_HEARTBEAT_TIMEOUT_SECONDS/3`
+  = 5 min) from **its own session**, with the write guarded on `result='running'` so it can neither
+  revive nor rewrite the liveness of a run already reclaimed, and stops as soon as that stops
+  matching. Cancelled and awaited on exit; never raises into the operation, and gives up after
+  `_KEEPALIVE_MAX_CONSECUTIVE_FAILURES` (3) rather than looping on a broken datastore. The existing
+  per-batch heartbeats stay — they are free and `processed` belongs there anyway.
+- [x] 5.3o.2 **Fence before every mutation and before finalization.** `collections.lease_held(run_id)`
+  re-reads the run's `result` **in its own session** (the operation's session may sit inside a
+  transaction whose snapshot predates the reclamation, and a loaded ORM attribute could be answered
+  from the identity map) and answers "not held" on a datastore error. It is checked in
+  `scanner._drain` before each batch commit, in the scan's stamp tail before `stamp_pending`, in
+  `proofs.stamp_pending` before each batch's placement, and in `proofs.upgrade_incomplete` before
+  each proof is rewritten; `collections.finalize_if_held` fuses the same test into the terminal
+  UPDATE's `WHERE`. A lost lease raises `collections.LeaseLost`, which every caller handles by
+  stopping. **Nothing commits after the fence fires** — the in-flight batch is rolled back and no
+  further unit begins — while **proofs already placed stand**, with the rows already committed for
+  them: they were placed under a lease that was valid at the time, `_place_proof` never destroys a
+  proof, and deleting evidence that exists on disk to tidy up bookkeeping is the trade this product
+  refuses. A reclaimed run keeps the `interrupted` state the reclamation wrote (overwriting it with
+  `ok` would let a pass that never finished refresh the dead-man's switch), and a scan that lost its
+  lease reports `skipped`, so `cairn scan` exits non-zero rather than recording a clean pass.
+- [x] 5.3o.3 Tests in `tests/test_proof_serialization.py`:
+  `test_the_keepalive_refreshes_the_lease_while_a_single_hash_runs_long` (the scan is held inside
+  `_hash` so no batch can drain; the heartbeat must still advance),
+  `test_a_reclaimed_scan_stamps_nothing_and_does_not_overwrite_the_reclamation`,
+  `test_a_stamp_pass_stops_at_the_batch_boundary_when_its_claim_is_reclaimed` (the proof placed under
+  the valid lease is still on disk), and the control
+  `test_an_unreclaimed_scan_is_completely_unaffected_by_the_fence`. Two existing `stamp_pending`
+  stubs gained the new `run_id` keyword so their signatures still track the real function.
+  Design D10 gains "The lease needs a keepalive and a fence, not just a timeout"; the
+  `integrity-scanning` delta gains the liveness + fence requirements and the `ots-notarization`
+  delta gains "Proof mutation stops when the claim it runs under has been reclaimed".
+
 ## 5. Gates
 
 - [x] 5.1 **`openspec-verifier` subagent** audits the implementation against the spec deltas.

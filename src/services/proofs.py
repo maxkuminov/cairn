@@ -134,6 +134,7 @@ async def stamp_pending(
     settings: Settings | None = None,
     *,
     progress: ProgressCb | None = None,
+    run_id: int | None = None,
 ) -> int:
     """Stamp every ``pending`` file in this collection in batches; return the count stamped.
 
@@ -158,8 +159,22 @@ async def stamp_pending(
     place -> record is check-then-act, so two writers would be a lost-update machine; the claim is
     taken by the caller (a scan's own ``running`` run, ``run_stamp_backfill``, or the CLI) rather
     than here, because this function is called from inside a scan that already holds one.
+
+    ``run_id`` names that claim, and every production caller passes it. It turns the claim from an
+    assumption into a **fence**: before each batch is placed, the run is re-read from the datastore
+    and, if it is no longer ``running`` (its lease aged out and something reclaimed it), the pass
+    raises :class:`collections.LeaseLost` instead of writing into a proof store another operation
+    now owns. Batches already placed STAND — they were placed while the lease was valid, their rows
+    were committed by the per-batch ``progress`` write under that same lease, and unwinding proofs
+    that exist on disk would destroy evidence to tidy up bookkeeping. The fence is checked between
+    batches (a batch is one ``ots`` call and one calendar round-trip, so the check is free by
+    comparison) and nothing is committed after it fires.
     """
     settings = settings or get_settings()
+    # Read the identity up front, as a plain local: the fence below rolls the session back, which
+    # expires every ORM object in it — an attribute read after that would raise `MissingGreenlet`
+    # from async code, and a message about a reclamation must never be the thing that crashes.
+    collection_id = collection.id
     pending = list(
         await session.scalars(
             select(FileEntry).where(
@@ -214,6 +229,28 @@ async def stamp_pending(
     for start in range(0, len(work), batch_size):
         chunk = work[start : start + batch_size]
         chunk_verdicts = verdicts[start : start + batch_size]
+        # The fence, immediately before this chunk mutates the proof store (design D10). A caller
+        # that named its claim gets it checked; one that did not (a direct test call) is unchanged.
+        if run_id is not None and not await collections.lease_held(run_id):
+            log.warning(
+                "collection %s: the operation claim (run %s) was RECLAIMED mid-stamp — stopping "
+                "before batch %d of %d. The %d proof(s) already placed stand; the rest stay pending",
+                collection_id,
+                run_id,
+                start // batch_size + 1,
+                (len(work) + batch_size - 1) // batch_size,
+                stamped,
+            )
+            # Discard anything this call has staged but not yet committed (the adoption pass's row
+            # updates, if the fence fires before the first `progress` write): nothing commits after
+            # the fence sees a reclamation. Proofs already ON DISK are untouched — they were placed
+            # under a valid lease, `_place_proof` never destroys a proof, and the next pass re-reads
+            # and adopts or re-records them.
+            await session.rollback()
+            raise collections.LeaseLost(
+                f"the operation claim for collection {collection_id} (run {run_id}) was reclaimed "
+                f"mid-stamp"
+            )
         # Offload the blocking `ots` subprocess (process spawn + calendar round-trip) to a worker
         # thread so the event loop stays free to serve the panel — mirrors scanner hashing.
         try:
@@ -376,24 +413,63 @@ async def run_stamp_backfill(
     )
     await session.commit()
 
+    run_id = run.id
+
     async def _progress(done: int) -> None:
         run.processed = done
         # Progress is also the claim's liveness signal: a long backfill must not look abandoned to
-        # the startup reaper, which would revoke a claim this process still holds (design D10).
+        # the startup reaper, which would revoke a claim this process still holds (design D10). The
+        # keepalive below covers the gap BETWEEN two of these (a batch that stalls on a slow
+        # calendar can outlast the abandonment interval on its own).
         run.heartbeat_at = _utcnow()
         await session.commit()
 
-    try:
-        stamped = await stamp_pending(session, collection, settings, progress=_progress)
-        run.result = "ok"
-    except Exception:  # pragma: no cover - stamping must never fail the operation
-        log.exception("stamp backfill failed for collection %s", collection.id)
-        stamped = 0
-        run.result = "error"
-    run.stamped = stamped
-    run.processed = stamped
-    run.finished = _utcnow()
-    await session.commit()
+    result = "ok"
+    stamped = 0
+    # Keepalive around the whole stamping body: liveness must track the process, not the completion
+    # of a batch. The fence lives inside `stamp_pending`, per batch.
+    async with collections.run_keepalive(run_id):
+        try:
+            stamped = await stamp_pending(
+                session, collection, settings, progress=_progress, run_id=run_id
+            )
+        except collections.LeaseLost:
+            # The claim was reclaimed mid-backfill. Proofs already placed stand and their rows were
+            # committed under the valid lease; nothing further is written here, and the terminal
+            # write below is a no-op because the guarded UPDATE will not match a reclaimed run.
+            log.warning(
+                "stamp backfill for collection %s was RECLAIMED mid-run (run %s) — stopping; "
+                "the run row keeps the state the reclamation wrote",
+                collection_id,
+                run_id,
+            )
+            result = "interrupted"
+        except Exception:  # pragma: no cover - stamping must never fail the operation
+            log.exception("stamp backfill failed for collection %s", collection_id)
+            stamped = 0
+            result = "error"
+
+    # Terminal state only while this run is still the live claim (design D10) — a reclaimed run
+    # keeps the `interrupted` state the reclamation wrote rather than being relabelled by the loser.
+    finalized = await collections.finalize_if_held(
+        session,
+        run_id,
+        result=result,
+        stamped=stamped,
+        processed=stamped,
+        finished=_utcnow(),
+    )
+    if not finalized:
+        log.warning(
+            "stamp backfill run %s (collection %s) was RECLAIMED before it could finalize — "
+            "leaving the terminal state the reclamation wrote",
+            run_id,
+            collection_id,
+        )
+    # The row was written by a Core UPDATE, so the ORM object still holds the pre-finalize values
+    # and callers read `result`/`stamped` off it. One SELECT re-syncs it — and after a reclamation
+    # it correctly reports `interrupted`, which is what actually happened.
+    await session.refresh(run)
     return run
 
 
@@ -441,6 +517,7 @@ async def upgrade_incomplete(
     settings: Settings | None = None,
     *,
     progress: ProgressCb | None = None,
+    run_id: int | None = None,
 ) -> dict[str, int]:
     """Upgrade ``incomplete`` proofs (optionally scoped to one collection) after Bitcoin confirms.
 
@@ -455,6 +532,12 @@ async def upgrade_incomplete(
     a sub-kilobyte file already in the page cache — no calendar traffic, no extra query, and none at
     all once the backlog drains. See :func:`_backfill_provenance` for why it is safe here and
     forbidden on every read path.
+
+    ``run_id`` (passed by :func:`upgrade_collection`) fences the pass the same way
+    :func:`stamp_pending` is fenced: ``ots upgrade`` REWRITES the ``.ots`` file in place, so a pass
+    whose lease was reclaimed is a second writer over another operation's proofs. The claim is
+    re-read before each proof; a lost one raises :class:`collections.LeaseLost` and the proofs
+    already upgraded (and already committed by ``progress``) stand.
     """
     settings = settings or get_settings()
     stmt = select(FileEntry).where(FileEntry.ots_state == "incomplete")
@@ -464,6 +547,19 @@ async def upgrade_incomplete(
 
     upgraded = still = processed = 0
     for entry in files:
+        # The fence, before this proof is rewritten (design D10). One SELECT against a pass whose
+        # per-proof cost is a subprocess spawn plus calendar traffic.
+        if run_id is not None and not await collections.lease_held(run_id):
+            log.warning(
+                "the operation claim (run %s) was RECLAIMED mid-upgrade — stopping after %d "
+                "proof(s); those already upgraded stand and the rest stay incomplete",
+                run_id,
+                processed,
+            )
+            await session.rollback()  # nothing commits after the fence fires
+            raise collections.LeaseLost(
+                f"the operation claim (run {run_id}) was reclaimed mid-upgrade"
+            )
         processed += 1
         complete = False
         if not entry.ots_path or not Path(entry.ots_path).exists():
@@ -551,25 +647,61 @@ async def upgrade_collection(
         return result
     result.run = run
 
+    run_id = run.id
+    run_result = "ok"
+    upgraded_count = 0
+    # Tracked as plain locals: a fence hit rolls the session back, expiring `run`, so the finalizing
+    # values must never be read back off the ORM object.
+    processed_count = 0
+
     async def _progress(done: int) -> None:
+        nonlocal processed_count
+        processed_count = done
         run.processed = done
         # Same liveness contract as the stamp backfill: an upgrade over tens of thousands of proofs
         # is exactly the long-running CLI claim the reaper must not revoke (design D10).
         run.heartbeat_at = _utcnow()
         await session.commit()
 
-    try:
-        outcome = await upgrade_incomplete(session, collection, settings, progress=_progress)
-        result.upgraded = outcome.get("upgraded", 0)
-        result.still_incomplete = outcome.get("still_incomplete", 0)
-        run.upgraded = result.upgraded
-        run.processed = int(incomplete)
-        run.result = "ok"
-    except Exception:
-        log.exception("upgrade failed for collection %s (%s)", collection_id, collection_name)
-        run.result = "error"
-    run.finished = _utcnow()
-    await session.commit()
+    # Keepalive around the whole pass (one slow proof must not starve the lease); the fence is
+    # inside `upgrade_incomplete`, before each proof is rewritten.
+    async with collections.run_keepalive(run_id):
+        try:
+            outcome = await upgrade_incomplete(
+                session, collection, settings, progress=_progress, run_id=run_id
+            )
+            result.upgraded = outcome.get("upgraded", 0)
+            result.still_incomplete = outcome.get("still_incomplete", 0)
+            upgraded_count = result.upgraded
+        except collections.LeaseLost:
+            log.warning(
+                "upgrade for collection %s (%s) was RECLAIMED mid-run (run %s) — stopping; proofs "
+                "already upgraded stand and the run row keeps the reclamation's state",
+                collection_id,
+                collection_name,
+                run_id,
+            )
+            run_result = "interrupted"
+        except Exception:
+            log.exception("upgrade failed for collection %s (%s)", collection_id, collection_name)
+            run_result = "error"
+
+    finalized = await collections.finalize_if_held(
+        session,
+        run_id,
+        result=run_result,
+        upgraded=upgraded_count,
+        processed=int(incomplete) if run_result == "ok" else processed_count,
+        finished=_utcnow(),
+    )
+    if not finalized:
+        log.warning(
+            "upgrade run %s (collection %s) was RECLAIMED before it could finalize — leaving the "
+            "terminal state the reclamation wrote",
+            run_id,
+            collection_id,
+        )
+    await session.refresh(run)
     return result
 
 

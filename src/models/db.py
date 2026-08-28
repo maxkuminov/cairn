@@ -154,8 +154,11 @@ class Run(Base):
         DateTime(timezone=True), default=utcnow, nullable=False
     )
     finished: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Liveness of an in-progress run, refreshed by the operation itself as it makes progress (every
-    # scan batch, every stamp batch, every upgraded proof). It is what lets the startup reaper tell a
+    # Liveness of an in-progress run, refreshed by the operation itself: by a background keepalive
+    # on a timer (`collections.run_keepalive`) and, incidentally, by every progress write (scan
+    # batch, stamp batch, upgraded proof). The timer is the load-bearing half — progress writes
+    # alone measure the shape of the work, and ONE unit of it (hashing a multi-terabyte file) can
+    # outlast the abandonment interval. It is what lets the startup reaper tell a
     # run orphaned by a crash from one a LIVE second process is still working: a `cairn stamp` or
     # `cairn upgrade` running while the web app restarts holds a legitimate claim, and revoking it
     # would admit a second proof writer for that collection — the concurrent check-then-act the claim

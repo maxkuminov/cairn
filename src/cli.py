@@ -807,6 +807,16 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
                 if run_row.result == "running":
                     print(busy, file=sys.stderr)
                     return 1
+                if run_row.result == "interrupted":
+                    # The claim was reclaimed while the backfill was working and its fence stopped
+                    # it (design D10). Proofs already placed stand; reporting a completed backfill
+                    # would claim work that was cut short.
+                    print(
+                        f"[{name}] STOPPED — this stamp's operation claim was reclaimed while it "
+                        f"was running; proofs already placed stand and the rest stay pending.",
+                        file=sys.stderr,
+                    )
+                    return 1
                 print(
                     f"[{name}] stamped {run_row.stamped or 0} file(s) "
                     f"(including the previously unstamped baseline)."
@@ -831,6 +841,8 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
             if await collections_svc.claim_run(session, run_row) is None:
                 print(busy, file=sys.stderr)
                 return 1
+            run_id = run_row.id
+
             async def _progress(done: int) -> None:
                 # Per-batch progress AND liveness: this claim is held by a CLI process, so a long
                 # stamp must keep reporting or the panel's startup reaper would treat it as
@@ -839,18 +851,41 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
                 run_row.heartbeat_at = _utcnow()
                 await session.commit()
 
-            try:
-                stamped = await proofs.stamp_pending(session, collection, progress=_progress)
-                run_row.result = "ok"
-            except Exception:  # stamping must never leave the run row `running`
-                run_row.result = "error"
-                run_row.finished = _utcnow()
-                await session.commit()
-                raise
-            run_row.stamped = stamped
-            run_row.processed = stamped
-            run_row.finished = _utcnow()
-            await session.commit()
+            # The lease keeps its own time (design D10): a batch that stalls on a slow calendar can
+            # outlast the abandonment interval, and a CLI claim starved that way would be reclaimed
+            # while this process is still stamping. The keepalive refreshes it on a timer; the fence
+            # inside `stamp_pending` stops the pass if it is reclaimed anyway.
+            async with collections_svc.run_keepalive(run_id):
+                try:
+                    stamped = await proofs.stamp_pending(
+                        session, collection, progress=_progress, run_id=run_id
+                    )
+                except collections_svc.LeaseLost:
+                    print(
+                        f"[{name}] STOPPED — this stamp's operation claim was reclaimed while it "
+                        f"was running; proofs already placed stand and the rest stay pending.",
+                        file=sys.stderr,
+                    )
+                    return 1
+                except Exception:  # stamping must never leave the run row `running`
+                    await collections_svc.finalize_if_held(
+                        session, run_id, result="error", finished=_utcnow()
+                    )
+                    raise
+            if not await collections_svc.finalize_if_held(
+                session,
+                run_id,
+                result="ok",
+                stamped=stamped,
+                processed=stamped,
+                finished=_utcnow(),
+            ):
+                print(
+                    f"[{name}] STOPPED — this stamp's operation claim was reclaimed before it "
+                    f"finished; the run record was left as the reclamation wrote it.",
+                    file=sys.stderr,
+                )
+                return 1
             print(f"[{name}] stamped {stamped} pending file(s).")
         return 0
 

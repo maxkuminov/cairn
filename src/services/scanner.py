@@ -305,376 +305,480 @@ async def scan_collection(
     # Capture the id now (expire_on_commit=False keeps it populated): a later rollback expires the
     # ORM object, and the terminal-state fallback must reference the run by id without a lazy load.
     run_id = run.id
+    # Set by any fence that finds this run is no longer the collection's live claim. Once true the
+    # scan mutates nothing further: no batch commits, no stamping, no terminal-state write.
+    lease_lost = False
 
-    existing: dict[str, FileEntry] = {
-        f.relpath: f
-        for f in await session.scalars(
-            select(FileEntry).where(FileEntry.collection_id == collection.id)
-        )
-    }
-    seen: set[str] = set()
-    added_buffer: list[FileEntry] = []
-    # Ids of files restored in this batch (missing → ok). `_drain` system-acknowledges their open
-    # `missing` events inside the same transaction that commits the restore (design D10).
-    restored_ids: list[int] = []
-    # Every row this scan creates (status 'new'), retained across batch drains so the post-walk
-    # move/rename pass can correlate them with files that went missing in the same run.
-    new_rows: list[FileEntry] = []
-    processed = 0
-    # Files whose names are not valid UTF-8 (lone surrogates from surrogateescape) cannot be stored
-    # as SQLite TEXT, so they are skipped rather than allowed to poison a batch commit. Count all of
-    # them (folded into the run's errors → `partial`) and keep a capped sample of the raw bytes for
-    # one summary WARNING so the operator can find them.
-    skipped_unstorable = 0
-    unstorable_sample: list[bytes] = []
-
-    def _record_alarm(kind: str, relpath: str) -> None:
-        if len(summary.alarming) < ALARM_PATH_CAP:
-            summary.alarming.append((kind, relpath))
-
-    async def _drain() -> None:
-        nonlocal added_buffer, restored_ids
-        await session.flush()  # assign ids to freshly-added FileEntry rows
-        for obj in added_buffer:
-            # `added` is informational, not a nag: born acknowledged (system ack, no user) so a
-            # routine new file never inflates the dashboard's "needs action" count.
-            session.add(
-                Event(
-                    collection_id=collection.id,
-                    file_id=obj.id,
-                    kind="added",
-                    detected_at=now,
-                    acknowledged_at=now,
-                    acknowledged_by=None,
-                )
+    # The lease keeps its own time. Every heartbeat below rides on the completion of a unit of
+    # work — a batch drain, a stamp batch — so a scan that spends longer than the abandonment
+    # interval inside ONE unit (hashing a multi-terabyte file, a stalled NAS batch) would starve
+    # its own claim and be legitimately reclaimed while it is still working, after which it would
+    # walk straight into the stamp tail as a second proof writer. The keepalive refreshes the
+    # claim on a timer, in its own session, for as long as this body runs (design D10).
+    async with collections.run_keepalive(run_id):
+        existing: dict[str, FileEntry] = {
+            f.relpath: f
+            for f in await session.scalars(
+                select(FileEntry).where(FileEntry.collection_id == collection.id)
             )
-        added_buffer = []
-        # A restored file's own `missing` alert is closed by the same transaction that commits the
-        # restore. `_drain` commits every BATCH files *and* after the walk, so acknowledging later
-        # would already have persisted `status='ok'` + the `restored` event: a failing ack would
-        # then leave a healthy file wearing an open `missing` alert nothing can clear. Raising here
-        # instead takes the whole batch down with it — the exception reaches the scan body's
-        # `except`, the session is rolled back and the run finalizes `error` (design D10).
-        for i in range(0, len(restored_ids), ACK_CHUNK):
-            chunk = restored_ids[i : i + ACK_CHUNK]
-            # `kind == "missing"` is load-bearing: a blanket `WHERE file_id = ...` would also
-            # acknowledge an open WORM `modified` event on the same file, which is a different
-            # alert about a different thing and nothing here has resolved it (#12's rejected
-            # fix 7). `acknowledged_by=None` marks a *system* ack, matching the born-acked
-            # convention used for `added`/`restored`/`moved`.
-            await session.execute(
-                update(Event)
-                .where(
-                    Event.file_id.in_(chunk),
-                    Event.kind == "missing",
-                    Event.acknowledged_at.is_(None),
-                )
-                .values(acknowledged_at=now, acknowledged_by=None)
-            )
-        run.processed = processed  # persist live progress for the status badge
-        # ...and the claim's liveness with it. A batch is the scan's unit of progress, so this is
-        # the scan's heartbeat: without it a long scan looks abandoned to the startup reaper, which
-        # would revoke a live claim and let a second writer in (design D10).
-        run.heartbeat_at = _utcnow()
-        await session.commit()
-        # Cleared only once the commit has returned, so a rollback never drops an acknowledgement
-        # that was never persisted.
-        restored_ids = []
+        }
+        seen: set[str] = set()
+        added_buffer: list[FileEntry] = []
+        # Ids of files restored in this batch (missing → ok). `_drain` system-acknowledges their open
+        # `missing` events inside the same transaction that commits the restore (design D10).
+        restored_ids: list[int] = []
+        # Every row this scan creates (status 'new'), retained across batch drains so the post-walk
+        # move/rename pass can correlate them with files that went missing in the same run.
+        new_rows: list[FileEntry] = []
+        processed = 0
+        # Files whose names are not valid UTF-8 (lone surrogates from surrogateescape) cannot be stored
+        # as SQLite TEXT, so they are skipped rather than allowed to poison a batch commit. Count all of
+        # them (folded into the run's errors → `partial`) and keep a capped sample of the raw bytes for
+        # one summary WARNING so the operator can find them.
+        skipped_unstorable = 0
+        unstorable_sample: list[bytes] = []
 
-    try:
-        for relpath in iter_relpaths(root, globs):
-            if not _db_storable(relpath):
-                # Non-UTF-8 name: it cannot be tracked (SQLite TEXT can't bind a lone surrogate).
-                # Skip before any row is created so one bad name can't abort the scan. Not added to
-                # `seen` and never stored, so it also never reads as missing/added on a later scan.
-                summary.errors += 1
-                skipped_unstorable += 1
-                if len(unstorable_sample) < ALARM_PATH_CAP:
-                    unstorable_sample.append(os.fsencode(relpath))
-                continue
-            full = root / relpath
-            if full.is_symlink():
-                continue  # conservative: never follow symlinks out of the read-only jail
-            try:
-                st = full.stat()
-            except OSError:
-                summary.errors += 1
-                continue
-            seen.add(relpath)
-            size = st.st_size
-            mtime = st.st_mtime
-            row = existing.get(relpath)
+        def _record_alarm(kind: str, relpath: str) -> None:
+            if len(summary.alarming) < ALARM_PATH_CAP:
+                summary.alarming.append((kind, relpath))
 
-            try:
-                if row is None:
-                    sha = await _hash(full)
-                    row = FileEntry(
+        async def _drain() -> None:
+            nonlocal added_buffer, restored_ids
+            await session.flush()  # assign ids to freshly-added FileEntry rows
+            for obj in added_buffer:
+                # `added` is informational, not a nag: born acknowledged (system ack, no user) so a
+                # routine new file never inflates the dashboard's "needs action" count.
+                session.add(
+                    Event(
                         collection_id=collection.id,
-                        relpath=relpath,
-                        size=size,
-                        mtime=mtime,
-                        sha256=sha,
-                        status="new",
-                        first_seen=now,
-                        last_checked=now,
-                        last_changed=now,
-                        # perfile collections queue first-seen files for stamping (a 'none' collection
-                        # is tripwire-only and must stay ots_state='none').
-                        ots_state="pending" if perfile else "none",
+                        file_id=obj.id,
+                        kind="added",
+                        detected_at=now,
+                        acknowledged_at=now,
+                        acknowledged_by=None,
                     )
-                    session.add(row)
-                    added_buffer.append(row)
-                    new_rows.append(row)
-                    summary.added += 1
-                elif row.status == "missing":
-                    # Reappeared after being recorded missing. COMPARE BEFORE OVERWRITE: the
-                    # recorded digest is the only record of what this file used to be, and this
-                    # branch used to destroy it with `row.sha256 = await _hash(full)` as its very
-                    # first statement — adopting whatever bytes turned up as "restored / OK"
-                    # without ever checking them (#21). Capture the prior digest first, hash, then
-                    # classify from the comparison (design D6).
-                    prior = row.sha256
-                    sha = await _hash(full)
-                    # The index must keep describing the bytes on disk NOW (sprint-1's verify
-                    # blame attribution reads `files.sha256` as the last-seen digest), so the
-                    # recorded digest is still updated in every outcome. The fix is *compare
-                    # before overwrite*, not *stop overwriting*.
-                    row.sha256 = sha
-                    row.size, row.mtime = size, mtime
-                    row.last_checked = row.last_changed = now
-                    if prior is not None and sha != prior:
-                        # Something is back at the path, but it is not what left: a wrong backup
-                        # snapshot, a truncated restore, or bytes planted while the real file was
-                        # known-absent. It alarms in BOTH modes — a churn collection exempts
-                        # ordinary edits, and a file that was absent and came back different is
-                        # not an ordinary edit (design D4). Reusing `modified` would be silent
-                        # there, which is why `restored_changed` exists.
-                        row.status = "modified"
-                        if perfile:
-                            # The new bytes get their own proof; #15's preservation keeps the
-                            # previous bytes' proof from being overwritten by it.
-                            row.ots_state = "pending"
-                        session.add(
-                            Event(
-                                collection_id=collection.id,
-                                file_id=row.id,
-                                kind="restored_changed",
-                                detected_at=now,
-                                # Both digests in full: the one recorded before the file went
-                                # missing, and the one observed now. Truncating either would cost
-                                # the operator the ability to identify what actually came back.
-                                detail=f"recorded {prior} → found {sha}",
-                            )
+                )
+            added_buffer = []
+            # A restored file's own `missing` alert is closed by the same transaction that commits the
+            # restore. `_drain` commits every BATCH files *and* after the walk, so acknowledging later
+            # would already have persisted `status='ok'` + the `restored` event: a failing ack would
+            # then leave a healthy file wearing an open `missing` alert nothing can clear. Raising here
+            # instead takes the whole batch down with it — the exception reaches the scan body's
+            # `except`, the session is rolled back and the run finalizes `error` (design D10).
+            for i in range(0, len(restored_ids), ACK_CHUNK):
+                chunk = restored_ids[i : i + ACK_CHUNK]
+                # `kind == "missing"` is load-bearing: a blanket `WHERE file_id = ...` would also
+                # acknowledge an open WORM `modified` event on the same file, which is a different
+                # alert about a different thing and nothing here has resolved it (#12's rejected
+                # fix 7). `acknowledged_by=None` marks a *system* ack, matching the born-acked
+                # convention used for `added`/`restored`/`moved`.
+                await session.execute(
+                    update(Event)
+                    .where(
+                        Event.file_id.in_(chunk),
+                        Event.kind == "missing",
+                        Event.acknowledged_at.is_(None),
+                    )
+                    .values(acknowledged_at=now, acknowledged_by=None)
+                )
+            run.processed = processed  # persist live progress for the status badge
+            # ...and the claim's liveness with it. A batch is the scan's unit of progress, so this is
+            # the scan's heartbeat: without it a long scan looks abandoned to the startup reaper, which
+            # would revoke a live claim and let a second writer in (design D10). The keepalive around
+            # this whole body is what covers the gap BETWEEN two of these; this one stays because a
+            # batch commit is also where `processed` belongs.
+            run.heartbeat_at = _utcnow()
+            # The fence, immediately before the write. If this scan's claim was reclaimed while the
+            # batch was being built, another operation now owns the collection and nothing of ours
+            # may land on top of its work: the in-flight batch is rolled back (nothing commits after
+            # the fence sees a reclamation) and the scan aborts. Batches already committed were
+            # committed under a lease that was valid at the time and stand as written.
+            if not await collections.lease_held(run_id):
+                await session.rollback()
+                raise collections.LeaseLost(
+                    f"the operation claim for collection {collection_id} (run {run_id}) was "
+                    f"reclaimed mid-scan"
+                )
+            await session.commit()
+            # Cleared only once the commit has returned, so a rollback never drops an acknowledgement
+            # that was never persisted.
+            restored_ids = []
+
+        try:
+            for relpath in iter_relpaths(root, globs):
+                if not _db_storable(relpath):
+                    # Non-UTF-8 name: it cannot be tracked (SQLite TEXT can't bind a lone surrogate).
+                    # Skip before any row is created so one bad name can't abort the scan. Not added to
+                    # `seen` and never stored, so it also never reads as missing/added on a later scan.
+                    summary.errors += 1
+                    skipped_unstorable += 1
+                    if len(unstorable_sample) < ALARM_PATH_CAP:
+                        unstorable_sample.append(os.fsencode(relpath))
+                    continue
+                full = root / relpath
+                if full.is_symlink():
+                    continue  # conservative: never follow symlinks out of the read-only jail
+                try:
+                    st = full.stat()
+                except OSError:
+                    summary.errors += 1
+                    continue
+                seen.add(relpath)
+                size = st.st_size
+                mtime = st.st_mtime
+                row = existing.get(relpath)
+
+                try:
+                    if row is None:
+                        sha = await _hash(full)
+                        row = FileEntry(
+                            collection_id=collection.id,
+                            relpath=relpath,
+                            size=size,
+                            mtime=mtime,
+                            sha256=sha,
+                            status="new",
+                            first_seen=now,
+                            last_checked=now,
+                            last_changed=now,
+                            # perfile collections queue first-seen files for stamping (a 'none' collection
+                            # is tripwire-only and must stay ots_state='none').
+                            ots_state="pending" if perfile else "none",
                         )
-                        summary.modified += 1
-                        summary.restored_changed += 1
-                        _record_alarm("restored_changed", relpath)
-                    else:
-                        # Identical bytes — or a legacy row with no recorded digest, where nothing
-                        # can be established and so nothing is alarmed. `restored` is
-                        # informational (a missing file came back, the benign direction): born
-                        # acknowledged like `added`, so it stays in the feed without nagging.
-                        # `ots_state` is untouched — the stored proof still commits to these bytes.
-                        row.status = "ok"
-                        session.add(
-                            Event(
-                                collection_id=collection.id,
-                                file_id=row.id,
-                                kind="restored",
-                                detected_at=now,
-                                acknowledged_at=now,
-                                acknowledged_by=None,
-                                detail=(
-                                    None
-                                    if prior is not None
-                                    else "no digest was recorded for this file, so the returned "
-                                    "bytes could not be compared"
-                                ),
-                            )
-                        )
-                        summary.restored += 1
-                    # Close the file's own open `missing` alert(s) in the same transaction that
-                    # commits this reappearance — drained in `_drain` just below (design D5/D10).
-                    # The trigger is that the file REAPPEARED, not that it is healthy: the
-                    # proposition a `missing` alert asserts ("this file is absent") is false
-                    # either way, and for a changed reappearance the alarm rides on the
-                    # unacknowledged `restored_changed` event, which says strictly more.
-                    restored_ids.append(row.id)
-                elif deep or row.size != size or row.mtime != mtime or row.sha256 is None:
-                    # Deep pass re-hashes every file; a normal pass only when size/mtime moved or
-                    # no prior hash exists. Either way the sha comparison below classifies it.
-                    sha = await _hash(full)
-                    if sha != row.sha256:
-                        row.size, row.mtime, row.sha256 = size, mtime, sha
+                        session.add(row)
+                        added_buffer.append(row)
+                        new_rows.append(row)
+                        summary.added += 1
+                    elif row.status == "missing":
+                        # Reappeared after being recorded missing. COMPARE BEFORE OVERWRITE: the
+                        # recorded digest is the only record of what this file used to be, and this
+                        # branch used to destroy it with `row.sha256 = await _hash(full)` as its very
+                        # first statement — adopting whatever bytes turned up as "restored / OK"
+                        # without ever checking them (#21). Capture the prior digest first, hash, then
+                        # classify from the comparison (design D6).
+                        prior = row.sha256
+                        sha = await _hash(full)
+                        # The index must keep describing the bytes on disk NOW (sprint-1's verify
+                        # blame attribution reads `files.sha256` as the last-seen digest), so the
+                        # recorded digest is still updated in every outcome. The fix is *compare
+                        # before overwrite*, not *stop overwriting*.
+                        row.sha256 = sha
+                        row.size, row.mtime = size, mtime
                         row.last_checked = row.last_changed = now
-                        # Content changed: re-queue for a fresh stamp (each distinct content
-                        # state gets its own proof). Applies to both worm and churn collections.
-                        if perfile:
-                            row.ots_state = "pending"
-                        if collection.mode == "churn":
-                            # Change is expected: silently re-baseline, no nag.
-                            row.status = "ok"
-                            summary.ok += 1
-                        else:
+                        if prior is not None and sha != prior:
+                            # Something is back at the path, but it is not what left: a wrong backup
+                            # snapshot, a truncated restore, or bytes planted while the real file was
+                            # known-absent. It alarms in BOTH modes — a churn collection exempts
+                            # ordinary edits, and a file that was absent and came back different is
+                            # not an ordinary edit (design D4). Reusing `modified` would be silent
+                            # there, which is why `restored_changed` exists.
                             row.status = "modified"
+                            if perfile:
+                                # The new bytes get their own proof; #15's preservation keeps the
+                                # previous bytes' proof from being overwritten by it.
+                                row.ots_state = "pending"
                             session.add(
                                 Event(
                                     collection_id=collection.id,
                                     file_id=row.id,
-                                    kind="modified",
+                                    kind="restored_changed",
                                     detected_at=now,
+                                    # Both digests in full: the one recorded before the file went
+                                    # missing, and the one observed now. Truncating either would cost
+                                    # the operator the ability to identify what actually came back.
+                                    detail=f"recorded {prior} → found {sha}",
                                 )
                             )
                             summary.modified += 1
-                            _record_alarm("modified", relpath)
+                            summary.restored_changed += 1
+                            _record_alarm("restored_changed", relpath)
+                        else:
+                            # Identical bytes — or a legacy row with no recorded digest, where nothing
+                            # can be established and so nothing is alarmed. `restored` is
+                            # informational (a missing file came back, the benign direction): born
+                            # acknowledged like `added`, so it stays in the feed without nagging.
+                            # `ots_state` is untouched — the stored proof still commits to these bytes.
+                            row.status = "ok"
+                            session.add(
+                                Event(
+                                    collection_id=collection.id,
+                                    file_id=row.id,
+                                    kind="restored",
+                                    detected_at=now,
+                                    acknowledged_at=now,
+                                    acknowledged_by=None,
+                                    detail=(
+                                        None
+                                        if prior is not None
+                                        else "no digest was recorded for this file, so the returned "
+                                        "bytes could not be compared"
+                                    ),
+                                )
+                            )
+                            summary.restored += 1
+                        # Close the file's own open `missing` alert(s) in the same transaction that
+                        # commits this reappearance — drained in `_drain` just below (design D5/D10).
+                        # The trigger is that the file REAPPEARED, not that it is healthy: the
+                        # proposition a `missing` alert asserts ("this file is absent") is false
+                        # either way, and for a changed reappearance the alarm rides on the
+                        # unacknowledged `restored_changed` event, which says strictly more.
+                        restored_ids.append(row.id)
+                    elif deep or row.size != size or row.mtime != mtime or row.sha256 is None:
+                        # Deep pass re-hashes every file; a normal pass only when size/mtime moved or
+                        # no prior hash exists. Either way the sha comparison below classifies it.
+                        sha = await _hash(full)
+                        if sha != row.sha256:
+                            row.size, row.mtime, row.sha256 = size, mtime, sha
+                            row.last_checked = row.last_changed = now
+                            # Content changed: re-queue for a fresh stamp (each distinct content
+                            # state gets its own proof). Applies to both worm and churn collections.
+                            if perfile:
+                                row.ots_state = "pending"
+                            if collection.mode == "churn":
+                                # Change is expected: silently re-baseline, no nag.
+                                row.status = "ok"
+                                summary.ok += 1
+                            else:
+                                row.status = "modified"
+                                session.add(
+                                    Event(
+                                        collection_id=collection.id,
+                                        file_id=row.id,
+                                        kind="modified",
+                                        detected_at=now,
+                                    )
+                                )
+                                summary.modified += 1
+                                _record_alarm("modified", relpath)
+                        else:
+                            # Only metadata moved; bytes unchanged. Preserve pending status.
+                            row.size, row.mtime = size, mtime
+                            row.last_checked = now
+                            summary.ok += 1
                     else:
-                        # Only metadata moved; bytes unchanged. Preserve pending status.
-                        row.size, row.mtime = size, mtime
+                        # Fast-path: unchanged. Preserve status (e.g. pending 'new'/'modified').
                         row.last_checked = now
                         summary.ok += 1
-                else:
-                    # Fast-path: unchanged. Preserve status (e.g. pending 'new'/'modified').
-                    row.last_checked = now
-                    summary.ok += 1
-            except OSError:
-                summary.errors += 1
-                continue
+                except OSError:
+                    summary.errors += 1
+                    continue
 
-            processed += 1
-            if processed % BATCH == 0:
-                await _drain()
+                processed += 1
+                if processed % BATCH == 0:
+                    await _drain()
 
-        # Flush the final added batch (assigns ids + writes their `added` events) so every new
-        # row is correlatable before the move pass runs.
-        await _drain()
+            # Flush the final added batch (assigns ids + writes their `added` events) so every new
+            # row is correlatable before the move pass runs.
+            await _drain()
 
-        if skipped_unstorable:
-            logging.getLogger("cairn.scanner").warning(
-                "collection %s: skipped %d file(s) with non-UTF-8 names that cannot be tracked "
-                "(SQLite TEXT requires valid UTF-8); run is partial. Sample: %r",
-                collection.id,
-                skipped_unstorable,
-                unstorable_sample,
-            )
-
-        if summary.restored_changed:
-            # One batched line, not one per file: a mass wrong restore (the whole point of the
-            # check) must not bury the log. The per-file digests live in `events.detail`.
-            logging.getLogger("cairn.scanner").warning(
-                "collection %s: %d file(s) reappeared with bytes that do NOT match the digest "
-                "recorded for them — each is now `modified` with an unacknowledged "
-                "`restored_changed` event carrying both digests; review before trusting them",
-                collection.id,
-                summary.restored_changed,
-            )
-
-        # Files in the DB but no longer on disk → candidate deletions (skip ones already missing).
-        newly_missing = [
-            row
-            for relpath, row in existing.items()
-            if relpath not in seen and row.status != "missing"
-        ]
-
-        # Move/rename reconciliation: a candidate-missing file whose content (sha256 + size)
-        # uniquely matches one newly-added file is the same file relocated, not a deletion +
-        # addition. Reconcile it in place (preserves identity/proof) and emit one `moved` event.
-        reconciled_ids = await _reconcile_moves(
-            session, collection, new_rows, newly_missing, now, summary
-        )
-
-        # Genuine deletions: every candidate not reconciled as a move becomes `missing` + alarms.
-        for row in newly_missing:
-            if row.id in reconciled_ids:
-                continue
-            row.status = "missing"
-            row.last_checked = now
-            session.add(
-                Event(collection_id=collection.id, file_id=row.id, kind="missing", detected_at=now)
-            )
-            summary.missing += 1
-            _record_alarm("missing", row.relpath)
-
-        # Auto-baseline: on a deep pass (which has just re-hashed everything), graduate every file
-        # that is still `new` and present this scan to `ok`. Only pre-existing `new` rows qualify —
-        # `existing` is the pre-scan snapshot, so files first discovered this pass (in `new_rows`)
-        # are not promoted. A `new` row that this pass reclassified `modified`/`missing` is no longer
-        # `new`, so it is never auto-accepted. No re-stamp: a `new` file was stamped when first seen.
-        if deep and collection.auto_baseline_new:
-            for relpath, row in existing.items():
-                if row.status == "new" and relpath in seen:
-                    row.status = "ok"
-                    summary.baselined += 1
-            if summary.baselined:
-                logging.getLogger("cairn.scanner").info(
-                    "collection %s: auto-baselined %d intact new file(s) to ok on deep pass",
+            if skipped_unstorable:
+                logging.getLogger("cairn.scanner").warning(
+                    "collection %s: skipped %d file(s) with non-UTF-8 names that cannot be tracked "
+                    "(SQLite TEXT requires valid UTF-8); run is partial. Sample: %r",
                     collection.id,
-                    summary.baselined,
+                    skipped_unstorable,
+                    unstorable_sample,
                 )
 
-        await session.commit()
-        summary.result = "partial" if summary.errors else "ok"
-    except Exception:
-        logging.getLogger("cairn.scanner").exception(
-            "scan failed for collection %s; finalizing run as error", collection_id
-        )
-        summary.result = "error"
-        # A failed flush/commit leaves the session in a pending-rollback state. Clear it so the run
-        # row (committed `running` up front) can still be moved to a terminal state below — otherwise
-        # it stays `running` and the concurrency guard blocks the collection until the next restart.
-        await session.rollback()
-        # That rollback also expired `collection`, so the stamp/alert tail below would raise
-        # `MissingGreenlet` on its first attribute read. Reload it (same identity-mapped instance,
-        # one SELECT). If even that fails the datastore is gone: the tail's own guards handle it,
-        # and the terminal-run write below is what must still happen.
-        try:
-            await session.get(Collection, collection_id)
+            if summary.restored_changed:
+                # One batched line, not one per file: a mass wrong restore (the whole point of the
+                # check) must not bury the log. The per-file digests live in `events.detail`.
+                logging.getLogger("cairn.scanner").warning(
+                    "collection %s: %d file(s) reappeared with bytes that do NOT match the digest "
+                    "recorded for them — each is now `modified` with an unacknowledged "
+                    "`restored_changed` event carrying both digests; review before trusting them",
+                    collection.id,
+                    summary.restored_changed,
+                )
+
+            # Files in the DB but no longer on disk → candidate deletions (skip ones already missing).
+            newly_missing = [
+                row
+                for relpath, row in existing.items()
+                if relpath not in seen and row.status != "missing"
+            ]
+
+            # Move/rename reconciliation: a candidate-missing file whose content (sha256 + size)
+            # uniquely matches one newly-added file is the same file relocated, not a deletion +
+            # addition. Reconcile it in place (preserves identity/proof) and emit one `moved` event.
+            reconciled_ids = await _reconcile_moves(
+                session, collection, new_rows, newly_missing, now, summary
+            )
+
+            # Genuine deletions: every candidate not reconciled as a move becomes `missing` + alarms.
+            for row in newly_missing:
+                if row.id in reconciled_ids:
+                    continue
+                row.status = "missing"
+                row.last_checked = now
+                session.add(
+                    Event(collection_id=collection.id, file_id=row.id, kind="missing", detected_at=now)
+                )
+                summary.missing += 1
+                _record_alarm("missing", row.relpath)
+
+            # Auto-baseline: on a deep pass (which has just re-hashed everything), graduate every file
+            # that is still `new` and present this scan to `ok`. Only pre-existing `new` rows qualify —
+            # `existing` is the pre-scan snapshot, so files first discovered this pass (in `new_rows`)
+            # are not promoted. A `new` row that this pass reclassified `modified`/`missing` is no longer
+            # `new`, so it is never auto-accepted. No re-stamp: a `new` file was stamped when first seen.
+            if deep and collection.auto_baseline_new:
+                for relpath, row in existing.items():
+                    if row.status == "new" and relpath in seen:
+                        row.status = "ok"
+                        summary.baselined += 1
+                if summary.baselined:
+                    logging.getLogger("cairn.scanner").info(
+                        "collection %s: auto-baselined %d intact new file(s) to ok on deep pass",
+                        collection.id,
+                        summary.baselined,
+                    )
+
+            await session.commit()
+            summary.result = "partial" if summary.errors else "ok"
+        except collections.LeaseLost:
+            # Not a failure of this scan: the fence caught the collection being taken from under it
+            # (its lease aged out and something reclaimed it), and stopping is the correct response.
+            # Loud, because a lease this scan believed it held was revoked while it was working —
+            # the operator wants to know the claim timed out, not just that a scan ended early.
+            lease_lost = True
+            logging.getLogger("cairn.scanner").warning(
+                "collection %s: this scan's operation claim (run %s) was RECLAIMED while it was "
+                "running — aborting without committing the in-flight batch, skipping the stamp "
+                "pass, and leaving the run row as the reclamation left it",
+                collection_id,
+                run_id,
+            )
+            # Reported as `skipped`, the same word a refused claim uses: this scan did not complete
+            # a pass over the collection, and reporting it as `ok`/`partial` would let a cron
+            # `cairn scan` record a clean integrity pass it never finished.
+            summary.result = "skipped"
+            # `_drain` already rolled back, which expired `collection`; the alert tail below reads
+            # it. Reload for the same reason (and by the same means) as the failure path.
+            try:
+                await session.get(Collection, collection_id)
+            except Exception:  # pragma: no cover - the datastore is gone
+                logging.getLogger("cairn.scanner").exception(
+                    "reloading collection %s after a reclaimed scan failed", collection_id
+                )
         except Exception:
             logging.getLogger("cairn.scanner").exception(
-                "reloading collection %s after a failed scan body failed", collection_id
+                "scan failed for collection %s; finalizing run as error", collection_id
             )
+            summary.result = "error"
+            # A failed flush/commit leaves the session in a pending-rollback state. Clear it so the run
+            # row (committed `running` up front) can still be moved to a terminal state below — otherwise
+            # it stays `running` and the concurrency guard blocks the collection until the next restart.
+            await session.rollback()
+            # That rollback also expired `collection`, so the stamp/alert tail below would raise
+            # `MissingGreenlet` on its first attribute read. Reload it (same identity-mapped instance,
+            # one SELECT). If even that fails the datastore is gone: the tail's own guards handle it,
+            # and the terminal-run write below is what must still happen.
+            try:
+                await session.get(Collection, collection_id)
+            except Exception:
+                logging.getLogger("cairn.scanner").exception(
+                    "reloading collection %s after a failed scan body failed", collection_id
+                )
 
-    # Stamp the files this scan queued (perfile only). A stamp failure must never fail the
-    # scan: count what succeeded, log the rest, and finish the run normally.
-    if perfile:
+        # Stamp the files this scan queued (perfile only). A stamp failure must never fail the
+        # scan: count what succeeded, log the rest, and finish the run normally.
+        #
+        # THE FENCE IN FRONT OF PROOF MUTATION. This tail runs after the walk, under the same claim,
+        # and it is the one part of a scan that writes the proof store. If the claim is no longer
+        # ours, stamping here is precisely the second writer design D10 exists to exclude — two
+        # processes both finding a canonical path free and both `os.replace`-ing onto it, one
+        # submission destroyed with no trace. So the lease is re-read from the datastore first, and
+        # a lost one skips stamping entirely: the files stay `pending` and whoever holds the
+        # collection now (or the next pass) stamps them.
+        stamped_count = 0
+        if perfile and not lease_lost and not await collections.lease_held(run_id):
+            lease_lost = True
+            logging.getLogger("cairn.scanner").warning(
+                "collection %s: the operation claim (run %s) was RECLAIMED before this scan's stamp "
+                "pass — stamping nothing; the queued files stay pending for the next pass",
+                collection_id,
+                run_id,
+            )
+        if perfile and not lease_lost:
+            try:
+                from . import proofs
+
+                async def _stamp_heartbeat(done: int) -> None:
+                    # The stamp pass runs after the walk, under the same claim, and can take far longer
+                    # than the reaper's threshold on a large backlog. Batch-granular heartbeat so the
+                    # claim keeps reading live; `processed` stays the scan's own count.
+                    run.heartbeat_at = _utcnow()
+                    await session.commit()
+
+                stamped_count = await proofs.stamp_pending(
+                    session, collection, progress=_stamp_heartbeat, run_id=run_id
+                )
+            except collections.LeaseLost:
+                # `stamp_pending`'s own per-batch fence fired: the claim went away between batches.
+                # Proofs already placed stand (see `stamp_pending`); nothing more is written.
+                lease_lost = True
+                logging.getLogger("cairn.scanner").warning(
+                    "collection %s: the operation claim (run %s) was RECLAIMED during this scan's "
+                    "stamp pass — stopped between batches; proofs already placed stand",
+                    collection_id,
+                    run_id,
+                )
+                # The fence rolled back to commit nothing further, which expired `collection`; the
+                # alert tail below reads it. Reload it exactly as the failure path does.
+                try:
+                    await session.get(Collection, collection_id)
+                except Exception:  # pragma: no cover - the datastore is gone
+                    logging.getLogger("cairn.scanner").exception(
+                        "reloading collection %s after a reclaimed stamp pass failed", collection_id
+                    )
+            except Exception:
+                logging.getLogger("cairn.scanner").exception(
+                    "stamp_pending failed for collection %s", collection_id
+                )
+
+        # Finalize under the fence: the terminal state is written only while this run is still the
+        # collection's live claim (`finalize_if_held` fuses the check into the UPDATE's WHERE). A run
+        # that was reclaimed keeps the `interrupted` state the reclamation wrote — overwriting it
+        # with `ok`/`partial` would let a scan that was taken off the collection mid-flight refresh
+        # the dead-man's switch, which is a false negative of exactly the kind this product exists
+        # to prevent. Nothing here reads `run` afterwards, so it is deliberately not refreshed.
         try:
-            from . import proofs
-
-            async def _stamp_heartbeat(done: int) -> None:
-                # The stamp pass runs after the walk, under the same claim, and can take far longer
-                # than the reaper's threshold on a large backlog. Batch-granular heartbeat so the
-                # claim keeps reading live; `processed` stays the scan's own count.
-                run.heartbeat_at = _utcnow()
-                await session.commit()
-
-            run.stamped = await proofs.stamp_pending(
-                session, collection, progress=_stamp_heartbeat
+            finalized = await collections.finalize_if_held(
+                session,
+                run_id,
+                added=summary.added,
+                modified=summary.modified,
+                missing=summary.missing,
+                moved=summary.moved,
+                stamped=stamped_count,
+                processed=processed,
+                finished=_utcnow(),
+                result=summary.result,
             )
+            if not finalized:
+                logging.getLogger("cairn.scanner").warning(
+                    "collection %s: run %s was RECLAIMED before this scan could finalize it — "
+                    "leaving the terminal state the reclamation wrote and recording nothing",
+                    collection_id,
+                    run_id,
+                )
         except Exception:
+            # A scan MUST reach a terminal run state — never leave the badge/concurrency guard wedged at
+            # `running`. If even this finalizing commit fails, reset and force the row terminal directly.
+            # Still guarded on `result='running'`: a reclaimed run is already terminal and must not be
+            # relabelled by the loser of that race.
             logging.getLogger("cairn.scanner").exception(
-                "stamp_pending failed for collection %s", collection_id
+                "finalizing run %s failed; forcing terminal error state", run_id
             )
-
-    run.added = summary.added
-    run.modified = summary.modified
-    run.missing = summary.missing
-    run.moved = summary.moved
-    run.processed = processed
-    run.finished = _utcnow()
-    run.result = summary.result
-    try:
-        await session.commit()
-    except Exception:
-        # A scan MUST reach a terminal run state — never leave the badge/concurrency guard wedged at
-        # `running`. If even this finalizing commit fails, reset and force the row terminal directly.
-        logging.getLogger("cairn.scanner").exception(
-            "finalizing run %s failed; forcing terminal error state", run_id
-        )
-        await session.rollback()
-        await session.execute(
-            update(Run).where(Run.id == run_id).values(result="error", finished=_utcnow())
-        )
-        await session.commit()
-        summary.result = "error"
+            await session.rollback()
+            await session.execute(
+                update(Run)
+                .where(Run.id == run_id, Run.result == "running")
+                .values(result="error", finished=_utcnow())
+            )
+            await session.commit()
+            summary.result = "error"
 
     # Best-effort alert AFTER the commit: a newly-detected missing (any mode), a file that came
     # back with different bytes (any mode) or a modified-WORM change fans out to the collection's
