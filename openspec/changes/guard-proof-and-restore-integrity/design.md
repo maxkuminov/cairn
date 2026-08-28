@@ -59,22 +59,27 @@ canonical proof of a *real* watched file literally named `<relpath>.<digest>`.
   watched filename can influence its length — the archive can never be the thing that trips
   ENAMETOOLONG, and the `_proof_output_writable` pre-check keeps applying only to the canonical
   path, as its spec requires.
-- Content-addressing is semantically exact: a `.ots` attests **bytes**, not a path. Two files that
-  ever held the same content share one archived proof, and re-archiving the same digest is a no-op.
+- Content-addressing is semantically exact: a `.ots` attests **bytes**, not a path. The digest
+  therefore selects an archive **family**, not a single slot: every proof committing to digest `D`
+  files under `D`'s shard, and **every incoming proof gets its own exclusive slot** in that family
+  (`<D>.ots`, then `<D>.1.ots`, `<D>.2.ots`, …). Archiving a digest already present is never a no-op
+  and never a replacement — see "Archive collision" below for why two proofs for one digest are not
+  interchangeable.
 - `.superseded` cannot shadow a collection directory (`str(collection_id)` is always digits) — the
   same argument that makes `.staging` safe.
 - Its **`<collection_id>`** level is kept even though the digest alone would be unique, so a
   collection's proofs can be moved or backed up as one subtree and a `DELETE` of a collection has an
   obvious archive counterpart if pruning is ever built.
 
-### The four-way placement rule, and why same-digest is not simply a no-op
+### The placement rule, and why same-digest is not simply a no-op
 
 | existing canonical proof | action | rationale |
 |---|---|---|
 | unreadable | archive under `unknown/<uuid>.ots`; place staged | an unparseable file may still be a valid proof this build cannot read; deleting it is the failure mode being fixed |
 | digest ≠ staged digest | archive under its digest; place staged | the old bytes' anchor is evidence for the old bytes; the new bytes need theirs |
-| digest == staged, existing **complete**, anchor **not disproven** | **keep existing; discard staged** | #15's headline case. A fresh stamp is always `incomplete`; replacing a Bitcoin-anchored proof with a same-bytes pending one is a strict downgrade of the claim, which is exactly the loss the issue describes |
+| digest == staged, existing **complete**, anchor **confirmed by the caller** | **keep existing; discard staged**; row may be recorded `complete` | #15's headline case. A fresh stamp is always `incomplete`; replacing a Bitcoin-anchored proof with a same-bytes pending one is a strict downgrade of the claim, which is exactly the loss the issue describes. In practice adoption (D1a) has already claimed this file — the confirmation both branches need is one lookup, made once by `stamp_pending` |
 | digest == staged, existing **complete**, anchor **disproven by the caller** | archive existing; place staged | a "complete" proof is only *syntactically* anchored here — `_place_proof` reads the file, it does not check the chain. Keeping it would let a fabricated attestation hold the canonical path and discard the real proof produced seconds earlier: D1a's rule relocated into placement. The caller (`stamp_pending`) already knows when a backend answered "this anchor does not confirm"; it passes that verdict down |
+| digest == staged, existing **complete**, anchor **neither confirmed nor disproven** (backend unreachable, or no lookup made) | **defer: keep existing canonical, archive the *staged* proof, record nothing, leave the row `pending`** | the outage case. Recording `complete` here would promote an unverified — possibly fabricated — artifact precisely when verification was unavailable, which is when an attacker wants the decision taken; discarding the staged proof would lose evidence, and demoting the existing one would throw away a probably-genuine anchor over a network blip. Keeping both artifacts and re-attempting later is the only outcome that neither asserts nor destroys evidence. The staged proof goes into digest `D`'s archive family under its own suffixed slot, so nothing is lost and the next pass finds the canonical path exactly as it was |
 | digest == staged, existing **incomplete** | archive existing; place staged | a proof the calendars never anchored can legitimately be refreshed — the `stale_incomplete` requirement exists so a never-confirmed proof *can* be re-stamped. Nothing is lost: the old one is archived |
 
 The digest and the completeness both come from **one** offline library parse of the existing `.ots`
@@ -90,24 +95,32 @@ negative `stat` per file; only an occupied path costs the small local parse.
 
 **A same-digest match is necessary but not sufficient to adopt.** Adopting means recording a proof
 Cairn did not just place, and recording `ots_digest` — provenance — from it. Three conditions must
-all hold (see D1a); otherwise the file takes the ordinary stamp path, where the four-way rule above
-preserves whatever is on disk and a fresh proof is placed. Nothing is lost by declining to adopt:
-declining costs one calendar round-trip, while adopting wrongly records provenance for a proof
-nothing vouched for.
+all hold (see D1a); otherwise the file takes the ordinary stamp path, where the placement rule above
+preserves whatever is on disk and a fresh proof is placed — or, on a backend outage, defers and
+records nothing. Nothing is lost by declining to adopt: declining costs one calendar round-trip,
+while adopting wrongly records provenance for a proof nothing vouched for.
 
 ### Crash-safety of the shuffle
 
-Both moves are `os.replace` within the proof-store volume, so each is atomic; the **pair** is not.
-Ordering is therefore load-bearing:
+The archive step (exclusive-create → copy → fsync → close → unlink the source) and the placement
+(`os.replace` staged → canonical) are two operations; neither the pair nor the archive step as a
+whole is atomic. Ordering is therefore load-bearing:
 
-1. archive the existing proof (`os.replace` old → archive path),
+1. archive the existing proof (copy it into its archive slot, then unlink it from the canonical
+   path),
 2. `os.replace` staged → canonical.
 
-An interruption between them leaves the canonical path **absent** and the old proof **safe in the
+An interruption **between** them leaves the canonical path **absent** and the old proof **safe in the
 archive**. That is recoverable: the DB write that would set `ots_state='incomplete'` has not
 happened either (the caller updates the row only after the stamp call returns), so the file is still
 `pending` and the next pass re-stamps it. The reverse order would destroy the proof before
 preserving it — the exact bug — so it is forbidden, not merely discouraged.
+
+An interruption **inside** step 1 is harmless for the same reason the source is unlinked last: the
+proof being archived is still intact at the canonical path, and the worst residue is a truncated file
+occupying one slot of the digest's archive family, which the next attempt steps past via `EEXIST`
+onto the following index. The archive is append-only and never read by the product, so a dead slot
+costs a few hundred bytes, never a proof.
 
 A **failure to archive refuses the placement.** It raises a transient `OtsError`, which under the
 existing classification leaves the member `pending` for retry and never drops it to `none`. This is
@@ -132,10 +145,23 @@ taken. Nothing in the archive is ever replaced or removed. The suffix is bounded
 the fixed-length-name property (no watched filename can influence the archive path) is untouched.
 
 The archive write is therefore an **exclusive create**: it must fail rather than replace an existing
-name, so `os.replace` is not usable for it (it silently overwrites). Link-then-unlink (`os.link` to
-the chosen name — `EEXIST` means "try the next index" — then `os.unlink` the source) is atomic per
-name and stays within the proof-store volume, exactly as `os.replace` does. Scanning for a free
-index is a check-then-act sequence, and D10 is what makes it safe: the whole
+name, so `os.replace` is not usable for it (it silently overwrites). The method is
+`os.open(candidate, O_CREAT | O_EXCL | O_WRONLY)` — `EEXIST` means "try the next index" — then copy
+the source's bytes into the new descriptor, `flush` + `os.fsync`, `close`, and **only then**
+`os.unlink` the source.
+
+`os.link` was the earlier choice and is rejected: it needs hard-link support, which the proof store's
+contract does not require. The store's stated requirement is that it be *writable*, and homelab
+proof stores routinely live on CIFS/SMB shares, FAT-derived volumes, FUSE mounts and
+policy-restricted paths where create + `rename` work but `link` returns `EPERM`/`EOPNOTSUPP`. Since
+an archive failure is classified transient (correctly — archiving is not the final output path),
+`os.link` on such a store would turn **every** occupied-path placement into a permanent retry loop
+that reports as transient: no proof on that collection could ever be refreshed, and nothing would
+surface it. Copy costs one extra read+write of a sub-kilobyte file on a path already off the hot
+loop; it is the right trade. No preflight probe is needed — the copy simply works everywhere `open`
+does.
+
+Scanning for a free index is a check-then-act sequence, and D10 is what makes it safe: the whole
 inspect→archive→place→record sequence runs under the collection's single-operation claim, and the
 archive path is already scoped by `<collection_id>`, so no two writers can ever be choosing an index
 in the same shard directory. The exclusive create is the belt to that braces — a lost race costs an
@@ -150,16 +176,25 @@ while the rest of the batch is placed. The staging flow (symlink → `<uuid>.ots
 untouched; preservation acts only on the destination.
 
 **`_place_proof` must report which branch it took**, because the caller's row update differs
-(below). It returns a small outcome (`placed: bool`, `digest: str | None`, `state:
-'incomplete'|'complete'`) rather than `None`; `stamp_via_symlink` and `stamp_batch_via_symlink`
-propagate it (`StampOutcome | None` per member replaces `list[bool]` — `None` still means "failed,
-fall back"). Two call sites and their tests, no behavioural change for failures.
+(below). It returns a small outcome (`kind: 'placed' | 'kept' | 'deferred'`, `digest: str | None`,
+`state: 'incomplete' | 'complete' | None`) rather than `None`; `stamp_via_symlink` and
+`stamp_batch_via_symlink` propagate it (`StampOutcome | None` per member replaces `list[bool]` —
+`None` still means "failed, fall back"). Two call sites and their tests, no behavioural change for
+failures. `deferred` is **not** a failure: nothing raises, the member simply gets no row update and
+stays `pending`.
 
 ### What the caller records
 
 - **placed** → `ots_path = out`, `ots_state = 'incomplete'`, `ots_stamped_at = now`,
   `ots_digest = <staged digest>`. A real submission happened, so `now` is the truth.
-- **kept existing** → `ots_path = out`, `ots_state = 'complete'`, `ots_digest = <existing digest>`,
+- **deferred** (same digest, syntactically anchored existing proof, no verdict from the caller) →
+  **nothing at all**. No `ots_path`, no `ots_state`, no `ots_digest`, no `ots_stamped_at`; the row
+  stays `pending` and the file stays in the queue. The existing proof is still canonical and the
+  staged proof is in the archive family for its digest, so the next pass — the first one whose
+  backend answers — decides the case with both artifacts still on hand. This is the outage branch,
+  and its whole point is that an outage produces *no* recorded claim.
+- **kept existing** (only reachable with the caller's *confirmed* verdict) → `ots_path = out`,
+  `ots_state = 'complete'`, `ots_digest = <existing digest>`,
   and **`ots_stamped_at` is left as it is** — NULL on a row re-created by accept→restore.
   *(Flagged for Max.)* The alternative, stamping it with `now`, would print "notarized today" over a
   three-year-old anchor: the same class of lie as #12's rejected fix 6 (labelling a download
@@ -193,45 +228,61 @@ where nothing was checked) it behaves exactly as the table says.
 1. the canonical proof **parses**; and
 2. it commits to the **digest recorded for the file** (`entry.sha256`) — the file's own bytes
    corroborate the value being written to `ots_digest`; and
-3. **either** the row already records that same digest as its `ots_digest` — Cairn itself recorded
-   placing this proof for these bytes, so the provenance is its own — **or** the proof's Bitcoin
-   anchor **verifies** against the configured verification backend at adoption time, which is the
-   same check `/verify` performs and the only evidence available for a proof Cairn has no record of.
+3. the proof's Bitcoin anchor **verifies** against the configured verification backend **at adoption
+   time** — the same check `/verify` performs, and the only evidence that the artifact on disk is one
+   Cairn may stand behind.
 
-Otherwise the file is **not** adopted: it takes the ordinary stamp path, where the four-way rule
-archives whatever is at the canonical path and places the newly produced proof.
+**The row's own `ots_digest` is not a substitute for condition 3**, and an earlier revision of this
+design was wrong to make it one. `ots_digest` records *the digest a proof Cairn placed committed to* —
+a fact about the watched file's bytes. It is not an identity of the artifact: unboundedly many
+distinct `.ots` files commit to one digest, and producing one is trivial for anyone who can write
+into the proof store. So "the row's recorded provenance equals the digest of the file now at that
+path" is satisfied *by the swap itself*, and adopting on it would promote a fabricated proof to
+`complete` with no chain consulted — laundering exactly the artifact the column exists to expose. The
+provenance column's job is **detection** (recorded vs. parsed disagreeing ⇒ this is not the proof
+Cairn placed); it was never an authentication of the artifact, and using it as one inverts it. The
+cost of always verifying is one backend lookup per occupied canonical path in a stamp pass — the same
+lookup `/verify` makes, on a set that is normally empty.
+
+Otherwise the file is **not** adopted: it takes the ordinary stamp path, where the placement rule
+archives whatever is at the canonical path and places the newly produced proof — except on a backend
+outage, where placement *defers* and nothing is recorded at all (below).
 
 Consequences, each deliberate:
 
-- **An `incomplete` same-digest proof is never adopted.** It has no anchor to verify (condition 3's
-  second limb is unavailable), and if the row already had provenance for it, adoption would freeze a
-  never-anchored proof in place with no submission behind it. The four-way rule's "same digest,
-  existing incomplete → archive and place" branch is exactly the refresh `stale_incomplete` exists to
-  make possible, and adoption must not defeat it. This is what closes the "adopted, `incomplete`,
-  `ots_stamped_at` NULL, therefore invisible to `stale_incomplete` forever" hole.
+- **An `incomplete` same-digest proof is never adopted.** It has no anchor to verify, so condition 3
+  cannot be met, and adopting it would freeze a never-anchored proof in place with no submission
+  behind it. The placement rule's "same digest, existing incomplete → archive and place" branch is
+  exactly the refresh `stale_incomplete` exists to make possible, and adoption must not defeat it.
+  This is what closes the "adopted, `incomplete`, `ots_stamped_at` NULL, therefore invisible to
+  `stale_incomplete` forever" hole.
 - **An unverifiable same-digest proof is never adopted** — forged, corrupt in its attestation, or
   simply anchored to a block the backend disagrees with. It archives and re-stamps, and the
   disproven verdict is carried into `_place_proof` so its keep-existing branch cannot resurrect the
-  proof adoption just rejected.
-- **An unreachable backend degrades to re-stamping, not to adopting.** If the explorer/node cannot
-  be reached, condition 3 is not satisfied, so the file is stamped normally. Failing *open* here
-  (adopt on an unreachable backend) would make provenance forgeable by anyone who can take the
-  backend offline. Nothing is *disproven* in this case, so no verdict is passed down and placement's
-  ordinary keep-existing branch applies: the anchored proof stays canonical, the staged proof is
-  discarded, and the cost of the outage is one wasted calendar round-trip — never a demotion of the
-  claim and never a lost proof.
+  proof adoption just rejected. The row's recorded provenance does not rescue it.
+- **An unreachable backend records nothing at all.** If the explorer/node cannot be reached,
+  condition 3 is unmet, so there is no adoption; and because nothing was *disproven*, no verdict is
+  passed down and `_place_proof` takes its **deferred** branch: the existing proof stays canonical,
+  the staged proof is archived rather than discarded, and the row is left `pending` with no state,
+  provenance or stamp time written. Failing *open* here — adopting, or keeping-and-recording-complete
+  — would make a completed notarization purchasable by anyone who can take the backend offline, which
+  is the cheapest attack on the list. Failing *closed* the other way — demoting or discarding the
+  existing anchored proof — would destroy probably-genuine evidence over a network blip. Deferral is
+  the only branch that does neither, and it costs one wasted calendar round-trip plus one archive
+  slot per outage pass.
 
 **`ots_stamped_at` per branch, explicitly:**
 
 | branch | `ots_state` | `ots_digest` | `ots_stamped_at` |
 |---|---|---|---|
-| adopted via the row's own recorded provenance | from the parsed proof (`complete`, since an `incomplete` proof is never adopted) | the parsed digest (equal to what was already recorded) | **unchanged** — no submission happened |
-| adopted via a verified anchor | `complete` | the parsed digest | **unchanged** — NULL stays NULL. The proof's own attestation carries the real date; `now` would assert a submission Cairn did not make |
+| adopted (anchor verified against the backend — the only adoption branch) | `complete` (an `incomplete` proof is never adopted) | the parsed digest | **unchanged** — NULL stays NULL. The proof's own attestation carries the real date; `now` would assert a submission Cairn did not make |
 | placed (staged proof written) | `incomplete` | the staged digest | `now` |
-| kept existing (same digest, anchored, at placement time) | `complete` | the existing proof's digest | **unchanged** |
+| kept existing (same digest, anchor **confirmed** by the caller at placement time) | `complete` | the existing proof's digest | **unchanged** |
+| **deferred** (same digest, syntactically anchored, backend unreachable / no verdict) | **not written** — row stays `pending` | **not written** | **not written** |
 
-The adoption log line names the file, the digest, and — for the verified-anchor branch — the block
-the anchor was confirmed against, so an adoption is auditable after the fact.
+The adoption log line names the file, the digest, and the block the anchor was confirmed against, so
+an adoption is auditable after the fact. The deferral log line names the file, the canonical path and
+the archive slot the staged proof went to, so an outage leaves a trail rather than silence.
 
 ## D2 — `files.ots_digest`: what it means, and why it is never lazily filled
 
@@ -517,7 +568,7 @@ exclude these rows rather than asserting an invariant they violate.
 
 ## D10 — proof mutation is single-writer per collection, by claim, not by lock
 
-The four-way placement rule is *check-then-act*: inspect the canonical path, decide, archive, place,
+The placement rule is *check-then-act*: inspect the canonical path, decide, archive, place,
 record. Under concurrency that is a lost-update machine — two processes can both find the path
 unoccupied and both `os.replace` onto it, and the loser's proof is gone. Locking `_place_proof`
 alone does not fix it, because the decision that matters (adopt? archive? place?) is taken outside

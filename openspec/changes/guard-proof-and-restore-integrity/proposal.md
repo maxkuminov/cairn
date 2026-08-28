@@ -105,7 +105,8 @@ the DB is an index — the guarantee is bytes + `.ots`).
 
   | existing proof at the canonical path | outcome |
   |---|---|
-  | commits to the **same** digest and is **complete** (Bitcoin-anchored), anchor not disproven | the existing proof is **kept canonical**; the freshly staged proof is discarded. An anchored proof is never demoted for a same-bytes re-stamp — this is #15's headline case. |
+  | commits to the **same** digest and is **complete** (Bitcoin-anchored), anchor **confirmed by the caller** | the existing proof is **kept canonical**; the freshly staged proof is discarded, and the row may be recorded `complete`. An anchored proof is never demoted for a same-bytes re-stamp — this is #15's headline case. |
+  | commits to the **same** digest and is **complete**, anchor **neither confirmed nor disproven** (verification backend unreachable) | **deferred — nothing changes**: the existing proof stays canonical, the freshly staged proof is archived rather than discarded, and the row stays `pending` with no state, provenance or stamp time written. An outage must never be able to buy a `complete` notarization for an unverified artifact, and must never cost a proof either; the next pass that reaches the backend settles it. |
   | commits to the **same** digest, carries an attestation the caller **established does not confirm** | the existing proof is archived; the new one is placed. Placement reads a local file and checks no chain, so a fabricated attestation must not be able to hold the canonical path. |
   | commits to the **same** digest and is **incomplete** | the existing proof is archived; the new one is placed. A never-anchored proof can still be refreshed, and nothing is lost. |
   | commits to a **different** digest | the existing proof is archived under that digest; the new one is placed. |
@@ -123,19 +124,22 @@ the DB is an index — the guarantee is bytes + `.ots`).
 - **The canonical path keeps serving the current digest's proof**, so `/verify`, "Download .ots
   proof", `cairn verify`, `cairn export` and `upgrade` are unchanged — they read `files.ots_path`
   and find exactly what they find today.
-- **Archive-then-place ordering, and preservation failure is transient.** The archive move and the
-  placement are two `os.replace` calls on one filesystem: each atomic, the pair not. Archiving runs
-  first, so no interruption can destroy a proof before it is preserved, and a failure to preserve
-  **refuses the placement** (a transient `OtsError` → the file stays `pending` for retry) rather
-  than proceeding over an unpreserved proof.
+- **Archive-then-place ordering, and preservation failure is transient.** Archiving is an exclusive
+  create (`O_CREAT|O_EXCL`) followed by a copy, an fsync and only then the removal of the source — it
+  requires nothing of the filesystem beyond being writable — hard-link support is explicitly not
+  required — and the placement is an `os.replace`. Archiving runs first, so no interruption can destroy a proof before it is
+  preserved, and a failure to preserve **refuses the placement** (a transient `OtsError` → the file
+  stays `pending` for retry) rather than proceeding over an unpreserved proof.
 - **`stamp_pending` stops paying a calendar round-trip for a proof it already has** — but only for a
   proof it may stand behind. A pending file's existing canonical proof is *adopted* (state and
   provenance recorded from it, no submission) only when it parses, commits to the row's recorded
-  digest, **and** either the row already records that digest as its own provenance or the proof's
-  Bitcoin anchor **verifies** against the configured backend. An `incomplete`, forged or
-  unverifiable same-digest proof is never adopted: it takes the archive-then-re-stamp path, so the
-  incomplete-proof refresh rule still applies and a fabricated `.ots` can never be promoted into
-  recorded provenance. An unreachable backend degrades to re-stamping, never to adopting. Adoption
+  digest, **and** its Bitcoin anchor **verifies** against the configured backend at that moment. The
+  row's own recorded provenance is **not** a substitute for that lookup: it names the digest a proof
+  committed to, not which artifact is on disk, so any fabricated same-digest `.ots` satisfies it. An
+  `incomplete`, forged or unverifiable same-digest proof is never adopted: it takes the
+  archive-then-re-stamp path, so the incomplete-proof refresh rule still applies and a fabricated
+  `.ots` can never be promoted into recorded provenance. An unreachable backend adopts nothing and
+  records nothing — placement defers, both artifacts survive, and the row stays `pending`. Adoption
   never moves `ots_stamped_at` forward, and never records an `incomplete` state — so nothing adopted
   can slip out of the stuck-proof report. The `_place_proof` guard remains the authoritative backstop.
 - **All of it runs under the collection's single-operation claim.** Inspect → preserve → place →
@@ -144,7 +148,8 @@ the DB is an index — the guarantee is bytes + `.ots`).
   collection claim (`claim_run` + the partial unique index), which the scheduler and the panel
   routes take today. This change makes `cairn stamp` and `cairn upgrade` take it too (`cairn scan`
   already does via `scan_collection`), and a CLI entry point that cannot get it **refuses with a
-  clear message and never waits**.
+  clear message and never waits** — exiting non-zero when *every* collection it was asked to act on
+  was refused (scan included), so a cron run that examined nothing cannot read as a clean pass.
 
 ### Each stored proof's committed digest is recorded (#15 + sprint-1 D1)
 

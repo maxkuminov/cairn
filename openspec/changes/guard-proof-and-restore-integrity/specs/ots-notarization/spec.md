@@ -294,19 +294,30 @@ Before placing a proof the system SHALL determine whether its output path is alr
 if so, SHALL read the existing proof's committed digest and whether it carries a Bitcoin attestation,
 and act as follows:
 
-- existing proof commits to the **same** digest and carries a Bitcoin attestation that has not been
-  shown to be false — the existing proof SHALL be kept in place and the newly produced proof SHALL be
-  discarded. A newly produced proof is never Bitcoin-anchored, so replacing an anchored proof for the
-  same bytes is a strict downgrade of the claim;
+- existing proof commits to the **same** digest and carries a Bitcoin attestation the caller has
+  **established confirms** against the configured verification backend at that moment — the existing
+  proof SHALL be kept in place and the newly produced proof SHALL be discarded, and the file MAY be
+  recorded against it with a `complete` proof state. A newly produced proof is never Bitcoin-anchored,
+  so replacing a confirmed anchored proof for the same bytes is a strict downgrade of the claim;
 - existing proof commits to the **same** digest and carries a Bitcoin attestation the caller has
   **established does not confirm** against the configured verification backend — the existing proof
   SHALL be preserved and the new one placed. The inspection performed here reads a local file and
   reaches the network for nothing, so "carries an attestation" is a syntactic fact that anyone able
   to write into the proof store can manufacture. Keeping such a proof would discard a genuine proof
   produced moments earlier in favour of a fabricated one, and would defeat the adoption rule below by
-  the simple route of writing the forgery to the canonical path. Where the caller has established no
-  such finding — including where the backend could not be reached, which establishes nothing — the
-  preceding case applies;
+  the simple route of writing the forgery to the canonical path;
+- existing proof commits to the **same** digest, carries a Bitcoin attestation, and the caller has
+  established **neither** finding about it — because the verification backend could not be reached,
+  or because no lookup was made — the placement SHALL be **deferred**, changing nothing: the existing
+  proof SHALL be kept at the canonical path, the newly produced proof SHALL be preserved rather than
+  discarded, the file SHALL be left queued for stamping, and **no** proof state, provenance or stamp
+  time SHALL be recorded for it. A syntactic attestation nobody has confirmed is not evidence the
+  system may stand behind, so recording it `complete` would launder an unverified — possibly
+  fabricated — artifact into a completed notarization at exactly the moment verification was
+  unavailable. Nor may the existing proof be demoted or discarded on the strength of an outage: it may
+  well be genuine. Keeping both artifacts and re-attempting on a later pass, when the backend answers,
+  is the only outcome that neither asserts nor destroys evidence. A deferral SHALL be logged naming
+  the file, the canonical path and the location the newly produced proof was preserved to;
 - existing proof commits to the **same** digest and is not yet anchored — the existing proof SHALL
   be preserved and the new one placed. A proof the calendars never anchored may legitimately be
   refreshed, and nothing is lost;
@@ -334,6 +345,16 @@ favour of an unanchored one, which is the loss this requirement exists to preven
 be derived only from how many proofs are already preserved at that location, so it cannot inherit any
 component of a watched file's name.
 
+Preservation SHALL claim each name by an **exclusive create** — create-the-name-or-fail-if-it-exists,
+then write the proof's bytes, flush them to durable storage, close, and only then remove the source
+that was preserved — and a name that already exists SHALL cause the next suffix to be tried rather
+than anything being replaced. Preservation SHALL **NOT** require the proof store's filesystem to
+support hard links. The proof store's only stated requirement is that it be writable, and writable
+filesystems that reject hard links are ordinary; a preservation method that needed them would turn
+every occupied output path on such a store into a permanent retry loop classified as transient, so no
+proof for that collection could ever be refreshed — a failure this requirement's own retry rule would
+then hide indefinitely.
+
 Preservation SHALL happen **before** the placement, never after, so no interruption between the two
 operations can leave the earlier proof destroyed. A failure to preserve SHALL **refuse the
 placement** and SHALL be classified **transient**, leaving the file queued for retry: preservation
@@ -343,11 +364,22 @@ prevent the other members of a batch from being stamped.
 
 Each preservation, and each discarded newly-produced proof, SHALL be logged naming both paths.
 
-#### Scenario: A same-digest re-stamp does not replace an anchored proof
+#### Scenario: A same-digest re-stamp does not replace a confirmed anchored proof
 
-- **WHEN** a file whose canonical proof is Bitcoin-anchored is stamped again for the same digest
+- **WHEN** a file whose canonical proof is Bitcoin-anchored is stamped again for the same digest, and
+  the caller has established that the existing proof's anchor confirms against the configured backend
 - **THEN** the stored proof SHALL be unchanged byte for byte, the file SHALL be recorded with that
   proof and a `complete` proof state, and the newly produced proof SHALL be discarded
+
+#### Scenario: An unconfirmed anchor defers the placement instead of recording it complete
+
+- **WHEN** a proof is placed over a path holding an `.ots` that commits to the same digest and carries
+  a Bitcoin attestation the caller has established neither confirms nor fails to confirm — the
+  verification backend could not be reached
+- **THEN** the existing proof SHALL remain byte-identical at the canonical path, the newly produced
+  proof SHALL be preserved rather than discarded, the file SHALL be left queued for stamping, and no
+  proof state, provenance or stamp time SHALL be recorded for it
+- **AND** a later pass run while the backend answers SHALL reach a conclusive outcome for that file
 
 #### Scenario: A different-digest stamp keeps both proofs
 
@@ -370,6 +402,12 @@ Each preservation, and each discarded newly-produced proof, SHALL be logged nami
   that same digest is preserved
 - **THEN** both proofs SHALL exist afterwards, each byte-identical to what was preserved, under
   distinct names, and neither SHALL have been overwritten or discarded
+
+#### Scenario: Preservation succeeds on a store whose filesystem has no hard links
+
+- **WHEN** a proof must be preserved on a writable proof store whose filesystem rejects hard links
+- **THEN** the proof SHALL still be preserved byte-identically and the placement SHALL proceed, with
+  no failure classified transient and no file left retrying that placement forever
 
 #### Scenario: The accept-restore-rescan cycle does not destroy the original proof
 
@@ -440,7 +478,15 @@ proof mutation for it, and SHALL NOT report the work as done. Waiting would stal
 invocation behind an unrelated long-running pass, and the work is idempotent — the next invocation
 takes it up. Where a command acts on several collections it SHALL process those it can claim and name
 those it skipped; where every collection it was asked to act on was refused it SHALL exit non-zero, so
-that a scheduled invocation which did nothing is visibly distinguishable from one that succeeded.
+that a scheduled invocation which did nothing is visibly distinguishable from one that succeeded, and
+where it acted on at least one it SHALL exit zero, so that one busy collection does not fail an
+otherwise healthy fleet run.
+
+This exit-status rule SHALL apply to the command-line **scan** exactly as it does to stamp and
+upgrade. A scan is the operation an operator schedules to assert that the files were examined; a run
+in which every requested collection was refused examined nothing, and reporting success for it lets a
+scheduler record an integrity pass that never happened — the same false negative the refusal message
+exists to prevent, reached through the exit status instead of the output.
 
 #### Scenario: A second concurrent stamper is refused rather than racing
 
@@ -465,8 +511,15 @@ that a scheduled invocation which did nothing is visibly distinguishable from on
 
 #### Scenario: A command-line entry point refused everywhere exits non-zero
 
-- **WHEN** a command-line stamp or upgrade is refused for every collection it was asked to act on
+- **WHEN** a command-line scan, stamp or upgrade is refused for every collection it was asked to act
+  on
 - **THEN** it SHALL report the refusal and SHALL exit non-zero
+
+#### Scenario: A fleet invocation that acted on at least one collection exits zero
+
+- **WHEN** a command-line scan, stamp or upgrade is asked to act on several collections, is refused
+  for some, and acts on at least one
+- **THEN** it SHALL name the collections it skipped and SHALL exit zero
 
 #### Scenario: A scan refused the claim is reported as refused, not as a clean scan
 
@@ -485,9 +538,18 @@ output path, the system SHALL adopt it **if and only if** all of the following h
 - the proof can be read; **and**
 - it commits to the digest recorded for that file's content — so the file's own bytes corroborate
   the provenance about to be recorded; **and**
-- **either** the file already records that same digest as the provenance of its stored proof — the
-  system's own record of having placed that proof for those bytes — **or** the proof's Bitcoin
-  attestation is confirmed against the configured verification backend at the moment of adoption.
+- the proof's Bitcoin attestation is confirmed against the configured verification backend **at the
+  moment of adoption**.
+
+The confirmation SHALL be required of **every** adoption, and the file's own recorded proof
+provenance SHALL NOT substitute for it. Recorded provenance names the digest the system placed a
+proof *committing to* — a property of the watched file's bytes, not an identity of the proof artifact
+on disk. Any number of distinct `.ots` files commit to one digest, and one of them is trivially
+produced by anyone able to write into the proof store, so a recorded provenance equal to the digest of
+the artifact now at that path establishes nothing about whether it is the artifact the system placed.
+Treating it as sufficient would let a fabricated same-digest proof be promoted to `complete` and
+recorded as the file's notarization without any chain ever being consulted. The chain is the only
+thing that distinguishes a proof the system may stand behind.
 
 Where adoption applies, the proof SHALL be recorded as the file's proof with its state and its
 committed digest, and the file SHALL NOT be submitted to the calendars. The common route into a
@@ -504,18 +566,25 @@ Specifically:
   never anchored in place of the refresh the incomplete-proof rules require;
 - a proof whose attestation **cannot be confirmed** — fabricated, corrupt, or disagreeing with the
   chain — SHALL NOT be adopted. A proof committing to the right digest is trivial to fabricate for
-  anyone able to write into the proof store; only the chain distinguishes one the system may adopt;
+  anyone able to write into the proof store; only the chain distinguishes one the system may adopt.
+  This SHALL hold whatever the file's recorded provenance says about it;
 - where the verification backend **cannot be reached**, the condition is not satisfied and the file
-  SHALL be stamped normally. Adoption SHALL NOT fall back to accepting the proof's own word, because
-  that would make an unreachable backend sufficient to have a forged proof adopted. The cost of
-  degrading this way is one calendar round-trip and a preserved proof; nothing is lost.
+  SHALL NOT be adopted. Adoption SHALL NOT fall back to accepting the proof's own word or the file's
+  recorded provenance, because either would make an unreachable backend sufficient to have a forged
+  proof adopted — verification unavailable is precisely when an attacker wants the decision taken. An
+  outage SHALL instead leave the file **unchanged and still queued**: the placement rules above defer,
+  keeping the existing proof canonical, preserving the newly produced one, and recording nothing. The
+  cost of degrading this way is one calendar round-trip and a preserved proof; no proof is lost, no
+  state is asserted, and the next pass that reaches the backend settles it.
 
 Adoption SHALL NOT move the file's recorded stamp time forward: no submission was made, so recording
 one would assert a notarization that did not happen, and the proof's own attestation carries the real
 date. Consequently no adoption SHALL leave a file recorded as submitted-but-unconfirmed with no
 recorded stamp time — the only adopted state is confirmed — so an adopted proof can never become
-invisible to the stuck-proof report. Each adoption SHALL be logged naming the file, the digest, and
-the block the attestation was confirmed against where confirmation was the qualifying condition.
+invisible to the stuck-proof report. **No file SHALL be promoted out of the stamp queue to a
+`complete` state on the strength of a proof the system did not itself place in that pass unless that
+proof's Bitcoin anchor was confirmed against the configured backend during the pass.** Each adoption
+SHALL be logged naming the file, the digest, and the block the attestation was confirmed against.
 
 #### Scenario: A restored, unchanged file with an anchored proof is not re-submitted
 
@@ -526,13 +595,14 @@ the block the attestation was confirmed against where confirmation was the quali
   committed digest as the file's proof provenance, SHALL NOT invoke a stamp submission, and SHALL
   NOT move the file's recorded stamp time forward
 
-#### Scenario: The system's own recorded provenance qualifies a proof for adoption
+#### Scenario: Recorded provenance alone does not qualify a proof for adoption
 
 - **WHEN** a file queued for stamping has a readable proof at its canonical path committing to the
-  digest recorded for that file, and the file already records that same digest as the provenance of
-  its stored proof
-- **THEN** the system SHALL adopt that proof without invoking a stamp submission and without
-  requiring a backend lookup
+  digest recorded for that file, the file already records that same digest as the provenance of its
+  stored proof, and that proof's Bitcoin attestation does not confirm against the configured backend
+- **THEN** the system SHALL NOT adopt it and SHALL NOT record it `complete`, SHALL stamp the file
+  normally, and SHALL preserve that existing proof rather than replacing it — the recorded provenance
+  SHALL NOT be treated as evidence about which artifact is at that path
 
 #### Scenario: An unanchored same-digest proof is not adopted
 
@@ -549,13 +619,16 @@ the block the attestation was confirmed against where confirmation was the quali
 - **THEN** the system SHALL NOT adopt it, SHALL stamp the file normally, and SHALL preserve that
   existing proof
 
-#### Scenario: An unreachable backend does not qualify a proof for adoption
+#### Scenario: An unreachable backend leaves the file queued with both proofs intact
 
 - **WHEN** a file queued for stamping has a proof at its canonical path committing to the digest
-  recorded for that file, the file records no provenance for it, and the verification backend cannot
-  be reached
-- **THEN** the system SHALL NOT adopt it and SHALL stamp the file normally, preserving the existing
-  proof
+  recorded for that file and carrying a Bitcoin attestation, and the verification backend cannot be
+  reached
+- **THEN** the system SHALL NOT adopt it and SHALL NOT record it `complete`, the existing proof SHALL
+  remain byte-identical at the canonical path, the proof produced in that pass SHALL be preserved
+  rather than discarded, the file SHALL remain queued for stamping with no provenance and no stamp
+  time recorded, and the outcome SHALL be the same whether or not the file records provenance for
+  that proof
 
 #### Scenario: A proof committing to other bytes is not adopted
 
