@@ -678,6 +678,88 @@ async def test_an_adoption_only_batch_reclaimed_before_its_commit_is_fenced(cair
     assert others == []
 
 
+async def test_a_degraded_store_fences_the_state_commit_after_the_calendar_call(
+    cairn_env, monkeypatch
+):
+    """On a store that cannot lock, the lease is the only guard — so it is read AFTER the batch.
+
+    The whole-pass ``flock`` makes a live stamp pass unreclaimable, but a store whose filesystem
+    refuses advisory locking degrades to "warn once and proceed", and there the lease is all there
+    is. The batch is where the time goes: `ots` spawns and a calendar round-trip runs for minutes,
+    during which a failing keepalive can let the claim be reclaimed and a replacement operation
+    place a DIFFERENT proof at the same canonical slot. A claim read before all that is not
+    evidence about the claim at the moment of the write, so every post-batch state commit — the
+    progress callback's and the pass's own final one — re-reads it first.
+    """
+    import errno as _errno
+    import fcntl
+
+    from sqlalchemy import update as sql_update
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, Run
+    from src.services import collections as collections_svc
+    from src.services import ots, proofs
+    from src.services.collections import RUN_HEARTBEAT_TIMEOUT_SECONDS
+    from src.services.scanner import _utcnow
+
+    data = b"a file stamped on a store that cannot lock"
+    cid = await _seed(cairn_env / "vault", {"a.txt": data})
+    await _set_row(cid, "a.txt", ots_state="pending")
+    monkeypatch.setattr(ots, "_run_ots", _stamp_fake())
+
+    # The store's filesystem cannot lock at all: `CollectionProofLock` warns once and proceeds.
+    def flock_unsupported(_fd, _op):
+        raise OSError(_errno.ENOTSUP, "operation not supported")
+
+    monkeypatch.setattr(fcntl, "flock", flock_unsupported)
+
+    reclaimed: list[bool] = []
+    committed: list[int] = []
+    real_batch = proofs._stamp_one_batch
+
+    async def batch_then_reclaim(*args, **kwargs):
+        outcome = await real_batch(*args, **kwargs)
+        # The calendar round-trip has just happened and the claim's keepalive failed through it.
+        stale = datetime.now(timezone.utc) - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS + 60)
+        async with get_sessionmaker()() as other:
+            await other.execute(
+                sql_update(Run)
+                .where(Run.collection_id == cid, Run.result == "running")
+                .values(heartbeat_at=stale, started=stale)
+            )
+            await other.commit()
+        reclaimed.append(await collections_svc.reclaim_stale_claim(cid))
+        return outcome
+
+    monkeypatch.setattr(proofs, "_stamp_one_batch", batch_then_reclaim)
+
+    async with get_sessionmaker()() as s:
+        run = Run(collection_id=cid, kind="stamp", started=_utcnow(), result="running")
+        assert await collections_svc.claim_run(s, run) is not None
+
+        async def _progress(done: int) -> None:  # what the backfill's callback does
+            committed.append(done)
+            await s.commit()
+
+        with pytest.raises(collections_svc.LeaseLost):
+            await proofs.stamp_pending(
+                s, await s.get(Collection, cid), progress=_progress, run_id=run.id
+            )
+
+    assert reclaimed == [True], (
+        "a store that cannot lock has no lock to probe, so the claim really was reclaimable "
+        "mid-batch — which is what makes the post-batch fence the only guard"
+    )
+    assert committed == [], "no state may be committed under a claim this pass no longer holds"
+    row = await _row(cid, "a.txt")
+    assert row.ots_state == "pending", "the member stays queued for the next pass"
+    assert row.ots_path is None and row.ots_digest is None and row.ots_stamped_at is None
+    # The proof itself was placed while the lease was valid and is NOT unwound — a later pass
+    # re-reads it and adopts or re-records it. Only the unrecorded claim about it is refused.
+    assert _slot(cid, "a.txt").exists()
+
+
 async def test_a_non_ascii_case_respelled_slot_is_surfaced_by_the_casefold_key(
     cairn_env, monkeypatch
 ):
@@ -1375,6 +1457,65 @@ async def test_a_failed_restoration_is_loud_and_heals_on_the_next_sweep(cairn_en
     assert new_slot.read_bytes() == payload, "the restore leg republished the proof"
     assert (await _row(cid, "b.txt")).ots_path == str(new_slot)
     assert "RESTORED" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+async def test_a_failed_republish_never_leaves_a_partial_proof_in_the_slot(
+    cairn_env, monkeypatch, caplog
+):
+    """The restore leg publishes whole bytes or none — a prefix at the recorded path is forever.
+
+    The nastiest silent failure available to this pass: the republish write runs out of space after
+    a prefix and its cleanup is refused. Written directly into the canonical slot, that leaves the
+    row recording a COMPLETE proof at a path holding garbage — and because restore admission asks
+    only whether the recorded entry exists, the row is never admitted again. Staging into a temp and
+    publishing by link makes it unreachable: the destination is either the whole proof or was never
+    created, so the next sweep finds the same absent entry and repairs it.
+    """
+    import errno as _errno
+
+    from src.services import ots
+
+    x = b"a proof that must come back whole or not at all"
+    root = cairn_env / "vault"
+    cid = await _seed(root, {"a.txt": x})
+    canonical = _slot(cid, "a.txt")
+    payload = _write_proof(canonical, _sha(x))
+    copy = await _archived(cid, payload, _sha(x))
+    canonical.unlink()
+    await _set_row(cid, "a.txt", ots_path=str(canonical), ots_state="complete", ots_digest=_sha(x))
+
+    real_write_all = ots._write_all
+
+    def write_runs_out_of_space(fd, data):
+        real_write_all(fd, data[:8])  # a prefix lands…
+        raise OSError(_errno.ENOSPC, "No space left on device")
+
+    real_unlink = os.unlink
+
+    def unlink_refuses_the_slot(path, **kw):
+        if Path(path) == canonical:
+            raise PermissionError(_errno.EACCES, "Permission denied")
+        return real_unlink(path, **kw)
+
+    monkeypatch.setattr(ots, "_write_all", write_runs_out_of_space)
+    monkeypatch.setattr(os, "unlink", unlink_refuses_the_slot)
+    with caplog.at_level(logging.WARNING, logger="cairn.proofs"):
+        outcome = await _sweep(cid)
+    monkeypatch.undo()
+
+    assert (outcome.items, outcome.refused, outcome.restored) == (1, 1, 0)
+    assert not canonical.exists(), "the recorded slot must never be left holding a partial proof"
+    row = await _row(cid, "a.txt")
+    assert (row.ots_path, row.ots_state, row.ots_digest) == (str(canonical), "complete", _sha(x))
+    assert "could not be republished" in "\n".join(r.getMessage() for r in caplog.records)
+
+    # …and with the store healthy again the very next sweep still admits the row and restores it.
+    second = await _sweep(cid)
+    assert (second.items, second.restored) == (1, 1)
+    assert canonical.read_bytes() == payload
+    assert copy.exists(), "the archive copy is never consumed"
+    leftovers = sorted(p.name for p in canonical.parent.iterdir() if p.suffix != ".ots")
+    assert leftovers == [".lock"], f"staging debris left in the proof directory: {leftovers}"
 
 
 async def test_a_source_that_cannot_be_removed_is_reported_not_swallowed(cairn_env, monkeypatch, caplog):

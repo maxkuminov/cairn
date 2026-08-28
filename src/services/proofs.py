@@ -504,11 +504,16 @@ async def stamp_pending(
     async def _fence(batch_no: int, stage: str) -> None:
         """Stop the pass unless ``run_id`` still holds the collection's claim (design D10/D1).
 
-        Called at three points: before the proof-store lock is taken (cheap, so a reclaimed pass
+        Called at five points: before the proof-store lock is taken (cheap, so a reclaimed pass
         does not queue for a resource it may not touch), immediately after it is taken (the
-        reclamation may have landed while this pass waited), and once per batch **before that
-        batch's state commit** — placement and adoption-only alike, since an adoption commit
-        records a proof under a claim exactly as a placement does.
+        reclamation may have landed while this pass waited), once per batch before anything is
+        submitted or adopted (placement and adoption-only alike, since an adoption commit records a
+        proof under a claim exactly as a placement does), once per batch AFTER the batch returns
+        and immediately before its state commit, and once before the pass's own final commit.
+
+        The last two are what make the lease discipline survive a store that cannot lock: the
+        calendar round-trip inside a batch is where a lease has time to be lost, so a claim read
+        before it is not evidence about the claim at the moment of the write.
         """
         if run_id is None or await collections.lease_held(run_id):
             return
@@ -599,6 +604,17 @@ async def stamp_pending(
                     skipped=skipped,
                     deferred=deferred,
                 )
+            # The fence AGAIN, now that the batch is back — because the batch is where the time
+            # goes. `_stamp_one_batch` spawns `ots` and waits on a calendar round-trip that can run
+            # for minutes, and the check above was made before all of it. On a store whose
+            # filesystem supports `flock` this is belt-and-braces (the lock this pass holds makes
+            # the claim unreclaimable). On a DEGRADED store — one that cannot lock, where
+            # `CollectionProofLock` warns once and proceeds — the lease is the only guard there is,
+            # and a reclamation landing inside the calendar call would otherwise have this pass
+            # write `ots_path`/`ots_digest`/`ots_state` for a slot the replacement operation may
+            # have since placed a DIFFERENT proof into. So no batch's state reaches the datastore
+            # on the strength of a claim read before the work: fence, then commit.
+            await _fence(batch_no, "before committing the state of")
             if progress is not None:
                 # Persist progress per batch (the callback commits) so the badge advances live.
                 # Inside the lock: it is a post-guard state commit like any other.
@@ -627,6 +643,10 @@ async def stamp_pending(
                 collection_id,
                 blocked,
             )
+        # …and once more before the pass's own commit, which is the ONLY commit for every batch's
+        # rows when no `progress` callback was given (the scan path). Same rule: state is committed
+        # under a claim re-read after the work that produced it, never before.
+        await _fence(batches, "before the final state commit of")
         await session.commit()
     finally:
         # Releasing is a non-blocking syscall on a descriptor the process owns, so it needs no

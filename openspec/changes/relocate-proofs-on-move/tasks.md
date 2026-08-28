@@ -23,10 +23,16 @@
   released by the OS and reclaims normally; a store that cannot lock degrades to the guarded
   UPDATE alone with the existing one-warning-per-store. The lease fences REMAIN on every
   post-guard state commit — the adoption pass's own commit included, even when no placement chunk
-  survives it (M1) — as the guard for crashed holders and degraded stores. Tests: a live batch
-  holding the lock with a stale heartbeat is not reclaimed (and the run row is untouched); a
-  crashed holder's stale claim reclaims normally; an adoption-only batch reclaimed before its
-  commit is refused by the fence with its members left `pending`.
+  survives it (M1) — as the guard for crashed holders and degraded stores. **And the fence is
+  read AFTER the work, not only before it** (convergence review, B1): the batch's `ots` spawn and
+  calendar round-trip are where a lease has time to be lost, so `stamp_pending` re-reads the claim
+  when `_stamp_one_batch` returns — immediately before the progress callback's commit — and once
+  more before its own final commit (the only commit on the scan path, which passes no callback).
+  On a store that cannot `flock` this is the ONLY guard there is. Tests: a live batch holding the
+  lock with a stale heartbeat is not reclaimed (and the run row is untouched); a crashed holder's
+  stale claim reclaims normally; an adoption-only batch reclaimed before its commit is refused by
+  the fence with its members left `pending`; on an ENOTSUP-mocked (degraded) store a claim
+  reclaimed DURING the calendar call commits no file-row state at all.
 - [x] 1.2b Alias candidate keys use FULL UNICODE case folding (implementation audit scope 1, B2):
   a `casefold` SQL function (Python `str.casefold`, `deterministic=True`) is registered on every
   SQLite connection beside the pragmas in `src/database.py`, and `_slot_references` keys its
@@ -111,9 +117,17 @@
 - [x] 3.4b The restore leg (design D4b): admission also selects rows whose recorded
   `ots_path` entry is absent on disk; a corroborated superseded-archive copy is republished
   at the recorded path (durability chain, "restored" warning); no corroborated copy → loud
-  warning, nothing changed. Tests: the phase-5 crash shape (pointer canonical, entry absent,
-  archive copy present) repairs on the next sweep; absent with no corroborated copy warns
-  every sweep and never writes.
+  warning, nothing changed. **Republication is stage-then-publish** (convergence review, B2):
+  the bytes go to an exclusive, fsynced temp in the destination's own directory
+  (`ots._stage_proof_bytes`) and are published by `os.link`, so a write that fails partway can
+  never leave a PREFIX of a proof at a path a row already records as complete — which, since
+  admission only asks whether that entry exists, would never be re-admitted and would corrupt
+  the row's proof silently and permanently. Cleanup only ever touches the temp; a link-less
+  store keeps the direct exclusive-create fallback, whose refused cleanup now warns by name.
+  Tests: the phase-5 crash shape (pointer canonical, entry absent, archive copy present)
+  repairs on the next sweep; absent with no corroborated copy warns every sweep and never
+  writes; an ENOSPC mid-write whose cleanup is also refused leaves the recorded slot ABSENT,
+  the row untouched, and the next sweep restores it.
 - [x] 3.5 Independent admission + typed-run totals (MODIFIED requirement): stale-pointer
   existence OR an absent recorded proof entry alone claims the collection and creates the
   `kind='upgrade'` run (tripwire included); `total` = one work item per operation (one per

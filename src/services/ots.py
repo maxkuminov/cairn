@@ -1181,7 +1181,11 @@ def _copy_no_replace(payload: bytes, dst: Path) -> None:
     archives rather than trusting.
 
     A failure after the create removes the partial file: it was made by this call and is nobody
-    else's proof.
+    else's proof. If even that removal is refused, the partial file is WARNED about by name — it
+    occupies a slot a caller may be recording a pointer to, and a silently truncated proof left at
+    a canonical path is exactly the kind of thing this module exists to never do. Callers that
+    cannot tolerate that window at all (the restore leg, which publishes at a path a row ALREADY
+    records) stage into a temp file and publish by link instead; see :func:`republish_proof`.
     """
     fd = os.open(str(dst), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
     try:
@@ -1196,9 +1200,51 @@ def _copy_no_replace(payload: bytes, dst: Path) -> None:
         finally:
             os.close(fd)
     except BaseException:
-        with contextlib.suppress(OSError):
+        try:
             os.unlink(dst)
+        except OSError as cleanup_exc:
+            log.warning(
+                "a proof write to %s failed and the partial file could not be removed (%s) — that "
+                "path is now occupied by INCOMPLETE bytes; it is never trusted as a proof (the "
+                "next placement there classifies it as an occupant and archives it), but remove it "
+                "by hand if a row records that path",
+                dst,
+                cleanup_exc,
+            )
         raise
+
+
+def _stage_proof_bytes(payload: bytes, directory: Path) -> Path:
+    """Write ``payload`` durably to a fresh, exclusively-created TEMP name inside ``directory``.
+
+    The staging half of "stage, then publish". The temp name is non-colliding
+    (``uuid4``), cannot be mistaken for a proof (no ``.ots`` suffix), and is fsynced before the
+    caller publishes it — so publication is a single link/rename of bytes that are already complete
+    and durable, and a failed WRITE can never leave a partial file at the destination the caller is
+    about to name. Every handled failure removes the temp; one left by a crash is debris the store
+    ignores (design D4 phase 3).
+
+    Raises ``OSError`` for the caller to classify.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    staged = directory / f".restore-{uuid.uuid4().hex}.tmp"
+    fd = os.open(str(staged), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    try:
+        try:
+            _write_all(fd, payload)
+            if os.fstat(fd).st_size != len(payload):  # pragma: no cover - defensive
+                raise OSError(
+                    errno.EIO,
+                    f"staged proof is {os.fstat(fd).st_size} bytes, expected {len(payload)}",
+                )
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(staged)
+        raise
+    return staged
 
 
 def publish_relocation(
@@ -1475,9 +1521,22 @@ def republish_proof(
     """Publish ``source``'s bytes at the ABSENT path ``dst``, never replacing (design D4b).
 
     The restore leg's primitive: a row's recorded ``ots_path`` names nothing on disk and the archive
-    holds a copy the row's own corroboration rules vouch for. The write is the same non-replacing
-    exclusive create publication uses, so a slot that turns out to be occupied after all refuses
-    instead of overwriting whatever is there.
+    holds a copy the row's own corroboration rules vouch for. Publication is non-replacing, so a
+    slot that turns out to be occupied after all refuses instead of overwriting whatever is there.
+
+    **Stage, then publish**, and the order is load-bearing here in a way it is not for an ordinary
+    placement: this destination is a path a row ALREADY records as its proof, and the restore leg's
+    admission test is "the recorded entry does not exist". A write that failed partway and could not
+    clean up after itself would therefore leave the canonical slot holding a PREFIX of a proof, the
+    row still claiming a complete one, and the sweep never admitting the row again — a silent,
+    permanent corruption discovered only if someone happened to verify that file. So the bytes are
+    written to an exclusive temp in the destination's own directory and fsynced FIRST
+    (:func:`_stage_proof_bytes`), and only a complete, durable file is published — by ``os.link``,
+    which either names it or fails, never half-names it. Every cleanup path touches only the temp.
+
+    A store without hard links falls back to the direct exclusive create (the only publication
+    primitive such a store has); there the partial-write window survives, narrowed to "the write
+    failed AND its cleanup was refused", and :func:`_copy_no_replace` warns by name when it happens.
     """
     source = Path(source)
     dst = Path(dst)
@@ -1491,16 +1550,42 @@ def republish_proof(
         payload = source.read_bytes()
     except OSError as exc:
         raise OtsError(f"cannot read the archived proof {str(source)!r}: {exc}") from exc
+
     try:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        _copy_no_replace(payload, dst)
-        _sync_dir_chain(dst.parent, ctx.sync_root, store_key=ctx.store_key)
-    except FileExistsError as exc:
-        raise OtsError(
-            f"refusing to restore a proof at {str(dst)!r}: something occupies it now"
-        ) from exc
+        staged = _stage_proof_bytes(payload, dst.parent)
     except OSError as exc:
+        # Nothing was published and `dst` was never created: the destination is exactly as absent
+        # as it was, so the next sweep admits this row again and retries.
         raise _classify_destination_error(exc, dst) from exc
+
+    try:
+        try:
+            os.link(staged, dst)
+        except FileExistsError as exc:
+            raise OtsError(
+                f"refusing to restore a proof at {str(dst)!r}: something occupies it now"
+            ) from exc
+        except OSError as exc:
+            if exc.errno not in _LINK_UNSUPPORTED:
+                raise _classify_destination_error(exc, dst) from exc
+            try:
+                _copy_no_replace(payload, dst)
+            except FileExistsError as copy_exc:
+                raise OtsError(
+                    f"refusing to restore a proof at {str(dst)!r}: something occupies it now"
+                ) from copy_exc
+            except OSError as copy_exc:
+                raise _classify_destination_error(copy_exc, dst) from copy_exc
+        try:
+            _sync_dir_chain(dst.parent, ctx.sync_root, store_key=ctx.store_key)
+        except OSError as exc:
+            raise OtsError(
+                f"cannot make the restored proof at {str(dst)!r} durable: {exc}"
+            ) from exc
+    finally:
+        # Only ever the temp. `dst` is either the published proof or was never created.
+        with contextlib.suppress(OSError):
+            os.unlink(staged)
 
 
 def info(ots_path: str | os.PathLike[str]) -> ProofInfo:
