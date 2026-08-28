@@ -128,8 +128,10 @@ Under the claim + flock, per row, with `src = ots_path`, `dst = proof_path(curre
    a. `dst` is recorded as `ots_path` by a different row → **defer**. Chain moves converge as
       earlier relocations vacate slots (the sweep iterates within a pass). A **cycle** (a path
       swap: each row blocks the other) can never converge by deferral — when a full pass makes
-      no progress and stale rows remain, break it by relocating ONE member's proof to a durable
-      unreferenced **holding slot** in the store (e.g. `<store>/.relocating/<row_id>.ots`),
+      no progress and reference-deferred rows remain, break it by relocating ONE member's proof
+      (eligible only if corroborated and not permanently refused — never a row another rule
+      refuses to move) to a durable unreferenced **holding slot** in the store
+      (e.g. `<store>/.relocating/<row_id>.ots`),
       committing that truthful pointer; the vacated canonical slot unblocks the rest, and the
       held proof reaches its own canonical slot on a later iteration/sweep. The holding slot
       obeys the same invariant and never-destroy rules.

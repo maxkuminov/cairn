@@ -64,9 +64,11 @@
   `.superseded/` recovery. The sweep writes `ots_path` and nothing else, ever.
 - [ ] 3.3 Defer-if-referenced (design D4 rule 1): one bounded query for another row recording
   the destination as its `ots_path`; on hit, defer with the old pointer kept. Cycle breaking:
-  when a full pass makes no progress and stale rows remain, relocate one member's proof to
-  the durable holding slot (`<store>/.relocating/<row_id>.ots`), commit that truthful
-  pointer, continue; the held proof converges on a later iteration/sweep.
+  when a full pass makes no progress and reference-rule-deferred rows remain, relocate ONE
+  such member's proof — eligible only if corroboration passed and no permanent destination
+  refusal; never a row any other rule refuses — to the durable holding slot
+  (`<store>/.relocating/<row_id>.ots`), commit that truthful pointer, continue; the held
+  proof converges on a later iteration/sweep.
 - [ ] 3.4 Pointer commit is a fenced compare-and-set: guarded UPDATE on
   (`relpath`, `ots_path`, `ots_digest` where recorded) + run-still-live; zero rows → roll
   back, claim-lost, stop (published destination copy stays inert). A datastore failure at the
@@ -74,8 +76,9 @@
   per-row skip on a broken session.
 - [ ] 3.5 Independent admission + typed-run totals (MODIFIED requirement): stale-pointer
   existence alone claims the collection and creates the `kind='upgrade'` run (tripwire
-  included); `total` = incompletes + stale rows (each row once), sweep outcomes advance
-  `processed`; sweep runs before the proof upgrades within the pass; neither-work → no run.
+  included); `total` = one work item per operation (one per incomplete + one per stale row; a
+  both-stale-and-incomplete row contributes two), `processed` advances exactly one per
+  completed item; sweep runs before the proof upgrades within the pass; neither-work → no run.
   Wire both entry points: the scheduler's daily pass and `cairn upgrade`. Lease discipline:
   claim heartbeat, per-collection proof flock around each relocation, claim re-confirmed
   after lock acquisition, lock held across all phases.

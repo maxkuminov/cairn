@@ -253,10 +253,12 @@ The on-demand stamp backfill and the OTS upgrade pass SHALL each be recorded as 
 `kind` distinguishing it from an integrity scan — `kind = 'stamp'` for the stamp backfill and
 `kind = 'upgrade'` for the upgrade pass. Each such run SHALL set `total` to the number of items it
 will process, known at the start — for a stamp run, the count of files queued for stamping; for an
-upgrade run, the count of incomplete proofs to upgrade **plus** the count of rows the healing
-sweep confirmed stale (each row counted once even when it is both incomplete and stale) — and
-SHALL update `processed` as it advances (a swept row counts as processed whether it was relocated,
-deferred, or refused), so a concurrent reader can observe exact progress. The run's result SHALL
+upgrade run, one work item per operation the pass will perform: one per incomplete proof to
+upgrade plus one per row the healing sweep confirmed stale — a row that is both stale and
+incomplete contributes two work items, since it receives two operations — and
+SHALL update `processed` by exactly one per completed work item (a swept row's item counts
+whether it was relocated, deferred, or refused), so a concurrent reader can observe exact
+progress and `processed` can equal `total` without double- or under-counting. The run's result SHALL
 be `running` while in progress and SHALL transition to a terminal value with `finished` set when
 it ends. Within one upgrade run the healing sweep SHALL run before the proof upgrades, so a
 relocated proof is upgraded at its new canonical location in the same pass.
