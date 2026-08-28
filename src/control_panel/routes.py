@@ -1911,27 +1911,58 @@ async def verify_run(
     # they still do, blaming the file would be a false alarm on the product's core signal. With no
     # recorded baseline neither can be blamed, so the card names both possibilities.
     #
-    # What the recorded baseline is NOT is the digest the stored proof was made from: a scan
-    # overwrites `files.sha256` with the newly observed bytes BEFORE a replacement proof exists, so
-    # in the modified-awaiting-re-stamp window the live bytes equal the recorded baseline while the
-    # (still valid, still current) proof commits to the previous version. Accusing that proof of
-    # being corrupt or misfiled there is the mirror-image false alarm. Cairn cannot tell the two
-    # apart from what it stores today, so "live == recorded, != proof" splits by the row's own
-    # state: `pending` (a re-stamp is queued) or a `modified`/`new` status is the stale-proof
-    # window and gets that explanation; anything else stays explicitly undecided. A definitive
-    # blame needs each proof's own digest recorded beside it — the proof-versioning work (#15),
-    # deliberately out of this sprint (design D1, accepted limitation).
+    # `files.ots_digest` — the digest the proof CAIRN PLACED at `ots_path` commits to — is what
+    # settles this where sprint 1 had to leave it undecidable (design D7). The provenance branches
+    # are ORDERED, and the order is the correctness content: "the .ots at this path is not the proof
+    # Cairn recorded placing" is asked BEFORE any staleness reading. A staleness-first ladder
+    # produces the A/B/C false reassurance — recorded provenance `A`, live == baseline `B`, an
+    # on-disk proof committing to a third digest `C`: `ots_digest != live` holds, so it would report
+    # "simply an older proof of your file" about an `.ots` that is neither the recorded proof nor
+    # this file's proof. Staleness may only be concluded once the on-disk proof has been shown to BE
+    # the recorded proof (`proof_digest == ots_digest`).
+    #
+    # With NO recorded provenance (a legacy row) nothing changes: a scan overwrites `files.sha256`
+    # with the newly observed bytes BEFORE a replacement proof exists, so in the
+    # modified-awaiting-re-stamp window the live bytes equal the recorded baseline while the still
+    # valid, still current proof commits to the previous version — and sprint 1's split by the row's
+    # own state (`pending`, or a `modified`/`new` status) plus its explicit undecidability survive
+    # verbatim. Row 6 of D7 — provenance recorded but nothing parsed — falls through to that same
+    # undecidable wording rather than to staleness, because with no parsed digest neither reading is
+    # established.
     stored_sha = (fe.sha256 or "").strip().lower()
     live_sha = (digest or "").strip().lower()
+    recorded_proof_sha = (fe.ots_digest or "").strip().lower()
+    parsed_proof_sha = ((result.proof_digest if result else None) or "").strip().lower()
+    # Whether a re-stamp is actually owed. With provenance, staleness can be established while
+    # nothing is queued (a collection switched to `ots_mode='none'` after a modification), so the
+    # "a re-stamp is pending" clause must be conditional on the row rather than implied by the
+    # verdict.
+    restamp_owed = fe.ots_state == "pending" or fe.status in ("modified", "new")
     mismatch_blame = None
+    # Whether the verdict rests on RECORDED provenance (an established finding) or on sprint 1's
+    # heuristic (explicitly undecidable). The two get different copy.
+    proof_provenance = False
     if result is not None and result.digest_mismatch and live_sha:
         if not stored_sha:
             mismatch_blame = "unknown"
         elif live_sha != stored_sha:
             mismatch_blame = "file"
-        elif fe.ots_state == "pending" or fe.status in ("modified", "new"):
+        elif recorded_proof_sha and parsed_proof_sha and parsed_proof_sha != recorded_proof_sha:
+            # D7 row 3 — the first provenance branch, and it must stay first.
+            mismatch_blame, proof_provenance = "proof", True
+        elif recorded_proof_sha and recorded_proof_sha == live_sha:
+            # D7 row 4 — Cairn recorded placing a proof for exactly these bytes; the stored proof
+            # disagrees with them. Reachable without a parsed digest.
+            mismatch_blame, proof_provenance = "proof", True
+        elif recorded_proof_sha and parsed_proof_sha == recorded_proof_sha:
+            # D7 row 5 — the on-disk proof IS the recorded proof, made from earlier bytes.
+            mismatch_blame, proof_provenance = "proof-stale", True
+        elif not recorded_proof_sha and restamp_owed:
+            # D7 row 7 — legacy heuristic, unchanged.
             mismatch_blame = "proof-stale"
         else:
+            # D7 rows 6 and 7's fallback: provenance recorded but nothing parsed, or no provenance
+            # at all and no re-stamp owed. Undecidable either way — never staleness.
             mismatch_blame = "proof"
 
     # Verdict by *reason*, in the order of design D2. Branching on the proof's lifecycle state
@@ -1944,15 +1975,23 @@ async def verify_run(
         verdict = "danger"
         title = "File no longer matches its proof"
     elif mismatch_blame == "proof-stale":
-        # The row says a re-stamp is owed, so the proof committing to other bytes is the expected
-        # state of that window, not a fault. Amber like the other "a stamp is owed" verdicts — red
-        # here would train the operator to dismiss the red card that means a real mismatch.
+        # The stored proof was made from an earlier version of these bytes — established from the
+        # recorded provenance, or (legacy rows) inferred from the row saying a re-stamp is owed.
+        # Either way it is the expected state of that window, not a fault. Amber like the other
+        # "a stamp is owed" verdicts — red here would train the operator to dismiss the red card
+        # that means a real mismatch.
         verdict = "warn"
         title = "Proof predates this version of the file"
+    elif mismatch_blame == "proof" and proof_provenance:
+        # Established: the `.ots` at this path is not the proof Cairn recorded placing for these
+        # bytes. A positive finding about the PROOF — and still no claim about the file, whose
+        # bytes match their baseline.
+        verdict = "danger"
+        title = "This is not the proof Cairn placed"
     elif mismatch_blame == "proof":
         # The live bytes still hash to the recorded baseline and the row claims no re-stamp is
-        # owed. That the proof disagrees is all that is established: this card describes it and
-        # blames nothing (see the tiebreaker note above).
+        # owed. Without recorded provenance that is all that is established: this card describes it
+        # and blames nothing (see the tiebreaker note above).
         verdict = "danger"
         title = "This proof does not match this file"
     elif mismatch_blame == "unknown":
@@ -2068,6 +2107,14 @@ async def verify_run(
         # "file" | "proof-stale" | "proof" | "unknown". Never derived in the template — the
         # template has no access to the recorded baseline or the row's state.
         "mismatch_blame": mismatch_blame,
+        # Whether the `proof` / `proof-stale` verdict rests on RECORDED provenance (`files.ots_digest`)
+        # or on sprint 1's heuristic. The two get different copy: with provenance the card states a
+        # positive finding about the proof; without it, sprint 1's "Cairn cannot tell which" stands
+        # verbatim. Derived here, never in the template — the template cannot see `ots_digest`.
+        "proof_provenance": proof_provenance,
+        # Only true when a re-stamp is actually owed, so `proof-stale`'s "a re-stamp is pending"
+        # clause is never asserted about a row where none is queued (design D7).
+        "restamp_owed": restamp_owed,
         "proof_mismatch": bool(result and result.proof_mismatch),
         "unreadable_proof": bool(result and result.unreadable_proof),
         "transport_error": (result.transport_error if result else None),

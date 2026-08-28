@@ -141,7 +141,9 @@ def test_stamp_via_symlink_writes_proof_store_not_collection(tmp_path, monkeypat
 
     result = ots.stamp_via_symlink(real, out, ["https://cal.example"], staging)
 
-    assert result == out
+    # `stamp_via_symlink` now reports WHAT placement did (design D1): the caller's row update
+    # differs per branch, so a bare path (or a bare bool) cannot carry the outcome.
+    assert result.kind == "placed" and result.state == "incomplete"
     assert out.exists() and out.read_bytes() == b"proof"
     # Nothing written under the collection root, and the staging symlink is cleaned up.
     assert list(collection_root.iterdir()) == [real]
@@ -809,7 +811,8 @@ def test_stamp_batch_skips_overlong_proof_name_and_keeps_the_rest(tmp_path, monk
 
     results = ots.stamp_batch_via_symlink(items, [], staging)
 
-    assert results == [True, False]
+    # `None` still means exactly what `False` meant: this member failed, fall back to a single stamp.
+    assert [r.kind if r else None for r in results] == ["placed", None]
     assert items[0][1].exists()          # the good file is stamped
     # The overlong proof is never written (its name can't even be stat()'d, so list the dir instead).
     assert [p.name for p in (store / "1").iterdir()] == ["a.txt.ots"]
@@ -1087,7 +1090,7 @@ def test_stamp_batch_skips_overlong_parent_dir_before_any_symlink(tmp_path, monk
 
     results = ots.stamp_batch_via_symlink(items, [], staging, store_root=store)
 
-    assert results == [True, False]
+    assert [r.kind if r else None for r in results] == ["placed", None]
     assert len(symlinked) == 1  # the overlong-parent member was never staged
     assert [p.name for p in (store / "1").iterdir()] == ["a.txt.ots"]
     stamp_calls = [a for a in invocations if a and a[0] == "stamp"]
@@ -1200,14 +1203,15 @@ def test_stamp_ignores_overlong_components_of_the_store_root(tmp_path, monkeypat
     results = ots.stamp_batch_via_symlink(
         [(root / "a.txt", store / "1" / "a.txt.ots")], [], staging, store_root=store
     )
-    assert results == [True]
+    assert [r.kind if r else None for r in results] == ["placed"]
     assert (store / "1" / "a.txt.ots").exists()
 
     # …and the single-file path agrees (it is the fallback that decides permanent vs. transient).
-    out = ots.stamp_via_symlink(
+    outcome = ots.stamp_via_symlink(
         root / "b.txt", store / "1" / "b.txt.ots", [], staging, store_root=store
     )
-    assert out.exists()
+    assert outcome.kind == "placed"
+    assert (store / "1" / "b.txt.ots").exists()
     assert len([a for a in invocations if a and a[0] == "stamp"]) == 2
 
 
@@ -1564,7 +1568,7 @@ def test_live_stamp_smoke(tmp_path):
     staging = tmp_path / "store" / ".staging"
 
     result = ots.stamp_via_symlink(real, out, [], staging)  # [] → ots default calendars
-    assert result == out and out.exists()
+    assert result.kind == "placed" and out.exists()
     assert ots.info(out).state in ("incomplete", "complete")
     assert not any(staging.iterdir())  # staging cleaned
 
@@ -1590,7 +1594,7 @@ def test_live_batch_stamp_smoke(tmp_path):
         items.append((real, tmp_path / "store" / "1" / f"real{i}.txt.ots"))
 
     results = ots.stamp_batch_via_symlink(items, [], staging)  # [] → ots default calendars
-    assert results == [True, True, True]
+    assert [r.kind if r else None for r in results] == ["placed"] * 3
     for (_real, out), digest in zip(items, digests):
         assert out.exists()
         # Each proof is independent: it verifies against its OWN file's digest.
@@ -1675,7 +1679,9 @@ async def test_stamp_pending_runs_off_the_event_loop(cairn_env, monkeypatch):
 
     def fake_batch(pairs, calendars, staging, **kwargs):  # noqa: ANN003
         seen_threads.append(threading.current_thread())
-        return [True] * len(pairs)  # every file stamped
+        # Every file placed. A member's outcome is now what placement DID, not a bare bool, because
+        # the caller's row update differs per branch (design D1).
+        return [ots.StampOutcome(kind="placed", state="incomplete")] * len(pairs)
 
     monkeypatch.setattr(ots, "stamp_batch_via_symlink", fake_batch)
 

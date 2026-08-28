@@ -12,6 +12,14 @@ Freshness is derived purely from ``kind='scan'`` rows in the ``runs`` table
 external ``cairn scan`` invocations write the runs. The upgrade pass records its own
 ``kind='upgrade'`` run (with live progress); because freshness ignores non-scan kinds, that run can
 never falsely refresh a dead collection's dead-man's switch.
+
+**Single-writer audit (design D10).** Every proof-mutating pass here already runs inside the
+collection's DB-enforced operation claim, and that is deliberate: proof placement is check-then-act
+(inspect the canonical path -> preserve -> place -> record), so two writers would silently destroy a
+proof. :func:`run_due_scans` claims via ``scan_collection``'s own ``claim_run``; :func:`run_daily_upgrade`
+claims a ``kind='upgrade'`` run before calling into ``proofs``. No lock belongs inside
+``_place_proof``, ``stamp_pending`` or ``upgrade_incomplete`` — the claim wraps them from the caller,
+and ``stamp_pending`` is called from inside a scan that already holds one.
 """
 
 from __future__ import annotations

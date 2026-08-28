@@ -37,6 +37,7 @@ import contextlib
 import datetime
 import errno
 import json
+import logging
 import os
 import re
 import shutil
@@ -47,6 +48,8 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger("cairn.ots")
 
 # Default per-call timeout (seconds) for the ``ots`` CLI.
 DEFAULT_TIMEOUT = 60
@@ -161,6 +164,13 @@ class VerifyResult:
     # The `.ots` could not be parsed at all: nothing — about the file OR the proof's content — was
     # established. Distinct from every "not verified" outcome, which all presuppose a readable proof.
     unreadable_proof: bool = False
+    # The digest the parsed proof commits to, when the proof was parsed. Set ONLY by the explorer
+    # backend, which is the only backend that establishes a digest disagreement at all (the node
+    # backend has no mismatch site — sprint-1 D1). It exists to make verify's blame attribution
+    # PROVABLE: with `files.ots_digest` recorded, "the .ots at this path is not the proof Cairn
+    # placed" and "the proof Cairn placed predates this version" stop being indistinguishable
+    # (design D7). It is displayed nowhere.
+    proof_digest: str | None = None
 
 
 def failed_lookup_count(result: VerifyResult | None) -> int:
@@ -259,25 +269,402 @@ def _prepare_staging_dir(staging_dir: Path) -> None:
         raise OtsError(f"cannot prepare the stamp staging dir {str(staging_dir)!r}: {exc}") from exc
 
 
-def _place_proof(staged_ots: Path, out_ots_path: Path) -> None:
-    """Move a produced staging proof to its final ``out_ots_path`` (creating parent dirs first).
+# --- Superseded-proof archive (design D1) -----------------------------------------------------
 
-    This is the one runtime place a permanent verdict is reached, and it is legitimate here because
-    the operand IS the final output path: its location is fully determined by the file's relpath, so
-    even a whole-path (PATH_MAX) overflow is permanent for this member. Only a **permanent** refusal
-    — ENAMETOOLONG — is re-raised as :class:`OtsPathError`, so the caller skips just this one
-    file and never re-attempts it. Every other ``OSError`` (a full or read-only proof store, a
-    cross-device staging dir, an I/O error) is **transient**: it is re-raised as a generic
-    :class:`OtsError` so the caller leaves the file ``pending`` for retry rather than silently
-    dropping a proof it could take later. The rest of a batch is unaffected either way.
+# Archive root under the proof store. Cannot shadow a collection directory (those are integers),
+# exactly as ``.staging`` cannot.
+SUPERSEDED_DIRNAME = ".superseded"
+
+# A directory `fsync` that fails with EXACTLY one of these is the filesystem saying it cannot make
+# directory entries durable (SMB/CIFS, FUSE, FAT-derived stores accept create/rename/file-`fsync`
+# and reject this). That is DETERMINISTIC, not transient: it answers the same on every retry, so
+# classifying it transient would wedge the notary forever and grow the archive family on every
+# doomed retry. Every OTHER errno (EIO, ENOSPC, EACCES, ...) stays a real, transient failure.
+_DIR_SYNC_UNSUPPORTED = frozenset(
+    {errno.EINVAL, errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP)}
+)
+
+# Proof stores (by root path) whose filesystem cannot flush directory entries. Detected LAZILY AND
+# IN-BAND on the first directory sync actually attempted for that store — no probe, no startup
+# check, no schema, no setting. Process memory only.
+_BEST_EFFORT_DIR_SYNC: set[str] = set()
+
+
+@dataclass(frozen=True)
+class StoredProofFacts:
+    """What one OFFLINE parse of a stored ``.ots`` establishes: its digest and its anchor syntax.
+
+    ``anchored`` means the proof CARRIES a ``BitcoinBlockHeaderAttestation`` — it does **not** mean
+    the anchor was checked against the chain. This module never touches the network for placement,
+    so a caller that needs "is this anchor real?" must ask :func:`verify` and pass the answer in.
+    """
+
+    readable: bool
+    digest: str | None = None  # lower-case hex of the file digest the proof commits to
+    anchored: bool = False
+
+
+@dataclass(frozen=True)
+class StampOutcome:
+    """What :func:`_place_proof` did, so the caller knows what it may record (design D1).
+
+    * ``placed``   — the freshly staged proof is at the canonical path; record it with ``now``.
+    * ``kept``     — an existing, caller-CONFIRMED anchored proof was kept; record ``complete``
+      and leave ``ots_stamped_at`` alone (its attestation carries the real date).
+    * ``deferred`` — nothing was decided (a same-digest anchored proof that nothing confirmed or
+      disproved). Both artifacts survive, the caller records NOTHING and the row stays ``pending``.
+      A deferral is an outcome, never a failure: it does not raise.
+    """
+
+    kind: str  # 'placed' | 'kept' | 'deferred'
+    digest: str | None = None
+    state: str | None = None  # 'incomplete' | 'complete' | None
+
+
+def read_proof_facts(ots_path: str | os.PathLike[str]) -> StoredProofFacts:
+    """Parse a stored ``.ots`` OFFLINE with the OpenTimestamps library: digest + anchor, one read.
+
+    Deliberately not ``ots info``: that costs a process spawn per occupied proof path. Uses the same
+    lazy import and the same deserialization as :func:`_verify_via_explorer`, so this module stays
+    importable without the library present.
+
+    NEVER raises. An absent, truncated, malformed or non-timestamp file is ``readable=False`` —
+    "nothing was established", which every caller must treat as "preserve it, do not reason about
+    it". Deleting a proof this build cannot parse is precisely the failure #15 exists to prevent.
     """
     try:
-        out_ots_path.parent.mkdir(parents=True, exist_ok=True)
+        from opentimestamps.core.notary import BitcoinBlockHeaderAttestation
+        from opentimestamps.core.serialize import StreamDeserializationContext
+        from opentimestamps.core.timestamp import DetachedTimestampFile
+
+        with Path(ots_path).open("rb") as fh:
+            detached = DetachedTimestampFile.deserialize(StreamDeserializationContext(fh))
+        anchored = any(
+            isinstance(att, BitcoinBlockHeaderAttestation)
+            for _msg, att in detached.timestamp.all_attestations()
+        )
+        return StoredProofFacts(
+            readable=True, digest=detached.file_digest.hex().lower(), anchored=anchored
+        )
+    except Exception:  # unreadable / absent / malformed / library missing
+        return StoredProofFacts(readable=False)
+
+
+def _fsync_dir(path: Path, *, store_key: str) -> None:
+    """Flush a directory's ENTRIES so a name created in it survives a power cut.
+
+    A file ``fsync`` commits the file's BYTES and says nothing about the directory entry that names
+    them; the entry and the source's ``unlink`` are independent metadata operations a filesystem may
+    persist in either order. Without this, a crash can persist the unlink of the canonical proof
+    while the archive's new name never lands — both names gone, the only proof destroyed. That is
+    the one failure this whole design exists to prevent, so preservation syncs directories too, and
+    syncs them BEFORE the source is removed.
+
+    **Unsupported-operation degrade (accepted limitation).** Some writable stores (CIFS/SMB, FUSE,
+    FAT-derived) accept ``open``/``write``/``rename``/file-``fsync`` and refuse a directory
+    ``fsync`` with ``EINVAL``/``ENOTSUP``/``EOPNOTSUPP``. That is deterministic — it will answer the
+    same forever — so treating it as transient would refuse every occupied-path placement, wedge
+    the collection's stamping permanently, and pile up one more suffixed archive slot per doomed
+    retry: a durability nicety costing the notary its ability to notarize. On the FIRST such result
+    per proof store we log one WARNING and record the store as best-effort; thereafter every
+    directory sync for that store returns immediately, without error and without repeating the
+    warning. Only *name* durability degrades — the proof's bytes are still flushed, the ordering of
+    the sequence is unchanged, and the source is still unlinked last.
+
+    Every other errno propagates, keeping the caller's transient classification: the placement is
+    refused, the member stays ``pending``, and the source is never unlinked. The three errnos are
+    enumerated exactly so a genuine I/O error can never be laundered into "best effort".
+    """
+    if store_key in _BEST_EFFORT_DIR_SYNC:
+        return
+    fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    except OSError as exc:
+        if exc.errno in _DIR_SYNC_UNSUPPORTED:
+            _BEST_EFFORT_DIR_SYNC.add(store_key)
+            log.warning(
+                "proof store %s: the filesystem does not support flushing directory entries (%s), "
+                "so a power loss in the instant between archiving a proof and placing the new one "
+                "could lose the newest archive entry's name; canonical proofs and all previously "
+                "synced entries are unaffected. Proceeding with best-effort durability.",
+                store_key,
+                exc.strerror or exc,
+            )
+            return
+        raise
+    finally:
+        os.close(fd)
+
+
+def _mkdirs_tracked(target: Path) -> tuple[list[Path], Path | None]:
+    """``mkdir -p`` ``target``; return ``(dirs created deepest-first, first pre-existing ancestor)``.
+
+    The caller needs both to sync the right chain: a directory's ``fsync`` makes durable the entries
+    IT holds, so the shallowest new directory's name is only durable once its (pre-existing) parent
+    is synced. When nothing had to be created there is no chain — ``target``'s own name was already
+    durable and only ``target`` itself needs syncing for the entry about to be made in it.
+    """
+    created: list[Path] = []
+    probe = target
+    while not probe.exists():
+        created.append(probe)
+        if probe.parent == probe:  # filesystem root; cannot climb further
+            break
+        probe = probe.parent
+    target.mkdir(parents=True, exist_ok=True)
+    return created, (probe if created else None)
+
+
+def _sync_created_chain(
+    target: Path, created: list[Path], pre_existing: Path | None, *, store_key: str
+) -> None:
+    """Sync ``target``, then every directory this call created above it, deepest-first.
+
+    Order is load-bearing (parent-after-child): syncing a parent before the child entry exists in it
+    accomplishes nothing. ``target`` goes first because that is what makes the newly created FILE's
+    name durable; then each created ancestor; then the first pre-existing ancestor, which holds the
+    shallowest new directory's name. Stop there — everything above it already existed durably.
+    """
+    _fsync_dir(target, store_key=store_key)
+    for ancestor in created:
+        if ancestor == target:
+            continue
+        _fsync_dir(ancestor, store_key=store_key)
+    if pre_existing is not None:
+        _fsync_dir(pre_existing, store_key=store_key)
+
+
+def superseded_root(store_root: str | os.PathLike[str], collection_id: str | int) -> Path:
+    """``<proof_store>/.superseded/<collection_id>`` — the archive subtree for one collection.
+
+    Kept per-collection even though a digest alone would be unique, so a collection's proofs move
+    or back up as one subtree and a future prune has an obvious counterpart.
+    """
+    return Path(store_root) / SUPERSEDED_DIRNAME / str(collection_id)
+
+
+def _archive_dir_for(archive_root: Path, facts: StoredProofFacts) -> tuple[Path, str]:
+    """Return ``(directory, basename stem)`` for archiving a proof with ``facts``.
+
+    Content-addressed: a ``.ots`` attests BYTES, not a path, so the digest selects the archive
+    FAMILY — ``<digest[:2]>/<digest>``. An unreadable proof has no digest to address it by, so it
+    goes to ``unknown/<uuid>``. Both stems are FIXED LENGTH, so no watched filename can influence
+    the archive path's length: the archive can never be the thing that trips ENAMETOOLONG, and the
+    output-path pre-check keeps applying only to the canonical path (design D1).
+    """
+    if facts.readable and facts.digest:
+        return archive_root / facts.digest[:2], facts.digest
+    return archive_root / "unknown", uuid.uuid4().hex
+
+
+def _preserve_proof(
+    source: Path, archive_root: Path, facts: StoredProofFacts, *, store_key: str
+) -> Path:
+    """Move ``source`` into the content-addressed archive, never discarding, never overwriting.
+
+    Two proofs for one digest are NOT interchangeable — one may carry a Bitcoin attestation the
+    other lacks — and deciding which is stronger is a judgement an archive must not make. So a taken
+    name is not a collision to resolve by dropping one: the incoming proof gets the next free
+    monotonic slot (``<digest>.ots``, ``<digest>.1.ots``, ...). Nothing here is ever replaced or
+    removed.
+
+    The write is an EXCLUSIVE create (``O_CREAT|O_EXCL``) — ``os.replace`` silently overwrites and
+    is therefore unusable — followed by a byte copy. ``os.link`` is deliberately NOT used: it needs
+    hard-link support, which the proof store's "writable" contract does not promise, and on a
+    CIFS/FAT/FUSE store it would turn every occupied-path placement into a permanent retry loop
+    reported as transient. Copying a sub-kilobyte file works everywhere ``open`` does.
+
+    Ordering (design D1, "Crash-safety of the shuffle"): create+copy -> fsync the FILE -> close ->
+    fsync the archive's directory chain deepest-first -> and ONLY THEN unlink the source. An
+    interruption anywhere before that unlink leaves the proof intact at its original path; after it,
+    the archived name is durable. "Both names gone" is unreachable.
+
+    Returns the archive path the proof now occupies.
+    """
+    directory, stem = _archive_dir_for(archive_root, facts)
+    created, pre_existing = _mkdirs_tracked(directory)
+    payload = source.read_bytes()
+
+    index = 0
+    while True:
+        candidate = directory / (f"{stem}.ots" if index == 0 else f"{stem}.{index}.ots")
+        try:
+            fd = os.open(str(candidate), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            break
+        except FileExistsError:
+            index += 1
+            # Bounded by construction (the collection claim serializes writers and the shard is
+            # scoped by collection id), but never spin forever on a pathological store.
+            if index > 10_000:  # pragma: no cover - defensive
+                raise OtsError(f"cannot find a free archive slot for {candidate!r}") from None
+
+    try:
+        os.write(fd, payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    # The file's BYTES are durable; its NAME is not until the directory holding it is synced.
+    _sync_created_chain(directory, created, pre_existing, store_key=store_key)
+    # Only now may the only other copy go away.
+    os.unlink(source)
+    return candidate
+
+
+def _path_occupied(path: Path) -> bool:
+    """Whether something already occupies ``path``, treating an un-stat-able path as unoccupied.
+
+    A ``stat`` that fails is not evidence that a proof is there — and, crucially, it must not turn a
+    PERMANENT refusal of the final output path into a transient preservation error. An overlong
+    ``.ots`` name makes ``Path.exists()`` itself raise ``ENAMETOOLONG``; swallowed here, the
+    placement below reaches the same errno on ``mkdir``/``os.replace`` and classifies it as the
+    permanent skip it is, keeping the module's rule that the final output path is classified in
+    exactly one place. Any other stat failure is likewise re-encountered and classified there.
+    """
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _place_proof(
+    staged_ots: Path,
+    out_ots_path: Path,
+    *,
+    store_root: str | os.PathLike[str] | None = None,
+    verdict: str | None = None,
+) -> StampOutcome:
+    """Put a produced staging proof at its final ``out_ots_path`` WITHOUT ever destroying a proof.
+
+    This used to be a bare ``os.replace``, so any second stamp of the same relpath landed on top of
+    whatever was there — including a years-old Bitcoin anchor, whose bytes were then gone from the
+    disk (GitHub #15). It is now: inspect the canonical path, decide, preserve, place.
+
+    The rule when the canonical path is OCCUPIED (design D1):
+
+    ==============================================  ==========================================
+    existing canonical proof                        action
+    ==============================================  ==========================================
+    unreadable                                      archive under ``unknown/``; place staged
+    digest != staged digest                         archive under its digest; place staged
+    same digest, anchored, ``verdict='confirmed'``  KEEP existing, discard staged (``kept``)
+    same digest, anchored, ``verdict='disproven'``  archive existing; place staged
+    same digest, anchored, no verdict               DEFER: archive the STAGED proof, keep existing
+    same digest, not anchored                       archive existing; place staged
+    ==============================================  ==========================================
+
+    ``verdict`` is the CALLER's answer about the existing proof's Bitcoin anchor. This function is
+    offline by construction — it parses a local file and checks no chain — so "anchored" here means
+    only *carries a BitcoinBlockHeaderAttestation*. Without the caller's verdict, keeping such a
+    proof would let a fabricated attestation hold the canonical path and discard the real proof
+    produced seconds earlier, so keep-existing requires ``'confirmed'`` and an unconfirmed anchor
+    DEFERS rather than asserting anything (design D1a).
+
+    Ordering is load-bearing and forbidden to reverse: **archive first, place second**. An
+    interruption between them leaves the canonical path absent and the old proof safe in the
+    archive, which is recoverable — the caller has written no row state, so the file is still
+    ``pending`` and the next pass re-stamps. The reverse order destroys the proof before preserving
+    it, which is the bug.
+
+    Failure classification is unchanged and still governed by the module docstring: only a
+    **permanent** refusal of the FINAL output path (ENAMETOOLONG) raises :class:`OtsPathError`.
+    Every other ``OSError`` — including any preservation failure, because the archive is not the
+    final output path — is a transient :class:`OtsError`, so a proof that could not be preserved
+    REFUSES the placement and leaves the member ``pending`` rather than proceeding over it.
+    """
+    staged_ots = Path(staged_ots)
+    out_ots_path = Path(out_ots_path)
+    store = Path(store_root) if store_root is not None else None
+    # Keyed per proof store: the directory-sync degrade is a property of the store's filesystem.
+    store_key = str(store if store is not None else out_ots_path.parent)
+
+    if store is not None:
+        try:
+            collection_id = out_ots_path.relative_to(store).parts[0]
+        except (ValueError, IndexError):  # pragma: no cover - defensive
+            collection_id = "unknown"
+        archive_root = superseded_root(store, collection_id)
+    else:
+        # No store root named (only reachable from a direct call that did not pass one). Archive
+        # beside the canonical tree rather than not archiving at all — losing a proof is the one
+        # outcome this function may never produce.
+        archive_root = out_ots_path.parent / SUPERSEDED_DIRNAME
+
+    staged_facts: StoredProofFacts | None = None
+    try:
+        if _path_occupied(out_ots_path):
+            existing_facts = read_proof_facts(out_ots_path)
+            staged_facts = read_proof_facts(staged_ots)
+            same_digest = bool(
+                existing_facts.readable
+                and staged_facts.readable
+                and existing_facts.digest
+                and existing_facts.digest == staged_facts.digest
+            )
+            if same_digest and existing_facts.anchored and verdict == "confirmed":
+                # #15's headline case. A fresh stamp is always `incomplete`; replacing a confirmed
+                # Bitcoin anchor with a same-bytes pending proof is a strict downgrade of the claim.
+                log.warning(
+                    "keeping the existing confirmed proof at %s and discarding the freshly staged "
+                    "%s (same digest %s)",
+                    out_ots_path,
+                    staged_ots,
+                    existing_facts.digest,
+                )
+                return StampOutcome(kind="kept", digest=existing_facts.digest, state="complete")
+            if same_digest and existing_facts.anchored and verdict != "disproven":
+                # The outage branch. Nothing confirmed this anchor and nothing disproved it.
+                # Recording `complete` would make a completed notarization purchasable by anyone who
+                # can take the backend offline; discarding the staged proof would lose evidence;
+                # demoting the existing one would throw away a probably-genuine anchor over a
+                # network blip. Keep BOTH and decide on a pass whose backend answers.
+                slot = _preserve_proof(staged_ots, archive_root, staged_facts, store_key=store_key)
+                log.warning(
+                    "deferring proof placement for %s: the existing proof's anchor was neither "
+                    "confirmed nor disproven, so it stays canonical and the freshly staged proof is "
+                    "preserved at %s (nothing recorded; the file stays pending)",
+                    out_ots_path,
+                    slot,
+                )
+                return StampOutcome(kind="deferred")
+            slot = _preserve_proof(out_ots_path, archive_root, existing_facts, store_key=store_key)
+            log.warning(
+                "superseded proof preserved: %s -> %s (%s)",
+                out_ots_path,
+                slot,
+                (
+                    f"digest {existing_facts.digest}"
+                    if existing_facts.readable
+                    else "unreadable proof, archived under an opaque name"
+                ),
+            )
+    except OSError as exc:
+        # Preservation is NOT the final output path, so it is always transient (module docstring):
+        # the member stays `pending` and is retried, never dropped to `none`. Crucially the source is
+        # unlinked last inside `_preserve_proof`, so a failure here leaves the existing proof intact
+        # at the canonical path and nothing has been placed over it.
+        raise OtsError(
+            f"refusing to place a proof at {out_ots_path!r}: could not preserve the existing "
+            f"proof ({exc})"
+        ) from exc
+
+    try:
+        created, pre_existing = _mkdirs_tracked(out_ots_path.parent)
         os.replace(staged_ots, out_ots_path)
+        # A rename is not durable until the directory holding it is synced. Without this the caller
+        # can record a proof path naming an entry that did not survive a crash, while the preserved
+        # copy sits under a name no row points at.
+        _sync_created_chain(out_ots_path.parent, created, pre_existing, store_key=store_key)
     except OSError as exc:
         if exc.errno == errno.ENAMETOOLONG:
             raise OtsPathError(f"cannot write proof to {out_ots_path!r}: {exc}") from exc
         raise OtsError(f"failed to place proof at {out_ots_path!r}: {exc}") from exc
+
+    if staged_facts is None:
+        # Read from the canonical path: the staged file has been renamed away. One sub-kilobyte
+        # local parse, so the caller can record WHICH digest the proof it just placed commits to.
+        staged_facts = read_proof_facts(out_ots_path)
+    return StampOutcome(kind="placed", digest=staged_facts.digest, state="incomplete")
 
 
 def info(ots_path: str | os.PathLike[str]) -> ProofInfo:
@@ -318,7 +705,8 @@ def stamp_via_symlink(
     timeout: int = DEFAULT_TIMEOUT,
     *,
     store_root: str | os.PathLike[str] | None = None,
-) -> Path:
+    verdict: str | None = None,
+) -> StampOutcome:
     """Stamp ``real_path`` and place the proof at ``out_ots_path`` without writing beside it.
 
     ``ots stamp`` writes ``<input>.ots`` next to its input and has no output flag, but collection
@@ -328,6 +716,11 @@ def stamp_via_symlink(
 
     ``store_root`` is the proof-store root: only the components below it (the ones Cairn creates)
     are pre-checked for the per-name byte limit. Staging-side failures are always transient.
+
+    ``verdict`` is the caller's finding about any proof ALREADY at ``out_ots_path`` (``'confirmed'``
+    / ``'disproven'`` / ``None``), forwarded to :func:`_place_proof`. Returns that function's
+    :class:`StampOutcome` — the caller's row update differs per branch, and ``deferred`` means
+    "record nothing" rather than "failed".
     """
     real_path = Path(real_path)
     out_ots_path = Path(out_ots_path)
@@ -370,13 +763,15 @@ def stamp_via_symlink(
                 f"ots stamp produced no proof for {real_path} "
                 f"(rc={rc}): {(err or out).strip()}"
             )
-        _place_proof(staged_ots, out_ots_path)
+        outcome = _place_proof(
+            staged_ots, out_ots_path, store_root=root, verdict=verdict
+        )
     finally:
         for stray in created:
             # Best-effort: cleanup must never mask or replace the classified exception.
             with contextlib.suppress(OSError):
                 stray.unlink()
-    return out_ots_path
+    return outcome
 
 
 def stamp_batch_via_symlink(
@@ -386,8 +781,9 @@ def stamp_batch_via_symlink(
     timeout: int = DEFAULT_TIMEOUT,
     *,
     store_root: str | os.PathLike[str] | None = None,
-) -> list[bool]:
-    """Stamp many files in ONE ``ots stamp`` call; return per-item success aligned with ``items``.
+    verdicts: list[str | None] | None = None,
+) -> list[StampOutcome | None]:
+    """Stamp many files in ONE ``ots stamp`` call; return per-item outcomes aligned with ``items``.
 
     ``items`` is a list of ``(real_path, out_ots_path)``. One staging symlink is built per item and
     ``ots stamp <link1> … <linkN>`` is invoked once: OpenTimestamps aggregates the N digests into a
@@ -396,9 +792,15 @@ def stamp_batch_via_symlink(
 
     Success is decided by *filesystem truth* — whether each ``<linkI>.ots`` was actually produced —
     not by the process exit code, so a whole-batch failure, a timeout, or one unreadable file
-    aborting the run leaves the unaffected members stamped and the rest reported ``False`` for the
+    aborting the run leaves the unaffected members stamped and the rest reported ``None`` for the
     caller to retry individually. Links and stray ``.ots`` are always cleaned up (best-effort) in
     ``finally``. ``store_root`` bounds the output-path pre-check to the components Cairn creates.
+
+    Each element of the result is a :class:`StampOutcome` (``placed`` / ``kept`` / ``deferred``) or
+    ``None``, which still means exactly what ``False`` meant: "this member failed, fall back to a
+    single-file stamp". A ``deferred`` member is NOT a failure — it needs no fallback, and the caller
+    simply records nothing for it. Per-member placement failure is still isolated: one member whose
+    old proof cannot be archived is left for the fallback while the rest of the batch is placed.
     """
     pairs = [(Path(real), Path(out)) for real, out in items]
     if not pairs:
@@ -414,7 +816,7 @@ def stamp_batch_via_symlink(
     # member stays ``False``; the caller's single-file fallback re-checks it and records it as a
     # permanent skip rather than re-attempting it forever.
     links: list[tuple[Path, Path] | None] = []
-    results = [False] * len(pairs)
+    results: list[StampOutcome | None] = [None] * len(pairs)
     try:
         for real, out in pairs:
             if not _proof_output_writable(out, below=root):
@@ -449,18 +851,22 @@ def stamp_batch_via_symlink(
 
         for i, ((_real, out), entry) in enumerate(zip(pairs, links)):
             if entry is None:
-                continue  # unwritable output name — skipped, results[i] stays False
+                continue  # unwritable output name — skipped, results[i] stays None
             _link, staged_ots = entry
             if staged_ots.exists():
                 try:
-                    _place_proof(staged_ots, out)
-                    results[i] = True
+                    results[i] = _place_proof(
+                        staged_ots,
+                        out,
+                        store_root=root,
+                        verdict=(verdicts[i] if verdicts is not None else None),
+                    )
                 except OtsError:
-                    # Could not place this proof — an unwritable path the pre-check did not model, or
-                    # a transient store error (full / read-only). Leave ``False`` so the single-file
-                    # fallback re-raises the right class and the caller classifies it permanent vs.
-                    # transient; the staged proof is cleaned up below. One bad member never aborts the
-                    # batch.
+                    # Could not place this proof — an unwritable path the pre-check did not model, a
+                    # transient store error (full / read-only), or an existing proof that could not
+                    # be preserved. Leave ``None`` so the single-file fallback re-raises the right
+                    # class and the caller classifies it permanent vs. transient; the staged proof is
+                    # cleaned up below. One bad member never aborts the batch.
                     pass
     finally:
         for entry in links:
@@ -682,10 +1088,18 @@ def _verify_via_explorer(
             message=f"unreadable proof: {exc}",
         )
 
+    # The proof parsed, so the digest it commits to is now an established fact and travels on
+    # every terminal result below. Callers that hold the row's recorded provenance (`ots_digest`)
+    # use it to tell "this .ots is not the proof Cairn placed" from "the proof Cairn placed predates
+    # this version" — a distinction that was previously undecidable (design D7).
+    proof_digest = detached.file_digest.hex().lower()
+
     try:
         want = binascii.unhexlify(digest)
     except (binascii.Error, ValueError):
-        return VerifyResult(verified=False, state="none", message="invalid digest")
+        return VerifyResult(
+            verified=False, state="none", proof_digest=proof_digest, message="invalid digest"
+        )
 
     pending: list[str] = []
     bitcoin: list[tuple[int, bytes]] = []  # (block height, committed digest = expected merkleroot)
@@ -708,6 +1122,7 @@ def _verify_via_explorer(
             state=state,
             calendars=pending,
             digest_mismatch=True,
+            proof_digest=proof_digest,
             message=(
                 "the file's digest does not match the digest this proof commits to; "
                 "the proof alone cannot say which of the two changed"
@@ -720,6 +1135,7 @@ def _verify_via_explorer(
             verified=False,
             state=state,
             calendars=pending,
+            proof_digest=proof_digest,
             message="proof is not yet anchored to Bitcoin",
         )
 
@@ -766,6 +1182,7 @@ def _verify_via_explorer(
             block_height=height,
             existed_by=existed_by,
             calendars=pending,
+            proof_digest=proof_digest,
             transport_error=transport_error,
             transport_failures=transport_failures,
             message=message,
@@ -779,6 +1196,7 @@ def _verify_via_explorer(
             state="complete",
             calendars=pending,
             proof_mismatch=True,
+            proof_digest=proof_digest,
             transport_error=transport_error,
             transport_failures=transport_failures,
             message="Bitcoin merkle root does not match the proof — the proof or the explorer's block data may be wrong (this is not evidence the file changed)",
@@ -788,6 +1206,7 @@ def _verify_via_explorer(
         verified=False,
         state="complete",
         calendars=pending,
+        proof_digest=proof_digest,
         transport_error=transport_error,
         transport_failures=transport_failures,
         message=transport_error or "could not reach the block explorer",
