@@ -87,8 +87,11 @@ Standing guardrails for both slices:
   `modified`) and form scopes (`baseline-new`, `adopt-changed`, `stop-tracking`, `accept-file`), per
   design D2. Retire `review-accept`.
 - [ ] 2.2 Add `file_id` to `_PopEvent` (event leg selects `Event.file_id` into the spare `n2`
-  slot) and add the pure `_narrow(pop, form, statuses, file_id=None)` helper. The event component of
-  a narrowed population covers only the events of its files (design D3).
+  slot) and add the pure `_narrow(pop, form, statuses, file_id=None)` helper. For `adopt-changed`,
+  `stop-tracking` and `accept-file`, the event component of a narrowed population covers only the
+  events of its files; **`baseline-new` is the explicit exception** — it passes the wide read's
+  entire open-event set through unchanged, so the collection-wide no-open-events assertion stays
+  cryptographically bound (design D2/D3).
 - [ ] 2.3 `_population_fingerprint`: unchanged encoding, reading the narrowed population's scope
   field; the `accept-file` form additionally carries `file={id}` in the header. Keep the
   `baseline-new` `issues=` assertion (design D5).
