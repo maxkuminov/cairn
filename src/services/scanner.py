@@ -115,14 +115,21 @@ class RunSummary:
     missing: int = 0
     moved: int = 0
     restored: int = 0
+    # Files that reappeared after being recorded `missing` with bytes that do NOT match the digest
+    # recorded for them (#21). Each one is ALSO counted in `modified` (its status is `modified`) —
+    # this is the narrower story, for the scan line and the alert summary. Deliberately not a
+    # `runs` column: the file is already counted in `runs.modified` and the event kind carries the
+    # distinction (design D4).
+    restored_changed: int = 0
     ok: int = 0
     errors: int = 0
     # Intact `new` files promoted to `ok` by the deep pass (auto_baseline_new). Informational only.
     baselined: int = 0
     result: str = "ok"
     # Alarming events newly created THIS run — (kind, relpath), capped at ALARM_PATH_CAP. Only
-    # `missing` (any mode) and `modified` (WORM) accumulate here; `added` and churn re-baselines
-    # do not. The post-commit dispatch hook turns a non-empty list into a single batched alert.
+    # `missing` (any mode), `restored_changed` (any mode) and `modified` (WORM) accumulate here;
+    # `added`, `restored`, `moved` and churn re-baselines do not. The post-commit dispatch hook
+    # turns a non-empty list into a single batched alert.
     alarming: list[tuple[str, str]] = field(default_factory=list)
 
 
@@ -397,28 +404,79 @@ async def scan_collection(
                     new_rows.append(row)
                     summary.added += 1
                 elif row.status == "missing":
-                    # Reappeared after being recorded missing.
-                    row.sha256 = await _hash(full)
+                    # Reappeared after being recorded missing. COMPARE BEFORE OVERWRITE: the
+                    # recorded digest is the only record of what this file used to be, and this
+                    # branch used to destroy it with `row.sha256 = await _hash(full)` as its very
+                    # first statement — adopting whatever bytes turned up as "restored / OK"
+                    # without ever checking them (#21). Capture the prior digest first, hash, then
+                    # classify from the comparison (design D6).
+                    prior = row.sha256
+                    sha = await _hash(full)
+                    # The index must keep describing the bytes on disk NOW (sprint-1's verify
+                    # blame attribution reads `files.sha256` as the last-seen digest), so the
+                    # recorded digest is still updated in every outcome. The fix is *compare
+                    # before overwrite*, not *stop overwriting*.
+                    row.sha256 = sha
                     row.size, row.mtime = size, mtime
-                    row.status = "ok"
                     row.last_checked = row.last_changed = now
-                    # `restored` is informational (a missing file came back, the benign
-                    # direction): born acknowledged like `added`, so it stays in the feed without
-                    # nagging.
-                    session.add(
-                        Event(
-                            collection_id=collection.id,
-                            file_id=row.id,
-                            kind="restored",
-                            detected_at=now,
-                            acknowledged_at=now,
-                            acknowledged_by=None,
+                    if prior is not None and sha != prior:
+                        # Something is back at the path, but it is not what left: a wrong backup
+                        # snapshot, a truncated restore, or bytes planted while the real file was
+                        # known-absent. It alarms in BOTH modes — a churn collection exempts
+                        # ordinary edits, and a file that was absent and came back different is
+                        # not an ordinary edit (design D4). Reusing `modified` would be silent
+                        # there, which is why `restored_changed` exists.
+                        row.status = "modified"
+                        if perfile:
+                            # The new bytes get their own proof; #15's preservation keeps the
+                            # previous bytes' proof from being overwritten by it.
+                            row.ots_state = "pending"
+                        session.add(
+                            Event(
+                                collection_id=collection.id,
+                                file_id=row.id,
+                                kind="restored_changed",
+                                detected_at=now,
+                                # Both digests in full: the one recorded before the file went
+                                # missing, and the one observed now. Truncating either would cost
+                                # the operator the ability to identify what actually came back.
+                                detail=f"recorded {prior} → found {sha}",
+                            )
                         )
-                    )
+                        summary.modified += 1
+                        summary.restored_changed += 1
+                        _record_alarm("restored_changed", relpath)
+                    else:
+                        # Identical bytes — or a legacy row with no recorded digest, where nothing
+                        # can be established and so nothing is alarmed. `restored` is
+                        # informational (a missing file came back, the benign direction): born
+                        # acknowledged like `added`, so it stays in the feed without nagging.
+                        # `ots_state` is untouched — the stored proof still commits to these bytes.
+                        row.status = "ok"
+                        session.add(
+                            Event(
+                                collection_id=collection.id,
+                                file_id=row.id,
+                                kind="restored",
+                                detected_at=now,
+                                acknowledged_at=now,
+                                acknowledged_by=None,
+                                detail=(
+                                    None
+                                    if prior is not None
+                                    else "no digest was recorded for this file, so the returned "
+                                    "bytes could not be compared"
+                                ),
+                            )
+                        )
+                        summary.restored += 1
                     # Close the file's own open `missing` alert(s) in the same transaction that
-                    # commits this restore — drained in `_drain` just below (design D10).
+                    # commits this reappearance — drained in `_drain` just below (design D5/D10).
+                    # The trigger is that the file REAPPEARED, not that it is healthy: the
+                    # proposition a `missing` alert asserts ("this file is absent") is false
+                    # either way, and for a changed reappearance the alarm rides on the
+                    # unacknowledged `restored_changed` event, which says strictly more.
                     restored_ids.append(row.id)
-                    summary.restored += 1
                 elif deep or row.size != size or row.mtime != mtime or row.sha256 is None:
                     # Deep pass re-hashes every file; a normal pass only when size/mtime moved or
                     # no prior hash exists. Either way the sha comparison below classifies it.
@@ -474,6 +532,17 @@ async def scan_collection(
                 collection.id,
                 skipped_unstorable,
                 unstorable_sample,
+            )
+
+        if summary.restored_changed:
+            # One batched line, not one per file: a mass wrong restore (the whole point of the
+            # check) must not bury the log. The per-file digests live in `events.detail`.
+            logging.getLogger("cairn.scanner").warning(
+                "collection %s: %d file(s) reappeared with bytes that do NOT match the digest "
+                "recorded for them — each is now `modified` with an unacknowledged "
+                "`restored_changed` event carrying both digests; review before trusting them",
+                collection.id,
+                summary.restored_changed,
             )
 
         # Files in the DB but no longer on disk → candidate deletions (skip ones already missing).
@@ -565,9 +634,10 @@ async def scan_collection(
         await session.commit()
         summary.result = "error"
 
-    # Best-effort alert AFTER the commit: a newly-detected missing (any mode) or modified-WORM
-    # change fans out to the collection's enabled channels. Dispatch isolates per-channel failures and
-    # is itself wrapped here, so a notification error never affects the scan result.
+    # Best-effort alert AFTER the commit: a newly-detected missing (any mode), a file that came
+    # back with different bytes (any mode) or a modified-WORM change fans out to the collection's
+    # enabled channels. Dispatch isolates per-channel failures and is itself wrapped here, so a
+    # notification error never affects the scan result.
     if summary.alarming:
         try:
             from ..config import get_settings
@@ -578,8 +648,14 @@ async def scan_collection(
             parts: list[str] = []
             if summary.missing:
                 parts.append(f"{summary.missing} missing")
-            if summary.modified:
-                parts.append(f"{summary.modified} modified")
+            # `summary.modified` already includes the restored-changed files (their status IS
+            # `modified`), so they are subtracted out and named separately rather than counted
+            # twice. With none of them the wording is byte-identical to before.
+            plain_modified = summary.modified - summary.restored_changed
+            if plain_modified > 0:
+                parts.append(f"{plain_modified} modified")
+            if summary.restored_changed:
+                parts.append(f"{summary.restored_changed} came back changed")
 
             # The deep link is a convenience; being told at all is the product. So the two things
             # on the way to it — resolving the effective settings, then building the URL — get

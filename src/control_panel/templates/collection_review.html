@@ -93,8 +93,10 @@
       <div class="resolve__head">{{ m.icon("checkCircle", size=16, stroke=1.9) }}
         {{ review_open }} alert{{ "" if review_open == 1 else "s" }} from files that have since been restored</div>
       <div class="resolve__sub">
-        The files are back and nothing is missing or changed right now. These alerts stay open until
-        you note that you've seen them.
+        The files are back, and the scan that found them compared their contents against the
+        fingerprint recorded before they went missing: they match. Anything that had come back
+        different would be listed above as <em>came back changed</em>, not cleared. These alerts
+        stay open until you note that you've seen them.
       </div>
       <div class="resolve__grid" style="grid-template-columns:1fr">
         <div class="resolve__opt">
@@ -130,8 +132,11 @@
     <div class="recovery__hint">
       Cairn watches your files read-only — it never restores them itself. Paste the copied list into
       your own backup tool (restic, Borg, rsync, Time Machine, a cloud sync…) to bring them back, then
-      <strong>Scan now</strong> on the collection to confirm, or <strong>Accept all changes</strong> to
-      stop tracking what's gone for good.
+      <strong>Scan now</strong> on the collection to check what you restored: each returned file is
+      re-read and compared against the fingerprint Cairn recorded before it went missing. Files that
+      match are cleared; a file whose contents differ — the wrong snapshot, a truncated restore —
+      raises a new <em>came back changed</em> alert instead of clearing the old one. Or
+      <strong>Accept all changes</strong> to stop tracking what's gone for good.
       {# Point at a route that exists: `cairn status` is not implemented, and the filtered file
          browser (already linked at the foot of the list) is where the full set actually lives. #}
       {% if copy_truncated %}<br />The buttons copy the first {{ "{:,}".format(copy_count) }} of {{ "{:,}".format(total_issues) }} paths — open the <a href="/collection/{{ c.id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, for the full set.{% endif %}
@@ -141,7 +146,10 @@
       <ol class="recovery__steps">
         <li>Copy the affected paths with the <strong>Copy paths</strong> button above (relative to the collection root, or full paths).</li>
         <li>In your backup tool, restore exactly those paths to the collection root <span class="mono">{{ c.root }}</span>.</li>
-        <li>Run <strong>Scan now</strong> on the collection page — recovered files flip back to <em>restored / OK</em>.</li>
+        <li>Run <strong>Scan now</strong> on the collection page. Every file that reappeared is re-read
+          and compared against the fingerprint recorded before it went missing: a file whose contents
+          match flips back to <em>restored / OK</em>; a file whose contents differ is flagged
+          <em>came back changed</em> and raises a new alert — check that one before you trust it.</li>
         <li>For anything you don't want back, <strong>Accept all changes</strong> to clear it from tracking.</li>
       </ol>
     </details>

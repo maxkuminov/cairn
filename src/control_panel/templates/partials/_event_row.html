@@ -1,10 +1,15 @@
 {% import "_macros.html" as m %}
+{# `restored_changed` (a file that was recorded missing and came back with DIFFERENT bytes) is
+   deliberately drawn with the alarming kinds, never with the muted informational ones: this row is
+   the one surface that distinguishes "your file came back" from "something else came back in its
+   place". #}
 {%- set kind_meta = {
   "added": ("New", "var(--accent)", "var(--accent-soft)", "plus"),
   "modified": ("Modified", "var(--warn)", "var(--warn-soft)", "alert"),
   "missing": ("Missing", "var(--danger)", "var(--danger-soft)", "minusCircle"),
   "restored": ("Restored", "var(--ok)", "var(--ok-soft)", "refresh"),
   "moved": ("Moved", "var(--accent)", "var(--accent-soft)", "move"),
+  "restored_changed": ("Came back changed", "var(--danger)", "var(--danger-soft)", "alert"),
 }.get(e.kind, ("Event", "var(--text-2)", "var(--surface-2)", "info")) -%}
 <div class="event-row" id="event-row-{{ e.id }}">
   <div class="event-icon" style="background:{{ kind_meta[2] }};color:{{ kind_meta[1] }}">
@@ -17,6 +22,10 @@
       <span class="event-row__time">{{ e.at }}</span>
     </div>
     <div class="event-row__relpath mono">{% if e.kind == "moved" and e.detail %}{{ e.detail }}{% else %}{{ e.relpath }}{% endif %}</div>
+    {# `restored_changed` carries both digests (recorded → found) in `detail`, rendered in the same
+       slot a moved file's old → new path uses. The path stays on the line above it: an alarm the
+       operator has to act on is useless without the file it names. #}
+    {% if e.kind == "restored_changed" and e.detail %}<div class="event-row__relpath mono" style="color:var(--text-2)">{{ e.detail }}</div>{% endif %}
     <div class="event-row__collection">{{ e.collection_name }}</div>
     {% if not e.acked %}
       {# Un-inverted per design D8: a reading-log write is never the loud button. The hint says

@@ -359,41 +359,41 @@ Files owned: `src/services/scanner.py`, `routes.py::_event_view`,
 `templates/collection_review.html`, `templates/partials/_event_row.html`, `tests/test_scanner.py`,
 new `tests/test_restored_changed.py`.
 
-- [ ] 3.1 `scanner.py`, restore branch: capture `prior = row.sha256` **before** any assignment, hash
+- [x] 3.1 `scanner.py`, restore branch: capture `prior = row.sha256` **before** any assignment, hash
   the file, then branch on the comparison. `row.sha256` is still updated to the observed digest in
   every outcome — the fix is *compare before overwrite*, not *stop overwriting* (design D6).
-- [ ] 3.2 Identical bytes → today's behaviour **unchanged**: `ok`, `restored` born acknowledged,
+- [x] 3.2 Identical bytes → today's behaviour **unchanged**: `ok`, `restored` born acknowledged,
   `summary.restored += 1`, `ots_state` untouched (no re-stamp).
-- [ ] 3.3 No recorded digest (`prior is None`) → today's `restored`, with `events.detail` recording
+- [x] 3.3 No recorded digest (`prior is None`) → today's `restored`, with `events.detail` recording
   that no digest was available to compare. Nothing established ⇒ nothing alarmed.
-- [ ] 3.4 Different bytes → `status='modified'` in **both** modes; one `restored_changed` event with
+- [x] 3.4 Different bytes → `status='modified'` in **both** modes; one `restored_changed` event with
   `acknowledged_at=None`; `events.detail` carrying **both digests in full**; `summary.modified += 1`;
   `_record_alarm("restored_changed", relpath)`; and `ots_state='pending'` for `perfile` collections.
   Emit **only** `restored_changed` — not a `restored` event as well.
-- [ ] 3.5 The reappeared row's id joins the batched `missing`-ack list in **every** outcome
+- [x] 3.5 The reappeared row's id joins the batched `missing`-ack list in **every** outcome
   (design D5). Keep the `kind='missing'` scoping and the same-transaction ordering exactly as
   sprint 1 left them; do not widen the `UPDATE`.
-- [ ] 3.6 Add a `restored_changed` counter to `RunSummary` for the CLI scan line / logging. **Do not
+- [x] 3.6 Add a `restored_changed` counter to `RunSummary` for the CLI scan line / logging. **Do not
   add a `runs` column** — the file is already counted in `runs.modified` (design D4).
-- [ ] 3.7 `routes.py::_event_view` + `partials/_event_row.html`: render the new kind with its own
+- [x] 3.7 `routes.py::_event_view` + `partials/_event_row.html`: render the new kind with its own
   label, colour and icon, and show `events.detail` for it the way `moved` already does. It must read
   as alarming, not informational.
-- [ ] 3.8 `templates/collection_review.html`: fix the three places that describe a check the scan did
+- [x] 3.8 `templates/collection_review.html`: fix the three places that describe a check the scan did
   not perform (design "Grounding", lines ~96-97, ~131-134, ~144) so they describe the comparison that
   now happens **and both of its outcomes** — a match returns the file to OK; a mismatch raises a new
   alert rather than clearing the old one. Do not touch the Acknowledge-vs-Accept contrast card or the
   recovery panel (#12: correct as built).
-- [ ] 3.9 Tests: a restore with identical bytes is `ok` + `restored` and its `missing` alert is
+- [x] 3.9 Tests: a restore with identical bytes is `ok` + `restored` and its `missing` alert is
   closed (the sprint-1 behaviour must not regress).
-- [ ] 3.10 Tests: a restore with different bytes is `modified` + an **unacknowledged**
+- [x] 3.10 Tests: a restore with different bytes is `modified` + an **unacknowledged**
   `restored_changed`, both digests appear in `detail`, `ots_state` is `pending` on a `perfile`
   collection, and the `missing` alert is still closed.
-- [ ] 3.11 Tests: **the churn case** — a wrong restore into a `churn` collection alarms and appears
+- [x] 3.11 Tests: **the churn case** — a wrong restore into a `churn` collection alarms and appears
   in `summary.alarming` (this is the reason the new kind exists; a reused `modified` would be silent
   here).
-- [ ] 3.12 Tests: an open WORM `modified` event on the same file survives the restore ack
+- [x] 3.12 Tests: an open WORM `modified` event on the same file survives the restore ack
   (#12 rejected fix 7).
-- [ ] 3.13 Tests: a wrong restore is **not** swallowed by `_reconcile_moves` when a same-content
+- [x] 3.13 Tests: a wrong restore is **not** swallowed by `_reconcile_moves` when a same-content
   rename happens in the same scan, and is **not** promoted by the deep pass's auto-baseline (it is
   `modified`, not `new`) — auto-baseline is enabled in production.
 
