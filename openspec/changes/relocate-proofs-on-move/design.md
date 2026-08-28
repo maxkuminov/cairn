@@ -104,8 +104,11 @@ Before relocating, parse the proof at the source (`read_proof_facts`):
   stranger's proof into the mover's canonical slot.
 - **Legacy row (`ots_digest` NULL)**: the source proof's committed digest must equal the
   row's recorded `sha256` (its last-scanned baseline). Equality is the explicit safe legacy
-  rule — the proof provably commits to this file's bytes. Anything else (mismatch, unreadable
-  source, no digest) → preserve all bytes, touch nothing, warn for operator recovery.
+  rule — the proof provably commits to this file's bytes. Disagreement is **ambiguous, not
+  evidence of misfiling** (audit 2b): a legitimately modified-then-moved file whose old proof
+  was never re-placed has exactly this shape, so the warning says "cannot be corroborated
+  without historical provenance; not healed" — never "swapped"/"misfiled". Unreadable source /
+  no digest → same: preserve all bytes, touch nothing, warn for operator recovery.
 - An unreadable or absent source: touch nothing, warn. (An absent source with `ots_path` set
   is a store-integrity problem relocation cannot fix.)
 
@@ -117,36 +120,53 @@ and nothing else on the row.
 Under the claim + flock, per row, with `src = ots_path`, `dst = proof_path(current relpath)`:
 
 1. **Aliasing check**: if `src` and `dst` resolve to the same directory entry
-   (`os.lstat` dev+inode equality — a case-only rename on a case-insensitive filesystem),
-   the proof is already in place: update `ots_path` to the canonical spelling, commit, and
-   STOP — never unlink, since there is only one entry.
+   (`os.lstat` dev+inode equality, CONFIRMED by byte comparison — network filesystems can lie
+   about identity, and identity alone must never decide a pointer; audit 2b), the proof is
+   already in place: update `ots_path` to the canonical spelling (fenced CAS, below), and
+   STOP — never remove anything, since there may be only one entry.
 2. **Destination inspection**, ordered — the defer test comes first:
-   a. `dst` is recorded as `ots_path` by a different row → **defer** (chain moves A→B, C→A
-      converge over successive sweeps; cycles A→B, B→A in one scan defer each other until one
-      side's slot is freed by its own relocation — each sweep relocates what it can and the
-      pair resolves over passes; nothing is ever placed over a referenced slot).
+   a. `dst` is recorded as `ots_path` by a different row → **defer**. Chain moves converge as
+      earlier relocations vacate slots (the sweep iterates within a pass). A **cycle** (a path
+      swap: each row blocks the other) can never converge by deferral — when a full pass makes
+      no progress and stale rows remain, break it by relocating ONE member's proof to a durable
+      unreferenced **holding slot** in the store (e.g. `<store>/.relocating/<row_id>.ots`),
+      committing that truthful pointer; the vacated canonical slot unblocks the rest, and the
+      held proof reaches its own canonical slot on a later iteration/sweep. The holding slot
+      obeys the same invariant and never-destroy rules.
    b. `dst` occupied, **byte-identical** to `src` (full content compare — committed digest
       alone is NOT sufficient, since two distinct proofs can commit to the same file digest
       with different attestation value) → the relocation is already half-done (a crash
-      between phases 3 and 5, or a hard-link surviving both): skip to phase 4.
+      between phases 3 and 5, or a hard-link surviving both): fsync `dst`'s directory chain
+      anyway (the earlier attempt may have crashed before its sync — audit 2b), then skip to
+      phase 4.
    c. `dst` occupied by anything else → archive the occupant to `.superseded/` via the
       existing preservation helper (it is unreferenced, per (a), and never discarded), then
       continue.
 3. **Publish**: `mkdir -p` parents; hard-link `src → dst`. Where the filesystem refuses links
-   (EPERM/EXDEV/ENOTSUP): copy to a temp name in `dst`'s directory, fsync, then publish with
-   a **no-replace** primitive (`os.link(temp, dst)` + unlink temp — EEXIST restarts phase 2's
-   classification; never a bare `os.rename` over a checkable window). Fsync the directory
-   chain to the store root (existing durability helper). Both paths now hold the proof.
-4. **Pointer commit**: set `ots_path = dst`, commit the DB. A datastore failure here rolls
-   back and aborts the sweep's current item through the operation's normal error handling —
-   it is NOT swallowed per-file (the session is not reusable after a failed commit); the
-   filesystem state (proof at both paths) is exactly the phase-3/5 crash window and heals on
-   the next sweep via 2b.
-5. **Unlink** the old entry (`suppress(OSError)`) and fsync its directory. A leftover old
-   copy after a crash between 4 and 5 is harmless: it sits in a slot that is no longer
-   referenced; a future stamp there archives it (never-destroy). The sweep makes **no
-   promise to garbage-collect** such copies (the audit's M3: a pointer already equal to
-   canonical is not selected as stale, so no such promise is implementable there).
+   (EPERM/EXDEV/ENOTSUP): a **link-free no-replace create** — exclusive-create `dst`
+   (O_CREAT|O_EXCL), full write from `src`, fsync — the same primitive the superseded archive
+   uses, so a store without hard links (SMB/FAT) still publishes; EEXIST restarts phase 2's
+   classification, never overwrites. Any temp file used gets an exclusive non-colliding name,
+   is fsynced before publication, is removed on every handled failure, and if left by a crash
+   is ignored recoverable debris. Fsync the directory chain to the store root (existing
+   durability helper). Both paths now hold the proof.
+4. **Pointer commit — a fenced compare-and-set**, not a blind write: one guarded UPDATE
+   requiring `relpath`, `ots_path`, and (where recorded) `ots_digest` to still equal the
+   corroborated values, with the run still live (the same guarded-UPDATE style the lease
+   machinery already uses). Zero rows → the row changed beneath the sweep or the claim was
+   reclaimed (a keepalive can fail mid-copy on a slow store; one post-lock check does not
+   cover the whole relocation — audit 2b): roll back, treat as claim-lost, stop; the
+   published `dst` copy is inert and a later sweep re-evaluates from scratch. A datastore
+   failure here follows the operation's normal error handling — never a per-file skip on a
+   broken session.
+5. **Remove the source, loss-proof**: copy `src` into the superseded archive first, then
+   unlink `src` (`suppress(OSError)`) and fsync its directory, then re-verify `dst` still
+   holds the proof — restoring from the archive copy if it does not (defense in depth against
+   identity-lying filesystems). Post-commit failures here keep the committed (truthful)
+   pointer and warn; they never roll the row back. A leftover old copy after a crash between
+   4 and 5 is harmless: it sits in an unreferenced slot; a future stamp there archives it
+   (never-destroy). The sweep makes **no promise to garbage-collect** such copies (a pointer
+   already equal to canonical is not selected as stale, so no such promise is implementable).
 
 Crash walk: before 3 → nothing changed. Between 3 and 4 → pointer names `src`, which exists;
 next sweep hits 2b and finishes. Between 4 and 5 → pointer names `dst`, which exists; stale

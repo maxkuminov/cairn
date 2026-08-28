@@ -26,22 +26,32 @@
 ## 2. The relocation primitive (`src/services/ots.py`)
 
 - [ ] 2.1 Implement the per-row relocation used ONLY by the healing sweep, phases per design
-  D4: aliasing check first (lstat dev+inode equality → pointer-spelling update only, no
-  unlink); ordered destination rules (defer-if-referenced is the CALLER's check, threaded in
-  as a predicate/result — `ots.py` stays DB-free; byte-identical occupant → adopt; other
-  occupant → archive via the existing preservation helper); no-replace publication (hard
-  link, else temp copy + `os.link` publish, EEXIST restarts classification); directory-sync
-  durability chain; `_NAME_MAX_BYTES` pre-check on components below the store root.
-- [ ] 2.2 Failure classification per design D5: filesystem/precondition failures return a
-  per-row outcome (nothing changed, warnable); no branch discards proof bytes; a permanent
-  destination refusal is the same per-row outcome, never a drop-to-`none`.
+  D4: aliasing check first (lstat dev+inode equality CONFIRMED by byte comparison — identity
+  alone never decides; alias → pointer-spelling CAS only, nothing removed); ordered
+  destination rules (defer-if-referenced is the CALLER's check, threaded in as a
+  predicate/result — `ots.py` stays DB-free; byte-identical occupant → adopt, but fsync its
+  directory chain before the caller's pointer commit; other occupant → archive via the
+  existing preservation helper); no-replace publication (hard link, else link-free
+  O_CREAT|O_EXCL create + full write + fsync; EEXIST restarts classification; exclusive
+  temp names, fsynced, removed on handled failures, crash-left temps are ignored debris);
+  directory-sync durability chain; `_NAME_MAX_BYTES` pre-check on components below the store
+  root.
+- [ ] 2.2 Loss-proof source removal (post-commit): archive-copy the source first, unlink,
+  fsync, then re-verify the destination still holds the proof and restore from the archive
+  copy if not. Post-commit failures keep the committed pointer and warn (never roll back the
+  row); pre-commit filesystem/precondition failures return a per-row outcome (nothing
+  changed, warnable). No branch discards proof bytes; a permanent destination refusal is a
+  per-row outcome, never a drop-to-`none`.
 - [ ] 2.3 Unit tests (`tests/test_proof_preservation.py` style): plain relocation; both-exist
-  crash window completes via byte-identical adoption; same-committed-digest but
-  byte-different occupant is NOT adopted (archived, source preserved); link-refusing
-  filesystem uses the copy + no-replace path; destination appearing between inspection and
-  publication restarts classification instead of overwriting; case-aliased source/destination
-  updates spelling without unlinking; over-limit destination refused per-row; every failure
-  leaves the source proof readable and the row's pointer truthful.
+  crash window completes via byte-identical adoption AND syncs the destination chain; a
+  same-identity-but-different-bytes aliasing lie does not commit the pointer;
+  same-committed-digest but byte-different occupant is NOT adopted (archived, source
+  preserved); link-refusing filesystem publishes via the exclusive-create path; destination
+  appearing between inspection and publication restarts classification instead of
+  overwriting; case-aliased source/destination updates spelling without removing anything;
+  removal re-verification restores from the archive copy when the destination vanished;
+  over-limit destination refused per-row; every failure leaves the source proof readable and
+  the row's pointer truthful.
 
 ## 3. The healing sweep (`src/services/proofs.py` + scheduler/CLI reach)
 
@@ -53,24 +63,32 @@
   (mismatch/unreadable/absent source) touches nothing and warns naming the row, digests, and
   `.superseded/` recovery. The sweep writes `ots_path` and nothing else, ever.
 - [ ] 3.3 Defer-if-referenced (design D4 rule 1): one bounded query for another row recording
-  the destination as its `ots_path`; on hit, defer with the old pointer kept.
-- [ ] 3.4 Pointer-commit ordering: publish durably → commit `ots_path` → unlink source. A
-  datastore failure at the commit follows the operation's normal error handling (rollback +
-  run finalization), never a per-row skip on a broken session.
-- [ ] 3.5 Independent admission: stale-pointer existence alone claims the collection and runs
-  the sweep (no `incomplete` proofs required; tripwire collections with historical proofs
-  included); sweep work is counted in the upgrade run's progress totals. Wire both entry
-  points: the scheduler's daily pass and `cairn upgrade`. Lease discipline: claim heartbeat,
-  per-collection proof flock around each relocation, claim re-confirmed after lock
-  acquisition, lock held across all phases.
+  the destination as its `ots_path`; on hit, defer with the old pointer kept. Cycle breaking:
+  when a full pass makes no progress and stale rows remain, relocate one member's proof to
+  the durable holding slot (`<store>/.relocating/<row_id>.ots`), commit that truthful
+  pointer, continue; the held proof converges on a later iteration/sweep.
+- [ ] 3.4 Pointer commit is a fenced compare-and-set: guarded UPDATE on
+  (`relpath`, `ots_path`, `ots_digest` where recorded) + run-still-live; zero rows → roll
+  back, claim-lost, stop (published destination copy stays inert). A datastore failure at the
+  commit follows the operation's normal error handling (rollback + run finalization), never a
+  per-row skip on a broken session.
+- [ ] 3.5 Independent admission + typed-run totals (MODIFIED requirement): stale-pointer
+  existence alone claims the collection and creates the `kind='upgrade'` run (tripwire
+  included); `total` = incompletes + stale rows (each row once), sweep outcomes advance
+  `processed`; sweep runs before the proof upgrades within the pass; neither-work → no run.
+  Wire both entry points: the scheduler's daily pass and `cairn upgrade`. Lease discipline:
+  claim heartbeat, per-collection proof flock around each relocation, claim re-confirmed
+  after lock acquisition, lock held across all phases.
 - [ ] 3.6 Tests: a pre-existing moved row (live-deployment shape) heals in one sweep with only
   `ots_path` changed; crash-window fixtures (both-exist → completes; pointer-committed +
   leftover source → leftover untouched and never re-selected); chain A→B + C→A converges over
   two sweeps with no cross-row interference; cycle A→B + B→A defers safely; misfiled pointer
   (stranger's proof at recorded path) warns and changes nothing; legacy `ots_digest`-NULL row
-  heals only when the source commits to its `sha256`; sweep-only admission (no incompletes /
-  tripwire) claims, runs, counts progress; permanent-refusal row re-warns with all fields
-  intact.
+  heals only when the source commits to its `sha256`, and a modified-then-moved legacy row is
+  warned as ambiguous (never "misfiled"); a path swap (cycle) converges via the holding slot;
+  the row-changed-beneath-the-sweep race hits the CAS zero-row path and commits nothing;
+  sweep-only admission (no incompletes / tripwire) claims, runs, counts progress with the
+  MODIFIED totals; permanent-refusal row re-warns with all fields intact.
 
 ## 4. Verification
 

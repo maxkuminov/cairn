@@ -86,26 +86,53 @@ the ONLY code path that relocates proofs; scans never do.
 **Corroboration before belief.** Before acting, the sweep SHALL parse the proof at the recorded
 `ots_path`. Where the row records proof provenance (`ots_digest`), the source proof's committed
 digest SHALL equal it; where provenance is absent (a legacy row), the source proof's committed
-digest SHALL equal the row's recorded `sha256`. On any other outcome — mismatch, unreadable
-source, absent source — the sweep SHALL touch nothing (no relocation, no archiving, no pointer or
-state change) and SHALL warn naming the row, the digests involved, and superseded-store recovery.
-A misfiled pointer (the pre-fix hazard already realized) is thereby detected and reported, never
-laundered into the canonical slot. The sweep SHALL NOT write `ots_digest` or any row field other
-than `ots_path`.
+digest SHALL equal the row's recorded `sha256`. On any other outcome the sweep SHALL touch
+nothing (no relocation, no archiving, no pointer or state change) and SHALL warn — and the
+warning SHALL state what the evidence supports, no more: a **provenance mismatch** (`ots_digest`
+recorded and disagreeing) is a detected misfiled pointer and SHALL be reported as such, naming
+both digests and superseded-store recovery; a **legacy disagreement** (`ots_digest` absent and
+the source not matching `sha256`) is AMBIGUOUS — a legitimately modified-then-moved file whose
+old proof was never re-placed produces exactly this shape — so the warning SHALL say the proof
+cannot be corroborated and the row cannot be healed safely without historical provenance, and
+SHALL NOT claim the proof was swapped or misfiled. The sweep SHALL NOT write `ots_digest` or any
+row field other than `ots_path`.
 
 **The pointer invariant.** At every moment, including across a crash at any phase boundary,
 `ots_path` SHALL name a location actually holding this row's proof. The sweep SHALL therefore
-make the proof durably exist at the destination before the pointer is updated, and SHALL remove
-the source entry only after the pointer update is committed. Where source and destination resolve
-to the **same directory entry** (a case-only rename on a case-insensitive filesystem, detected by
-filesystem identity, not path comparison), the sweep SHALL update the pointer to the canonical
-spelling and SHALL NOT unlink anything.
+make the proof durably exist at the destination before the pointer is updated — **every**
+completion path, including one that adopts an occupant published by an earlier interrupted
+attempt, SHALL sync the destination's directory chain to the store root before the pointer
+commit, because the occupant's own publication may never have been made durable. The source
+entry SHALL be removed only after the pointer update is committed, and removal SHALL be
+loss-proof: the sweep SHALL first copy the source into the superseded archive, and after
+removal SHALL re-verify the destination still holds the proof, restoring from that archive copy
+if it does not (the defense against a filesystem whose identity reporting lies). Where source
+and destination resolve to the **same directory entry** (a case-only rename on a
+case-insensitive filesystem, detected by filesystem identity AND confirmed by byte comparison —
+identity alone SHALL NOT be trusted), the sweep SHALL update the pointer to the canonical
+spelling and SHALL NOT remove anything.
+
+**The pointer commit SHALL be a fenced compare-and-set**, not a blind write: one guarded UPDATE
+requiring the row's `relpath`, current `ots_path`, and (where recorded) `ots_digest` to still
+equal the values the sweep corroborated, with the operation's run still live. A zero-row result
+means the row changed under the sweep (or the claim was reclaimed): the sweep SHALL roll back,
+treat its claim as lost, and stop — the published destination copy is inert and a later sweep
+re-evaluates from scratch. A single post-lock lease check SHALL NOT be treated as covering the
+whole relocation.
 
 **Never-destroy destination rules, evaluated in this order:**
 
 1. A destination recorded as a different row's `ots_path` SHALL cause the relocation to defer —
-   keep the old truthful pointer, warn, retry on a later sweep. Chain and cyclic moves converge
-   over successive sweeps; no branch may ever create or break a second row's pointer.
+   keep the old truthful pointer, warn, retry later. Chain moves converge as earlier relocations
+   vacate slots (the sweep MAY iterate within one pass); no branch may ever create or break a
+   second row's pointer. A **cyclic** dependency (two or more rows each blocking another's
+   destination, e.g. two files whose paths were swapped) cannot converge by deferral alone: when
+   a full pass over the stale set makes no progress and stale rows remain, the sweep SHALL break
+   the cycle by relocating ONE member's proof to a durable, unreferenced **holding location**
+   inside the proof store (outside every canonical slot), committing that truthful pointer, and
+   continuing — the vacated canonical slot lets the rest of the cycle converge, and the held
+   proof relocates to its own canonical slot on a later iteration or sweep. The holding location
+   is subject to the same pointer invariant and never-destroy rules as any other.
 2. A destination occupied by a proof **byte-identical** to the corroborated source SHALL be
    adopted as the already-published half of an interrupted relocation: the pointer is committed
    and the redundant source entry removed. Committed-digest equality alone SHALL NOT justify
@@ -114,20 +141,27 @@ spelling and SHALL NOT unlink anything.
 3. Any other occupant SHALL be archived to the superseded store (never discarded) before the
    proof is published.
 
-Publication SHALL be atomic and non-replacing: a hard link where supported, else a same-directory
-temp copy published by a no-replace primitive; a destination appearing between inspection and
-publication SHALL restart the destination rules, never overwrite. Durability SHALL use the proof
-store's existing directory-sync chain.
+Publication SHALL be atomic and non-replacing: a hard link where supported, else a **link-free
+no-replace create** (exclusive-create of the destination, full write, fsync — the same primitive
+the superseded archive already uses), so a proof store on a filesystem without hard links can
+still publish; a destination appearing between inspection and publication (exclusive-create
+failing because the path exists) SHALL restart the destination rules, never overwrite. Any
+intermediate temp file SHALL use an exclusive non-colliding name, be fsynced before publication,
+and be removed on every handled failure; a temp file left by a crash is recoverable debris the
+store ignores. Durability SHALL use the proof store's existing directory-sync chain.
 
-**Failure classification.** Filesystem and precondition failures are per-row: the row is left
-unchanged (its pointer still truthful), a warning names it, and the sweep continues; they re-warn
-on every later sweep. A destination the filesystem refuses permanently SHALL be the same per-row
-warning and SHALL NOT drop the proof's state, provenance, or pointer. A datastore failure at the
-pointer commit SHALL follow the operation's normal error handling (roll back, finalize the run
-accordingly) — never a silent per-row skip on a broken session. The sweep makes NO
-garbage-collection promise for a redundant source copy left by a crash after the pointer commit:
-such a copy sits in an unreferenced slot and a future stamp there archives it under the
-never-destroy rules.
+**Failure classification** splits at the pointer commit. **Before** the commit, filesystem and
+precondition failures are per-row: the row is left unchanged (its pointer still truthful), a
+warning names it, and the sweep continues; they re-warn on every later sweep. A destination the
+filesystem refuses permanently SHALL be the same per-row warning and SHALL NOT drop the proof's
+state, provenance, or pointer. **After** the commit, a failure in source removal or its
+directory sync SHALL keep the committed destination pointer (which is truthful), warn, and fall
+under the leftover-copy rules — the row is not rolled back to a pointer the proof may be about
+to leave. A datastore failure at the pointer commit itself SHALL follow the operation's normal
+error handling (roll back, finalize the run accordingly) — never a silent per-row skip on a
+broken session. The sweep makes NO garbage-collection promise for a redundant source copy left
+by a crash after the pointer commit: such a copy sits in an unreferenced slot and a future stamp
+there archives it under the never-destroy rules.
 
 #### Scenario: The sweep converges a moved row
 
@@ -163,8 +197,32 @@ never-destroy rules.
 - **WHEN** one scan reconciles A→B and C→A, so C's proof must move into the slot A's proof still
   occupies
 - **THEN** the sweep SHALL defer C's relocation while A's row still records that slot, relocate
-  A's proof to B's canonical location, and complete C's relocation on a sweep after the slot is
-  vacated — with no branch placing over, unlinking, or re-pointing another row's proof
+  A's proof to B's canonical location, and complete C's relocation once the slot is vacated —
+  with no branch placing over, unlinking, or re-pointing another row's proof
+
+#### Scenario: A path swap converges via the holding location
+
+- **WHEN** two files' paths are swapped in one scan, so each row's destination is the other
+  row's recorded `ots_path` and plain deferral can never free either slot
+- **THEN** the sweep SHALL relocate one member's proof to the durable holding location with a
+  truthful committed pointer, converge the other member into its vacated canonical slot, and
+  bring the held proof to its own canonical slot on a later iteration or sweep — no proof
+  displaced, both pointers truthful throughout
+
+#### Scenario: A modified-then-moved legacy row is called ambiguous, not swapped
+
+- **WHEN** a legacy row (`ots_digest` NULL) carries an old proof committing to a digest that no
+  longer equals the row's re-scanned `sha256`, and the file is later moved
+- **THEN** the sweep SHALL not heal it and SHALL warn that the proof cannot be corroborated
+  without historical provenance — it SHALL NOT report the proof as swapped or misfiled
+
+#### Scenario: The sweep survives a row changing beneath it
+
+- **WHEN** a row is re-classified or re-reconciled (under a reclaimed claim) between the sweep's
+  corroboration and its pointer commit
+- **THEN** the fenced compare-and-set SHALL update zero rows, the sweep SHALL stop as
+  claim-lost without committing anything, and the published destination copy SHALL remain inert
+  until a later sweep re-evaluates from scratch
 
 #### Scenario: A case-only rename does not unlink the only copy
 
@@ -186,3 +244,52 @@ never-destroy rules.
   or is tripwire-mode with historical proofs
 - **THEN** the upgrade pass SHALL still claim the collection, run the sweep, and record its work
   in the operation's progress
+
+## MODIFIED Requirements
+
+### Requirement: Stamp and upgrade operations are recorded as typed runs with progress
+
+The on-demand stamp backfill and the OTS upgrade pass SHALL each be recorded as a `runs` row with a
+`kind` distinguishing it from an integrity scan — `kind = 'stamp'` for the stamp backfill and
+`kind = 'upgrade'` for the upgrade pass. Each such run SHALL set `total` to the number of items it
+will process, known at the start — for a stamp run, the count of files queued for stamping; for an
+upgrade run, the count of incomplete proofs to upgrade **plus** the count of rows the healing
+sweep confirmed stale (each row counted once even when it is both incomplete and stale) — and
+SHALL update `processed` as it advances (a swept row counts as processed whether it was relocated,
+deferred, or refused), so a concurrent reader can observe exact progress. The run's result SHALL
+be `running` while in progress and SHALL transition to a terminal value with `finished` set when
+it ends. Within one upgrade run the healing sweep SHALL run before the proof upgrades, so a
+relocated proof is upgraded at its new canonical location in the same pass.
+
+These `stamp` and `upgrade` runs SHALL NOT affect scan-freshness reporting (the dead-man's switch),
+which is derived from `kind = 'scan'` runs only. The upgrade pass SHALL record a run only for a
+corpus that actually has work — incomplete proofs to upgrade, or stale pointers to sweep — and
+SHALL NOT create an empty run when there is neither. Recording these runs SHALL NOT change the
+batched stamping or upgrade mechanics or their per-file outcomes.
+
+#### Scenario: Stamp backfill records a stamp run with exact progress
+
+- **WHEN** the on-demand stamp backfill runs over a `perfile` corpus with N files queued
+- **THEN** a `runs` row with `kind = 'stamp'` SHALL be created with `total` = N, `processed`
+  advancing as batches are stamped, and a terminal result with `finished` set when it completes
+
+#### Scenario: Upgrade pass records an upgrade run that does not affect freshness
+
+- **WHEN** the upgrade pass processes a corpus that has incomplete proofs
+- **THEN** a `runs` row with `kind = 'upgrade'` SHALL be created with `total` covering the
+  incomplete proofs plus any stale-pointer sweep work and `processed` advancing as items complete
+- **AND** that run SHALL NOT count toward the corpus's scan freshness
+
+#### Scenario: Stale pointers alone are work
+
+- **WHEN** the upgrade pass processes a corpus with no incomplete proofs but at least one row
+  whose recorded proof location is not canonical for its current relpath — including a
+  tripwire-mode corpus carrying historical proofs
+- **THEN** a `kind = 'upgrade'` run SHALL be created whose `total` counts the stale rows, and the
+  sweep's outcomes SHALL advance `processed`
+
+#### Scenario: Upgrade pass with neither incompletes nor stale pointers records nothing
+
+- **WHEN** the upgrade pass processes a corpus that has no incomplete proofs and no stale
+  pointers
+- **THEN** no `kind = 'upgrade'` run SHALL be created for that corpus
