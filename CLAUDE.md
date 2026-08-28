@@ -425,6 +425,30 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > inconclusive result decided the verdict — never on a settled one (never-notarized, queued,
 > unreadable proof, any mismatch).
 
+> Fleet review + run health (add-fleet-review-and-run-health): the last audit change (#27, #24's
+> remainder, #25, #28, #29, plus #18's href flip — meta #12 R3). **`GET /review`** is the fleet-wide
+> issue page: grouped per affected collection (missing-first), both counts always stated, per-row
+> scoped verbs whose fingerprints slice each collection's ONE `_read_population` snapshot,
+> deliberately NO bulk verbs (bulk fingerprints are per-collection; each group links into its own
+> review page); the dashboard "Open issues" tile links here for 2+ affected collections. The
+> `from=` return param on accept routes is whitelisted to two literals. The event feed orders
+> `(acknowledged_at IS NULL) DESC, detected_at DESC` — unreviewed lead, the log is never filtered.
+> **Health**: panel-rendered health (pill, cards' stale markers) is owner-scoped; `/healthz` stays
+> fleet-global and now answers the structured 503 for ANY datastore failure and carries per-
+> collection `id`. Freshness is two-legged, read in ONE statement per collection: newest completed
+> ok/partial scan within `max(2×cadence, floor)`, OR a running scan live under the ONE shared lease
+> predicate (`collections.claim_is_live`, age<timeout, same boundary as both reclaimers); grace =
+> `pending` ONLY while no scan run of any kind exists. The pill fails closed (error fragment at
+> HTTP 200 + htmx error hooks — a dead poll can never leave "Healthy" standing). **Run visibility**
+> (migration **0012**: `runs.errors` + `runs.error_sample`): partial scans read "partial — N files
+> skipped" (legacy pre-0012 rows: "count not recorded", self-heals) with a bounded ASCII sample
+> (20/256B/4096B, `+N more` marker, diagnostic renderings never raw paths) at card/detail/tripwire
+> sites + one finalize WARNING; `interrupted` (a routine lease outcome) renders muted, never
+> alarming, and never refreshes "last scan"; the Last-activity tile names kind + non-ok result.
+> **#24 remainder**: the verify card renders the typed `transport_error` (the generic message ctx
+> key is deleted) and offers Retry ONLY on transport/inconclusive outcomes. Gates: 2-round spec
+> review, 2-scope adversarial review + convergence to PASS, verifier 70/70, live pass 14/14.
+
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
   Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).

@@ -34,7 +34,12 @@ be constrained to {added,modified,missing,restored,moved,restored_changed}, and 
 a nullable `detail` TEXT column (used to record the old → new path of a `moved` file, and both
 digests of a `restored_changed` file). `runs` SHALL carry an
 integer `moved` count and a nullable `heartbeat_at` timestamp recording when the run last reported
-progress, so that a claim held by a live process is distinguishable from one orphaned by a crash. The `files`, `runs`, and `events` tables SHALL reference their owning
+progress, so that a claim held by a live process is distinguishable from one orphaned by a crash.
+`runs` SHALL additionally carry an integer `errors` count (default 0) and a nullable `error_sample`
+TEXT column holding a bounded, ASCII-only JSON array of diagnostic renderings of the files the run
+skipped — bounded in entry count, in per-entry size and in total serialized size — so that a
+`partial` result is explainable rather than merely reported, without letting a pathological set of
+filenames write an unbounded value into a diagnostic column. The `files`, `runs`, and `events` tables SHALL reference their owning
 collection through a `collection_id` foreign key. JSON-valued columns (`exclude_globs_json`,
 `alert_json`) SHALL be stored as TEXT. Deleting a collection SHALL cascade to its `files`, `runs`,
 and `events`.
@@ -118,6 +123,14 @@ rows exist the downgrade SHALL proceed normally.
   `restored_changed` event
 - **THEN** the downgrade SHALL restore the previous `events.kind` constraint, drop `files.ots_digest`
   and `runs.heartbeat_at`, and preserve every existing row
+
+#### Scenario: Run-error migration adds the columns without altering existing rows
+
+- **WHEN** the run-error-visibility Alembic revision is applied with `alembic upgrade head` against a
+  database holding existing runs
+- **THEN** `runs.errors` SHALL exist as a NOT NULL integer defaulting to 0 and `runs.error_sample`
+  SHALL exist as a nullable TEXT column, with every existing run row preserved and defaulted
+- **AND** `alembic downgrade` SHALL drop both columns, preserving every other row
 
 ### Requirement: Implicit single-user bootstrap
 
