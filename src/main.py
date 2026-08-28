@@ -131,6 +131,22 @@ async def healthz() -> JSONResponse:
 
     Returns 503 ``error`` when the datastore is unreachable, 503 ``degraded`` when any collection is
     stale, and 200 ``ok`` only when reachable AND no collection is stale.
+
+    **Fleet-global, deliberately.** ``compute_health`` is called with no ``user_id``: this endpoint
+    monitors the *installation*, not a user, and a machine-facing dead-man's switch that silently
+    skipped one owner's collections would have a hole in it exactly where nobody is looking. The
+    panel scopes its own health to the viewer (design D5); the two surfaces answer different
+    questions and only this one is unauthenticated.
+
+    Each per-collection object carries the collection's ``id`` alongside its name, so a caller can
+    match a freshness record to the collection it describes without matching on a name, which no
+    constraint makes unique. That key is additive; nothing was renamed, retyped or removed.
+
+    Two *values* can change relative to earlier releases, both toward reporting rather than
+    reassurance (design D13): a collection whose only recent scan run is a ``running`` row with an
+    **abandoned** claim now reports ``stale`` rather than ``fresh``, and ``last_scan_age_seconds``
+    describes the newest **completed** scan (``null`` when there is none) rather than an unfinished
+    run's elapsed time.
     """
     from .services.scheduler import compute_health
 
@@ -150,6 +166,7 @@ async def healthz() -> JSONResponse:
         "version": __version__,
         "collections": [
             {
+                "id": c.id,
                 "name": c.name,
                 "state": c.state,
                 "last_scan_age_seconds": c.last_scan_age_seconds,

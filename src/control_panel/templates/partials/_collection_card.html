@@ -17,7 +17,16 @@
       <div><div class="meta__label">Files</div><div class="meta__value">{{ "{:,}".format(c.file_count) }}</div></div>
       <div><div class="meta__label">Size</div><div class="meta__value">{{ c.size }}</div></div>
       <div><div class="meta__label">Owner</div><div class="meta__value">{{ c.owner }}</div></div>
-      <div><div class="meta__label">Last scan</div><div class="meta__value">{{ c.last_scan }}</div></div>
+      {# "Last scan" is the card's most reassuring cell, so it is where a scan's real result and its
+         freshness have to be told. `health_state == "stale"` names the collection the health pill
+         counted — in WORDS, not by colour alone — and `run_health_note` says whether the scan it
+         reports actually covered everything. Both are absent on a healthy, complete scan. #}
+      <div>
+        <div class="meta__label">Last scan</div>
+        <div class="meta__value">{{ c.last_scan }}</div>
+        {% if c.health_state == "stale" %}<div class="stale-marker">{{ m.icon("alert", size=11, stroke=2) }} scan overdue</div>{% endif %}
+        {{ m.run_health_note(c, sample_mode="inline") }}
+      </div>
     </div>
 
     {% set total = (c.counts.ok + c.counts.new + c.counts.modified + c.counts.missing) or 1 %}

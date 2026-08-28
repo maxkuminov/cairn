@@ -36,6 +36,71 @@ BATCH = 500  # files per DB commit
 ACK_CHUNK = 500
 ALARM_PATH_CAP = 20  # max relpaths carried into a batched alert
 
+# --- Bounds on `runs.error_sample` (design D6) -------------------------------------------------
+#
+# "Capped at 20 entries" is not a bound on its own: one entry is a rendering of a PATH, `repr` of
+# `os.fsencode` output escapes each bad byte to four characters, and a deep tree of long names
+# makes 20 entries arbitrarily large — in a column read on every collection-card render. So the
+# sample is bounded on three axes, all enforced at write time, and whichever bound bites, the
+# dropped entries are COUNTED rather than silently omitted.
+RUN_ERROR_SAMPLE_MAX = 20  # real entries
+RUN_ERROR_SAMPLE_ENTRY_BYTES = 256  # per entry, encoded
+RUN_ERROR_SAMPLE_TOTAL_BYTES = 4096  # the whole serialized JSON array, encoded
+# ASCII, not `…`: this column's entire invariant is that its stored bytes cannot fail to bind for
+# the class of reason the sample exists to report. Deterministic and explicit, so a truncated
+# rendering can never be mistaken for a whole name.
+_TRUNCATION_MARKER = "..."
+
+
+def _render_skip(reason: str, relpath: str) -> str:
+    """One `error_sample` entry: an ASCII-safe DIAGNOSTIC RENDERING of a skipped path, not a path.
+
+    This distinction is load-bearing. The headline cause of a skip is a name that could not be
+    stored as TEXT in the first place (``_db_storable`` rejects a lone surrogate — that is literally
+    why no row exists for it), so writing the raw name into ``error_sample`` would reproduce the
+    ``UnicodeEncodeError`` that this column was added to report. ``repr`` of ``os.fsencode`` output
+    escapes every non-ASCII byte to ``\\xNN``, so the result is pure ASCII by construction for any
+    input. The value MUST never be fed back to a filesystem call or offered as a copyable path.
+    """
+    entry = f"{reason}: {os.fsencode(relpath)!r}"
+    encoded = entry.encode("utf-8")
+    if len(encoded) <= RUN_ERROR_SAMPLE_ENTRY_BYTES:
+        return entry
+    keep = RUN_ERROR_SAMPLE_ENTRY_BYTES - len(_TRUNCATION_MARKER.encode("utf-8"))
+    # Cut on a byte boundary; `errors="ignore"` drops a partial trailing sequence (unreachable for
+    # the ASCII renderings above, kept so the bound holds for any caller).
+    return encoded[:keep].decode("utf-8", errors="ignore") + _TRUNCATION_MARKER
+
+
+def _build_error_sample(entries: list[str], total_errors: int) -> str | None:
+    """Serialize the bounded sample for ``runs.error_sample``; ``None`` when nothing was skipped.
+
+    Entries are appended only while the SERIALIZED array stays inside
+    :data:`RUN_ERROR_SAMPLE_TOTAL_BYTES`, with room reserved for the trailing marker, so the budget
+    is measured on the encoded form that is actually stored. Whichever bound bites, the array's last
+    element is ``"+N more skipped (sample truncated)"`` where ``N`` is ``total_errors`` minus the
+    real entries kept — the TRUE remainder, not the remainder of the cap. ``json.dumps`` runs at its
+    default ``ensure_ascii=True``, escaping any non-ASCII to ``\\uXXXX``: belt and braces over the
+    ASCII-safe rendering, and the reason the byte budget can be measured on the encoded form.
+    """
+    if total_errors <= 0:
+        return None
+
+    def _marker(dropped: int) -> str:
+        return f"+{dropped} more skipped (sample truncated)"
+
+    kept: list[str] = []
+    for entry in entries[:RUN_ERROR_SAMPLE_MAX]:
+        candidate = [*kept, entry]
+        dropped = total_errors - len(candidate)
+        trial = [*candidate, _marker(dropped)] if dropped > 0 else candidate
+        if len(json.dumps(trial).encode("utf-8")) > RUN_ERROR_SAMPLE_TOTAL_BYTES:
+            break
+        kept = candidate
+    dropped = total_errors - len(kept)
+    out = [*kept, _marker(dropped)] if dropped > 0 else kept
+    return json.dumps(out)
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -337,6 +402,12 @@ async def scan_collection(
         # one summary WARNING so the operator can find them.
         skipped_unstorable = 0
         unstorable_sample: list[bytes] = []
+        # One bounded, ASCII-safe diagnostic rendering per skipped file, across ALL THREE causes
+        # (un-storable name, `stat` OSError, hash OSError), persisted to `runs.error_sample` and
+        # logged once at finalize. Capped here as well as at serialization so a pathological tree
+        # cannot grow this list without bound in memory either. `summary.errors` keeps the TRUE
+        # total; this list only ever holds the sample.
+        error_entries: list[str] = []
 
         def _record_alarm(kind: str, relpath: str) -> None:
             if len(summary.alarming) < ALARM_PATH_CAP:
@@ -414,6 +485,8 @@ async def scan_collection(
                     skipped_unstorable += 1
                     if len(unstorable_sample) < ALARM_PATH_CAP:
                         unstorable_sample.append(os.fsencode(relpath))
+                    if len(error_entries) < RUN_ERROR_SAMPLE_MAX:
+                        error_entries.append(_render_skip("unstorable-name", relpath))
                     continue
                 full = root / relpath
                 if full.is_symlink():
@@ -421,7 +494,10 @@ async def scan_collection(
                 try:
                     st = full.stat()
                 except OSError:
+                    # Silent until 0012: the file was counted into `partial` and named nowhere.
                     summary.errors += 1
+                    if len(error_entries) < RUN_ERROR_SAMPLE_MAX:
+                        error_entries.append(_render_skip("stat", relpath))
                     continue
                 seen.add(relpath)
                 size = st.st_size
@@ -560,7 +636,10 @@ async def scan_collection(
                         row.last_checked = now
                         summary.ok += 1
                 except OSError:
+                    # Silent until 0012, exactly as the `stat` skip above was.
                     summary.errors += 1
+                    if len(error_entries) < RUN_ERROR_SAMPLE_MAX:
+                        error_entries.append(_render_skip("hash", relpath))
                     continue
 
                 processed += 1
@@ -743,6 +822,25 @@ async def scan_collection(
         # with `ok`/`partial` would let a scan that was taken off the collection mid-flight refresh
         # the dead-man's switch, which is a false negative of exactly the kind this product exists
         # to prevent. Nothing here reads `run` afterwards, so it is deliberately not refreshed.
+        # One WARNING per skipping run, covering EVERY cause. Until this line, only the un-storable
+        # site logged: a `stat` or hash skip was counted into `partial` and named nowhere, so the
+        # operator's only copy of "which files" would have been the `runs.error_sample` column — and
+        # a schema downgrade that dropped it would have destroyed information that existed nowhere
+        # else. Bounded by construction (the sample is already capped) and emitted once per run
+        # rather than once per file. The existing un-storable-specific WARNING stays as it is: it
+        # names its own cause and its own count.
+        error_sample = _build_error_sample(error_entries, summary.errors)
+        if summary.errors:
+            logging.getLogger("cairn.scanner").warning(
+                "collection %s: run %s skipped %d file(s); result=%s. Diagnostic sample (renderings, "
+                "NOT usable paths): %s",
+                collection_id,
+                run_id,
+                summary.errors,
+                summary.result,
+                error_sample,
+            )
+
         try:
             finalized = await collections.finalize_if_held(
                 session,
@@ -753,6 +851,11 @@ async def scan_collection(
                 moved=summary.moved,
                 stamped=stamped_count,
                 processed=processed,
+                # The count that already decides `partial`, persisted at last, plus the bounded
+                # sample that says WHICH files it refers to. `errors` is always the TRUE total; the
+                # sample may name fewer and says so.
+                errors=summary.errors,
+                error_sample=error_sample,
                 finished=_utcnow(),
                 result=summary.result,
             )

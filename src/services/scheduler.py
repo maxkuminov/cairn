@@ -73,9 +73,17 @@ def _as_aware(dt: datetime) -> datetime:
 
 @dataclass
 class CollectionHealth:
+    # The collection's own id, so a reader (the panel's cards, an external monitor) can match a
+    # freshness record to the collection it describes without matching on `name`, which no
+    # constraint makes unique across owners.
+    id: int
     name: str
     state: CollectionState
-    last_scan_age_seconds: float | None  # None when the collection has no successful run yet
+    # Age of the newest COMPLETED (`ok`/`partial`) scan; None when the collection has never
+    # completed one — including a collection that is fresh only because a scan is in flight
+    # (leg (b) below). An unfinished run has no "last scan" age to report, and reporting its
+    # elapsed time under that name would state a completion that has not happened.
+    last_scan_age_seconds: float | None
 
 
 @dataclass
@@ -89,20 +97,51 @@ def _threshold(collection: Collection, settings: Settings) -> int:
     return max(2 * collection.hash_cadence_seconds, settings.health_freshness_floor_seconds)
 
 
-async def compute_health(session: AsyncSession, settings: Settings) -> HealthReport:
+async def compute_health(
+    session: AsyncSession, settings: Settings, user_id: int | None = None
+) -> HealthReport:
     """Classify each collection's scan freshness and roll it up to an overall status.
 
-    Per collection, the newest **scan** run (``kind='scan'``) defines freshness against
-    ``threshold = max(2 × hash_cadence_seconds, freshness_floor)`` — ``stamp``/``upgrade`` runs are
-    deliberately ignored so they cannot refresh the dead-man's switch:
+    ``user_id`` scopes the report to one owner's collections; ``None`` (the default) is fleet-wide.
+    ``/healthz`` calls it fleet-wide — it monitors the *installation*, and a machine-facing
+    dead-man's switch that silently skipped one owner's collections would have a hole in it exactly
+    where nobody is looking. The **panel** passes the viewer's id, because the health pill names a
+    number and then sends the operator to an owner-scoped ``/collections`` list: a fleet-global
+    count rendered above that list is a number with no referent on the page it links to (design D5).
 
-    - ``fresh``   — a successful (``ok``/``partial``) run finished within the threshold, **or** a
-      scan is actively ``running`` and started within the threshold (a long scan must not age out
-      its own freshness while it is still progressing);
-    - ``pending`` — no scan run yet, but the collection was created within the threshold
-      (startup grace, so a freshly-added collection does not immediately trip the switch);
-    - ``stale``   — otherwise (including a ``running`` scan that started longer ago than the
-      threshold — a genuinely stalled run still trips the switch).
+    Freshness counts ``kind='scan'`` runs only — ``stamp``/``upgrade`` runs are deliberately ignored
+    so they cannot refresh the dead-man's switch. A collection is **fresh** on either of two legs:
+
+    - **(a) a completed scan is recent** — the newest ``kind='scan'`` run with a result of ``ok`` or
+      ``partial`` finished within ``threshold = max(2 × hash_cadence_seconds, freshness_floor)``;
+    - **(b) a scan is in flight and demonstrably alive** — a ``kind='scan'`` run is ``running`` and
+      its last reported progress (``heartbeat_at``, falling back to ``started``) is within
+      :data:`RUN_HEARTBEAT_TIMEOUT_SECONDS`, *regardless of the cadence window*.
+
+    Leg (b) is the fix for audit issue #5 and must not be quietly removed: before it, a scan that
+    legitimately ran longer than its own freshness window aged out its OWN freshness while it was
+    still working, and ``/healthz`` flapped ``degraded`` for a collection that was being scanned at
+    that very moment. A false ``degraded`` on a dead-man's switch is not a harmless conservative
+    default — it is the alarm that teaches the operator to ignore the alarm.
+
+    **But leg (b) cannot simply trust ``result='running'``.** That column is not evidence of life: a
+    process killed mid-scan leaves its ``running`` row behind until something reclaims it, and a
+    recently-started one would read *fresh* — a crashed scanner reporting healthy, precisely the
+    false negative the switch exists to prevent. So the leg is gated on the same liveness test the
+    reclamation paths use (:func:`reap_orphaned_runs`, :func:`collections.reclaim_stale_claim`) with
+    the same constant: if the switch and the reaper applied different thresholds there would be a
+    window in which a run is dead to one and alive to the other, which is a state nobody can reason
+    about. A live scan is therefore fresh for as long as it keeps heartbeating, and goes stale
+    within one lease interval of the process dying.
+
+    Neither leg fresh → ``pending`` **only** while the collection is inside its startup grace AND
+    has no ``kind='scan'`` run at all (the grace covers a never-scanned collection, nothing else —
+    a first scan that terminated ``error``/``interrupted`` inside the window is ``stale``, because
+    something *did* run and it did not complete); otherwise ``stale``.
+
+    ``last_scan_age_seconds`` describes the newest **completed** scan and is ``None`` when there is
+    none — so a collection fresh only by leg (b) reports ``fresh`` with a ``None`` age, which is
+    exactly true: it is being scanned, and no scan has finished yet.
 
     Overall status is ``degraded`` if any collection is ``stale``, else ``ok``. Datastore
     reachability is the ``/healthz`` caller's concern (``error``), not this function's.
@@ -111,34 +150,66 @@ async def compute_health(session: AsyncSession, settings: Settings) -> HealthRep
     rows: list[CollectionHealth] = []
     any_stale = False
 
-    for collection in await list_collections(session):
+    for collection in await list_collections(session, user_id=user_id):
         threshold = _threshold(collection, settings)
-        # Consider the newest scan run regardless of result: a completed (ok/partial) run is dated
-        # from its finish, but an in-flight ``running`` scan keeps the collection fresh from its start
-        # so a scan running longer than the threshold cannot trip the switch against itself.
-        latest = await session.scalar(
+
+        # Leg (a) — the newest COMPLETED scan. Dated from `finished`; `started` only as a fallback
+        # for a row whose finish was never written (it cannot be selected here without a result, so
+        # this is belt-and-braces).
+        completed = await session.scalar(
             select(Run)
             .where(
                 Run.collection_id == collection.id,
                 Run.kind == "scan",
-                Run.result.in_(("ok", "partial", "running")),
+                Run.result.in_(("ok", "partial")),
+            )
+            .order_by(Run.finished.desc().nulls_last())
+            .limit(1)
+        )
+        age: float | None = None
+        if completed is not None:
+            age = (now - _as_aware(completed.finished or completed.started)).total_seconds()
+
+        # Leg (b) — an in-flight scan, but only one that is still reporting progress. The liveness
+        # test is evaluated in Python on the same `coalesce(heartbeat_at, started)` the reaper uses,
+        # so both sides of the lease read one value by one rule.
+        running = await session.scalar(
+            select(Run)
+            .where(
+                Run.collection_id == collection.id,
+                Run.kind == "scan",
+                Run.result == "running",
             )
             .order_by(Run.started.desc())
             .limit(1)
         )
+        live_scan = running is not None and (
+            (now - _as_aware(running.heartbeat_at or running.started)).total_seconds()
+            <= RUN_HEARTBEAT_TIMEOUT_SECONDS
+        )
 
-        if latest is not None:
-            ref = _as_aware(latest.started if latest.result == "running" else (latest.finished or latest.started))
-            age = (now - ref).total_seconds()
-            state: CollectionState = "fresh" if age <= threshold else "stale"
-            rows.append(CollectionHealth(name=collection.name, state=state, last_scan_age_seconds=age))
+        if (age is not None and age <= threshold) or live_scan:
+            state: CollectionState = "fresh"
         else:
-            created_age = (now - _as_aware(collection.created_at)).total_seconds()
-            state = "pending" if created_age <= threshold else "stale"
-            rows.append(
-                CollectionHealth(name=collection.name, state=state, last_scan_age_seconds=None)
+            # The startup grace covers a collection nothing has ever scanned. A collection whose
+            # only scan run ended `error`/`interrupted` is NOT in grace — a scan was attempted and
+            # did not complete, which is a report, not an absence of one.
+            never_scanned = completed is None and running is None and not await session.scalar(
+                select(Run.id)
+                .where(Run.collection_id == collection.id, Run.kind == "scan")
+                .limit(1)
             )
+            created_age = (now - _as_aware(collection.created_at)).total_seconds()
+            state = "pending" if (never_scanned and created_age <= threshold) else "stale"
 
+        rows.append(
+            CollectionHealth(
+                id=collection.id,
+                name=collection.name,
+                state=state,
+                last_scan_age_seconds=age,
+            )
+        )
         if state == "stale":
             any_stale = True
 
@@ -178,7 +249,9 @@ async def reap_orphaned_runs(session: AsyncSession) -> int:
     indicator and unblocks the collection. The terminal state is ``interrupted`` (not ``error``) so a
     benign restart-induced interruption — e.g. a deploy killing a long scan mid-flight — is not
     conflated with a genuine scan failure. Like ``error``, an ``interrupted`` run does not refresh
-    scan freshness (:func:`compute_health` keys on ``ok``/``partial`` ``kind='scan'`` runs only).
+    scan freshness: :func:`compute_health` counts a completed ``ok``/``partial`` ``kind='scan'`` run,
+    or a ``running`` one that is still heartbeating — and a run reaped for having stopped
+    heartbeating fails both tests before and after it is relabelled.
 
     **"Usually" is why this is not a bulk update.** The claim is cross-PROCESS (design D10): a
     ``cairn stamp`` or ``cairn upgrade`` invoked from cron can legitimately hold a collection's claim
@@ -192,8 +265,9 @@ async def reap_orphaned_runs(session: AsyncSession) -> int:
 
     The cost is bounded and one-directional: a genuinely dead run keeps its collection claimed for up
     to the threshold, during which the scheduler simply skips that collection and the badge still
-    reads "in progress" — while the dead-man's switch is untouched, since freshness is keyed on
-    completed ``kind='scan'`` runs and an unreaped run was never going to refresh it. A collection
+    reads "in progress" — while the dead-man's switch is untouched, since :func:`compute_health`
+    applies this very liveness test to the same row: a dead run confers no freshness whether or not
+    the reaper has got to it yet, so the two never disagree about a collection's state. A collection
     that is late by a threshold's worth of minutes is a delay; a second proof writer is evidence loss.
 
     **The UPDATE re-asserts staleness, so a concurrent heartbeat wins.** The selection above and the

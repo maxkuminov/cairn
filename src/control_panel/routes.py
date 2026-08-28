@@ -351,6 +351,24 @@ def _pending_line(pending_active: int, incomplete_active: int) -> str | None:
     return " · ".join(parts) if parts else None
 
 
+def _decode_error_sample(raw: str | None) -> list[str]:
+    """Decode `runs.error_sample` for display; never raise, never hand back a non-string element.
+
+    The column is written by the scanner as an ASCII-only JSON array of strings, but a render path
+    must not become the place a malformed or hand-edited value takes the page down — an unreadable
+    diagnostic is worth strictly less than the page that reports the partial scan.
+    """
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [entry for entry in parsed if isinstance(entry, str)]
+
+
 async def _collection_view(session: AsyncSession, collection: Collection) -> dict[str, Any]:
     counts = await _collection_counts(session, collection.id)
     ots = await _ots_counts(session, collection.id)
@@ -360,6 +378,15 @@ async def _collection_view(session: AsyncSession, collection: Collection) -> dic
             FileEntry.collection_id == collection.id
         )
     )
+    # TWO deliberately separate reads (design D7), because they answer two different questions.
+    #
+    # `last_run` — the newest COMPLETED scan (`ok`/`partial`). This is what every "Last scan …"
+    # claim on the panel is derived from, and the filter must NOT be widened to include
+    # `interrupted`/`error`: a sentence beginning "Last scan" can only honestly mean "when a scan
+    # last finished", and letting a run that never finished refresh it is exactly the false
+    # negative #29 complains about, reintroduced by its own fix. (It is deliberately narrower than
+    # the dead-man's-switch freshness in `compute_health`, which additionally honours a live
+    # in-flight scan: the switch asks "is this collection still being watched".)
     last_run = await session.scalar(
         select(Run)
         .where(
@@ -370,6 +397,26 @@ async def _collection_view(session: AsyncSession, collection: Collection) -> dic
         .order_by(Run.finished.desc().nulls_last())
         .limit(1)
     )
+    # `latest_terminal` — the newest scan run in ANY terminal state. It never feeds "last scan"; it
+    # exists so that something which happened AFTER the last completed scan, and which the operator
+    # can otherwise not see at all, is disclosed. Only used when it is newer than `last_run`.
+    latest_terminal = await session.scalar(
+        select(Run)
+        .where(
+            Run.collection_id == collection.id,
+            Run.kind == "scan",
+            Run.result.in_(("ok", "partial", "error", "interrupted")),
+        )
+        .order_by(Run.finished.desc().nulls_last())
+        .limit(1)
+    )
+    # Disclosed only when it is a LATER, non-completing run than the last completed scan — an
+    # `interrupted`/`error` that the "Last scan" line cannot express. `None` otherwise, including
+    # when the newest terminal run IS the last completed scan.
+    latest_run_result = None
+    if latest_terminal is not None and latest_terminal.result in ("error", "interrupted"):
+        if last_run is None or latest_terminal.id != last_run.id:
+            latest_run_result = latest_terminal.result
     status = _collection_status(counts)
     meta = _STATUS_META[status]
     excludes = json.loads(collection.exclude_globs_json or "[]")
@@ -415,11 +462,42 @@ async def _collection_view(session: AsyncSession, collection: Collection) -> dic
         "status_kind": meta[3],
         "issues": counts["modified"] + counts["missing"],
         "last_scan": humanize_delta(last_run.finished) if last_run else "never",
+        # The last COMPLETED scan's own result, plus what it skipped. `partial` must never render
+        # identically to a clean scan: "I checked" shown where the truth is "I checked most of them"
+        # is the false assurance this product cannot afford.
+        "last_result": last_run.result if last_run else None,
+        "last_errors": (last_run.errors if last_run else 0) or 0,
+        # A bounded list of DIAGNOSTIC RENDERINGS (see `runs.error_sample`) — never paths, never
+        # offered as a copyable path list, never fed to a filesystem call.
+        "last_error_sample": _decode_error_sample(last_run.error_sample if last_run else None),
+        "latest_run_result": latest_run_result,
         "last_scan_full": (
             last_run.finished.strftime("%Y-%m-%d %H:%M UTC") if last_run and last_run.finished
             else "no completed scans yet"
         ),
     }
+
+
+async def _attach_health_state(
+    session: AsyncSession, user: User, views: list[dict[str, Any]]
+) -> None:
+    """Stamp each collection view with its scan-freshness state, from ONE owner-scoped report.
+
+    The health pill names a count and links to ``/collections``; the per-card stale markers are what
+    identify the collections behind that count once the operator arrives. Both therefore have to be
+    computed over the same population, by one call per render — which is why this takes the views
+    and mutates them rather than letting each card ask for its own answer (design D5).
+
+    Matched by **id**, never by name: no constraint makes a collection name unique across owners, so
+    a name match could attach one owner's stale marker to another owner's identically-named card.
+    A view with no freshness record is left untouched (the marker simply does not render).
+    """
+    from ..services.scheduler import compute_health
+
+    report = await compute_health(session, get_settings(), user_id=user.id)
+    by_id = {row.id: row.state for row in report.collections}
+    for view in views:
+        view["health_state"] = by_id.get(view["id"])
 
 
 async def _base_context(
@@ -472,13 +550,33 @@ async def mode_toggle(request: Request):
 
 
 @router.get("/health-pill", response_class=HTMLResponse)
-async def health_pill(request: Request, session: AsyncSession = Depends(get_session)):
+async def health_pill(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(current_user),
+):
+    """The polled health indicator: the viewer's OWN health, and the count behind the verdict.
+
+    Owner-scoped (design D5). The pill states a number and then links to ``/collections``, which is
+    ``list_collections(user_id=…)`` — so a fleet-global count rendered above it would name
+    collections that do not appear on the page it sends the operator to. That is the very
+    "computes one thing, shows another" defect this indicator is being fixed for, manufactured by
+    its own fix. ``/healthz`` stays fleet-global; it monitors the installation, not a viewer.
+
+    Both the verdict and the count come from the SAME :class:`HealthReport` — never a second query,
+    which could disagree with the first.
+    """
     from ..services.scheduler import compute_health
 
     settings = get_settings()
-    report = await compute_health(session, settings)
+    report = await compute_health(session, settings, user_id=user.id)
     return templates.TemplateResponse(
-        request, "partials/health_pill.html", {"status": report.status}
+        request,
+        "partials/health_pill.html",
+        {
+            "status": report.status,
+            "stale_count": sum(1 for c in report.collections if c.state == "stale"),
+        },
     )
 
 
@@ -784,9 +882,15 @@ async def collections_list(
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
 ):
-    """Dedicated collections list page (the left-nav 'Collections' target)."""
+    """Dedicated collections list page (the left-nav 'Collections' target).
+
+    This is where the health pill's link lands, so it is where the stale collections it counted have
+    to be identifiable — hence the per-card freshness marker, from the same owner-scoped health
+    computation the pill itself used.
+    """
     collections = await collections_svc.list_collections(session, user_id=user.id)
     views = [await _collection_view(session, c) for c in collections]
+    await _attach_health_state(session, user, views)
     ctx = await _base_context(request, session, user, "collections")
     ctx["collections"] = views
     return templates.TemplateResponse(request, "collections.html", ctx)
@@ -2306,6 +2410,13 @@ async def verify_run(
     # says nothing about whether a re-stamp is queued (design D7).
     restamp_owed = (fe.ots_state == "pending") if proof_provenance else restamp_heuristic
 
+    # Whether re-running this exact check could produce a different answer. Set ONLY by the two
+    # branches where it can (design D8), inside the ladder rather than from the reason flags,
+    # because the flags travel on every branch: a transport failure under a *verified* verdict is
+    # disclosed as a diagnostic note, but the verdict itself is settled and a Retry beside it would
+    # present a finished answer as provisional.
+    can_retry = False
+
     # Verdict by *reason*, in the order of design D2. Branching on the proof's lifecycle state
     # before asking why verification failed is what let a changed file read "pending confirmation".
     if live_unavailable is not None:
@@ -2363,9 +2474,11 @@ async def verify_run(
         # wolf in red teaches the operator to dismiss the red card that means a real mismatch.
         verdict = "unavailable"
         title = "Couldn't check right now"
+        can_retry = True  # the backend was never reached; reaching it changes the answer
     elif result is not None and result.inconclusive:
         verdict = "unavailable"
         title = "Couldn't confirm — pending, changed, or unreachable"
+        can_retry = True  # the backend cannot separate unreachability from its other outcomes
     elif result is not None and result.unreadable_proof:
         # The `.ots` could not be parsed, so nothing was established about anything. Neutral, never
         # red: the generic "could not verify" fallback below reads as a finding about the FILE.
@@ -2486,11 +2599,19 @@ async def verify_run(
         "stamp_stale": (
             stamped_days is not None and stamped_days >= settings.incomplete_proof_alarm_days
         ),
-        "message": (
-            live_unavailable
-            if live_unavailable is not None
-            else (result.message if result else "no proof stored for this file yet")
-        ),
+        # NO generic `message` key, deliberately (design D8). `result.message` is the backend's
+        # general result string and travels on EVERY branch, so rendering it generically would print
+        # backend text under a verdict — a `mismatch_blame` attribution above, say — whose entire
+        # design is that the card states exactly what the check established and no more. That is the
+        # one place in this codebase where an extra sentence is a correctness bug. The reasons the
+        # card IS allowed to name are typed and carried individually (`transport_error`,
+        # `live_unavailable`, `unreadable_proof`, …); a new one gets its own key, never this.
+        #
+        # Set by the verdict ladder above, never re-derived here: only the transport-failure and
+        # inconclusive verdicts can change on a retry. NOT never-notarized, queued-to-stamp, an
+        # unreadable proof, or any digest disagreement — those re-run to the same answer, and a
+        # Retry button beside a settled finding presents it as provisional.
+        "can_retry": can_retry,
         "csrf_token": generate_csrf_token(request),
     }
     return templates.TemplateResponse(request, "partials/verify_result.html", ctx)

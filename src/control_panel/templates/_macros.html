@@ -143,3 +143,56 @@
 }.get(state, ("Not stamped", "muted", "minusCircle")) -%}
 <span class="pill pill--soft pill--{{ meta[1] }}{% if size == 'sm' %} pill--sm{% endif %}">{{ icon(meta[2], size=11.5 if size == 'sm' else 12.5, stroke=2) }}{{ meta[0] }}</span>
 {%- endmacro %}
+
+{# RunHealthNote — the ONE rendering of a scan's real result (#29), used at every site that reports
+   a collection's scan, so no surface can quietly present a partial or failed scan as a clean one.
+
+   Three cases, and their tones are the content:
+
+     * the last COMPLETED scan finished `partial` — warn-toned, states how many files it skipped,
+       and offers the bounded diagnostic sample behind a <details>. "I checked" shown where the
+       truth is "I checked most of them" is the false assurance this product cannot afford.
+     * the newest scan run is `interrupted` and LATER than that completed scan — MUTED, never red.
+       Since the operation-claim lease, `interrupted` is what a reclaimed abandoned claim writes:
+       the ordinary record of restarting the app during a scan. Drawing the routine consequence of
+       a deploy as a fault is the false alarm that teaches an operator to ignore the indicator that
+       means something.
+     * the newest scan run is `error` and later — a real failure, rendered as one.
+
+   Otherwise it renders NOTHING. `latest_run_result` is already gated in `_collection_view` to a
+   later, non-completing run, so this macro never has to re-derive the ordering — and the partial
+   arm and the later-run arm are INDEPENDENT, so a partial scan followed by a failure states both
+   without either erasing the other.
+
+   The sample entries are DIAGNOSTIC RENDERINGS of names that (in the headline case) could not be
+   stored as text at all — never usable paths. They are labelled as such and are deliberately not
+   offered through any "Copy paths" control. #}
+{% macro run_health_note(c, sample_mode="details") -%}
+{%- if c.last_result == "partial" and c.last_errors -%}
+  <div class="run-health run-health--warn">
+    {{ icon("alert", size=12, stroke=2) }} partial &mdash; {{ "{:,}".format(c.last_errors) }} file{{ "" if c.last_errors == 1 else "s" }} skipped
+    {%- if c.last_error_sample %}
+      {%- if sample_mode == "inline" -%}
+        {# The collection CARD is itself one big <a>, so the sample cannot be a <details> there:
+           interactive content nested inside a link is invalid, and its click would follow the card.
+           A short, non-interactive taste instead — the full sample is on the detail page the card
+           already links to. #}
+        <div class="run-health__sample mono">{% for entry in c.last_error_sample[:2] %}{{ entry }}
+{% endfor %}{% if c.last_error_sample | length > 2 %}&hellip; and {{ c.last_error_sample | length - 2 }} more in the collection&#39;s own view{% endif %}</div>
+      {%- else -%}
+        <details>
+          <summary class="run-health__summary">What was skipped</summary>
+          <div class="run-health__sample mono">{% for entry in c.last_error_sample %}{{ entry }}
+{% endfor %}</div>
+          <div class="run-health__sample" style="background:transparent;padding:4px 0 0">These are diagnostic renderings of the offending names, not usable paths &mdash; a skipped name may be one the datastore cannot store at all, which is why it was skipped.</div>
+        </details>
+      {%- endif -%}
+    {%- endif %}
+  </div>
+{%- endif -%}
+{%- if c.latest_run_result == "interrupted" -%}
+  <div class="run-health run-health--muted">{{ icon("clock", size=12, stroke=2) }} a later scan was interrupted (app restart or reclaimed claim); it will re-run on the next cadence</div>
+{%- elif c.latest_run_result == "error" -%}
+  <div class="run-health run-health--danger">{{ icon("x", size=12, stroke=2) }} a later scan failed &mdash; check the logs; it will re-run on the next cadence</div>
+{%- endif -%}
+{%- endmacro %}

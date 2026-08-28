@@ -208,6 +208,45 @@
 .health-pill.is-degraded .health-pill__label,
 .health-pill.is-error .health-pill__label { color: var(--danger); }
 .health-pill__url { font-size: 11px; color: var(--text-3); }
+/* The pill is an <a> to /collections (#28): it names a count, so it must reach the collections it
+   counted. Link chrome off, pointer affordance on. */
+.health-pill { text-decoration: none; cursor: pointer; transition: border-color 120ms ease; }
+.health-pill:hover { border-color: var(--border); }
+/* Pre-poll state: no colour claim at all. A verdict that has not been computed must not borrow the
+   green one — that is the fabricated-status defect this indicator was fixed for. */
+.health-pill.is-unknown { background: var(--bg-2, transparent); }
+.health-pill.is-unknown .health-pill__label { color: var(--text-3); font-weight: 500; }
+/* Per-card scan-freshness marker, where the pill's link lands. Named in WORDS, never colour alone. */
+.stale-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--danger);
+  white-space: nowrap;
+}
+/* The run-health line: one honest sentence about the last scan's RESULT, wherever that scan is
+   reported. `--muted` is the interrupted rendering and is deliberately not an alarm colour. */
+.run-health { font-size: 11.5px; line-height: 1.45; margin-top: 3px; }
+.run-health--warn { color: var(--warn); }
+.run-health--danger { color: var(--danger); }
+.run-health--muted { color: var(--text-3); }
+.run-health__sample {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-2, rgba(127, 127, 127, 0.08));
+  color: var(--text-3);
+  font-size: 10.5px;
+  line-height: 1.5;
+  max-height: 132px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.run-health__summary { cursor: pointer; font-weight: 600; }
 .icon-btn {
   width: 38px;
   height: 38px;

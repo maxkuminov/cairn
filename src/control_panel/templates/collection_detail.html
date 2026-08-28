@@ -64,6 +64,10 @@
       <div class="meta-cell__label">Status</div>
       {# Live operation badge while a scan/stamp/upgrade runs; resting status pill otherwise. #}
       <div class="meta-cell__value">{% include "partials/op_status.html" %}</div>
+      {# Under the status pill, for BOTH `ots_mode` values: the "Last scan" tile further down exists
+         only for `ots_mode == "none"`, so this is the only place a `perfile` collection would ever
+         learn that its last scan was partial or that a later one was interrupted (#29). #}
+      {{ m.run_health_note(c) }}
     </div>
     {# The full path is the value: on a phone the ellipsis hid most of it and touch has no hover, so
        the cell carries a `title` for the pointer case and is allowed to wrap under the breakpoint. #}
@@ -120,6 +124,8 @@
       <div class="mini-stat__label">{{ m.icon("clock", size=15, stroke=1.9) }}<span>Last scan</span></div>
       <div class="mini-stat__value">{{ c.last_scan }}</div>
       <div class="mini-stat__sub">{{ c.last_scan_full }}</div>
+      {# The tile states a time; the note states whether that scan was complete. #}
+      {{ m.run_health_note(c) }}
     </div>
   {% endif %}
 </div>

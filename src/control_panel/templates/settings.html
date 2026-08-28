@@ -201,9 +201,13 @@
           <div class="channel-head">
             <div class="icon-tile icon-tile--ok">{{ m.icon("pulse", size=19) }}</div>
             <div class="channel-head__body">
+              {# No status pill here. The one that used to sit beside this title was a static
+                 `pill--ok` "Healthy" computed from nothing at all — a fabricated verdict on a card
+                 whose subject is the ENDPOINT, not the deployment's health. The live indicator is
+                 the topbar pill (one implementation, one source); a second live surface here would
+                 only be a second thing to keep in sync. #}
               <div class="channel-title-row">
                 <span class="channel-title">Health endpoint</span>
-                <span class="pill pill--soft pill--ok pill--sm">{{ m.icon("checkCircle", size=11.5, stroke=2) }}Healthy</span>
               </div>
               <div class="channel-sub">Point Uptime Kuma or any monitor at this URL — it returns scan freshness as a dead-man's switch.</div>
             </div>

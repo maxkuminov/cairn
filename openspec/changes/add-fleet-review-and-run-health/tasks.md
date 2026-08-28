@@ -191,13 +191,13 @@ only).
 
 ### #28 — the health pill
 
-- [ ] 3.1 `scheduler.py`: `CollectionHealth` gains `id: int` (first field or beside `name`);
+- [x] 3.1 `scheduler.py`: `CollectionHealth` gains `id: int` (first field or beside `name`);
   `compute_health` populates it.
-- [ ] 3.1a `compute_health` gains `user_id: int | None = None` and passes it to `list_collections`
+- [x] 3.1a `compute_health` gains `user_id: int | None = None` and passes it to `list_collections`
   (design D5). `None` = fleet-wide — `/healthz`'s call site is **unchanged**. The panel's three call
   sites (3.3, 3.7) pass `user.id`, so the pill's count and the cards it sends the operator to read
   the same population. No new query: `list_collections` already takes the filter.
-- [ ] 3.1b **The `running` freshness leg is kept but gated on liveness** (design D13 — read it, and
+- [x] 3.1b **The `running` freshness leg is kept but gated on liveness** (design D13 — read it, and
   the issue-#5 history in it, before touching this). Today the query is
   `result.in_(("ok","partial","running"))` ordered by `started`, dating a `running` row from
   `started` against the cadence threshold. Replace the classification with the two legs, explicitly:
@@ -218,40 +218,49 @@ only).
   Comment the function with both legs and with why (b) cannot simply trust `result='running'`.
   **This is a deliberate classification change** — the earlier "no classification change"
   prohibition is withdrawn; `proposal.md`'s non-goals now say so.
-- [ ] 3.2 `main.py`: `/healthz`'s per-collection objects gain `"id"` alongside `name`/`state`/
+- [x] 3.2 `main.py`: `/healthz`'s per-collection objects gain `"id"` alongside `name`/`state`/
   `last_scan_age_seconds`. Additive — no key is renamed, retyped or removed. **`/healthz` stays
   fleet-global**: it calls `compute_health` with no `user_id`, because it monitors the installation
   and a machine monitor that skipped one owner's collections is a dead-man's switch with a hole in
   it (design D5). Its `state`/`last_scan_age_seconds` *values* do change per 3.1b — note it in the
   route's docstring.
-- [ ] 3.3 `health_pill` route: call `compute_health(session, settings, user_id=user.id)` (the route
+- [x] 3.3 `health_pill` route: call `compute_health(session, settings, user_id=user.id)` (the route
   gains the `current_user` dependency the other panel routes use) and return `status` **and** the
   stale-collection count, both derived from that one `HealthReport` — never a second query.
-- [ ] 3.4 `partials/health_pill.html`: becomes `<a href="/collections">` with a **visible** label —
+- [x] 3.4 `partials/health_pill.html`: becomes `<a href="/collections">` with a **visible** label —
   `Healthy` / `Degraded · N collection(s)` / `Error` — keeping the `hx-get`/`hx-swap` poll and the
   `/healthz` mono suffix. Accepts `status=None` → a neutral **`Checking…`** state with no colour
   claim (used by `base.html` before the first poll answers). Never a bare `title` as the only
   elaboration (design D5).
-- [ ] 3.5 `base.html:93-98`: delete the hand-copied hardcoded-green pill; `{% include
+- [x] 3.5 `base.html:93-98`: delete the hand-copied hardcoded-green pill; `{% include
   "partials/health_pill.html" %}` with `status=None` and the `load, every 30s` trigger. Do **not**
   call `compute_health` from `_base_context`.
-- [ ] 3.6 `settings.html:205-206`: remove the static `pill--ok` "Healthy" pill from the
+- [x] 3.6 `settings.html:205-206`: remove the static `pill--ok` "Healthy" pill from the
   health-endpoint card. Leave the endpoint documentation and the copy control as they are.
 - [ ] 3.7 `dashboard()` and `collections_list()`: one `compute_health(session, settings,
   user_id=user.id)` call per render; attach `health_state` (`fresh`/`pending`/`stale`) to each
   collection view by **id** — never by name, which no constraint makes unique across owners.
-- [ ] 3.8 `_collection_card.html`: a **stale** marker in the "Last scan" meta cell when
+  - **HALF DONE — finish at integration (4.2).** Slice B shipped the shared helper
+    `routes._attach_health_state(session, user, views)` (one owner-scoped `compute_health` per
+    render, matched by id) and wired `collections_list()`, which is Slice B's function. The
+    `dashboard()` call site was **not** written here: `dashboard()` belongs to Slice A (design D9)
+    and editing it from this worktree is the cross-slice edit that ownership exists to prevent. On
+    the merged tree add one line after `views = [await _collection_view(session, c) for c in
+    collections]` in `dashboard()`:
+    `await _attach_health_state(session, user, views)`. Until then the dashboard's cards simply
+    render no stale marker (`c.health_state` is undefined ⇒ falsy) — degraded, never wrong.
+- [x] 3.8 `_collection_card.html`: a **stale** marker in the "Last scan" meta cell when
   `health_state == "stale"`, naming the state in words ("scan overdue"), not by colour alone.
 
 ### #29 — partial / failed / interrupted runs
 
-- [ ] 3.9 `scanner.py`: persist `summary.errors` to `runs.errors` and a bounded JSON array to
+- [x] 3.9 `scanner.py`: persist `summary.errors` to `runs.errors` and a bounded JSON array to
   `runs.error_sample` at the same finalize site that sets `result`. Entries are the **ASCII-safe
   diagnostic rendering** already used by the un-storable WARNING (`os.fsencode(relpath)` →
   `repr`/`backslashreplace`), prefixed with the reason — writing the raw name reproduces the very
   `UnicodeEncodeError` this column exists to report (design D6). Record a sample entry at all three
   `summary.errors += 1` sites (`:413` `unstorable-name`, `:424` `stat`, `:563` `hash`).
-- [ ] 3.9a **The three bounds, enforced at write time** (design D6 — "20 entries" alone is not a
+- [x] 3.9a **The three bounds, enforced at write time** (design D6 — "20 entries" alone is not a
   bound: `repr` of `os.fsencode` output escapes each bad byte to four characters). Add the constants
   beside `ALARM_PATH_CAP`:
   - `RUN_ERROR_SAMPLE_MAX = 20` entries;
@@ -265,19 +274,19 @@ only).
   stored (the true remainder, not the cap's). Serialize with `json.dumps(...)` at the default
   `ensure_ascii=True`, and measure the budget on the encoded form. `runs.errors` always carries the
   **true** total, never the capped one.
-- [ ] 3.9b **Log the sample once at finalize** whenever `summary.errors > 0`: one WARNING naming the
+- [x] 3.9b **Log the sample once at finalize** whenever `summary.errors > 0`: one WARNING naming the
   collection, the count and the same bounded sample, covering all three causes. Today only the
   un-storable site logs; `stat` and hash skips are silent, so without this line task 1.3's
   "derivable from the logs" downgrade justification is false for two of three causes (design D6).
   Leave the existing un-storable-specific WARNING as it is — it names its own cause and count.
-- [ ] 3.10 Do **not** touch the last-ditch `UPDATE runs SET result='error', finished=…` fallback in
+- [x] 3.10 Do **not** touch the last-ditch `UPDATE runs SET result='error', finished=…` fallback in
   the finalize path; it may leave `errors` at 0 (design D6, accepted).
-- [ ] 3.11 `_collection_view`: keep the existing freshness query (`kind='scan'`,
+- [x] 3.11 `_collection_view`: keep the existing freshness query (`kind='scan'`,
   `result IN ('ok','partial')`) **exactly as it is** and expose `last_result` + `last_errors` +
   `last_error_sample` from that row. Add a **second** scalar for the newest `kind='scan'` run in any
   terminal state (`ok`/`partial`/`error`/`interrupted`) → `latest_run_result`. Comment why the two
   are separate (design D7).
-- [ ] 3.12 `_macros.html`: one `run_health_note(c)` macro rendering the single line used everywhere:
+- [x] 3.12 `_macros.html`: one `run_health_note(c)` macro rendering the single line used everywhere:
   - completed `partial` → warn-toned `partial — N file(s) skipped`, with the sample (capped, shown
     as diagnostic text) behind a details/tooltip;
   - newest run `interrupted` and newer than the last completed scan → **muted, never red**: "a later
@@ -285,44 +294,44 @@ only).
     (design D7);
   - newest run `error` → a real failure marker;
   - otherwise nothing.
-- [ ] 3.13 Render `run_health_note` in all three places a scan result is visible: the
+- [x] 3.13 Render `run_health_note` in all three places a scan result is visible: the
   `_collection_card.html` "Last scan" cell, the `collection_detail.html` header (under the status
   pill — **for both `ots_mode` values**, since the "Last scan" tile there only exists for
   `ots_mode == 'none'`), and inside that `ots_mode == 'none'` tile's sub-line.
 
 ### #24 — the remainder (read `design.md` D8 first; most of #24 is already shipped)
 
-- [ ] 3.14 `verify_result.html`: render the **typed** `transport_error` as a muted diagnostic line on
+- [x] 3.14 `verify_result.html`: render the **typed** `transport_error` as a muted diagnostic line on
   the `unavailable` (transport) card, and append it to the existing failed-lookups note. Do **not**
   render `message`.
-- [ ] 3.15 `verify_run`: delete `ctx["message"]`, leaving a comment stating that the generic backend
+- [x] 3.15 `verify_run`: delete `ctx["message"]`, leaving a comment stating that the generic backend
   string must not be printed under a reason-attributed verdict (design D8).
-- [ ] 3.16 `verify_result.html`: add a **Retry** control that re-posts the same `file_id` to
+- [x] 3.16 `verify_result.html`: add a **Retry** control that re-posts the same `file_id` to
   `/verify/run` (CSRF token from the context, swapping the result container), rendered **only** when
   `transport_error` or `inconclusive` decided the verdict. Not on never-notarized, queued,
   unreadable-proof or any mismatch verdict.
-- [ ] 3.17 Verify — no regression: confirm the three `lookup_made` gates (detail row, copyable
+- [x] 3.17 Verify — no regression: confirm the three `lookup_made` gates (detail row, copyable
   report, info strip) and the reason-ordered verdict ladder are untouched by the above.
 
 ### Tests
 
-- [ ] 3.18 `compute_health` returns each row's collection `id`, and `/healthz` includes it while
+- [x] 3.18 `compute_health` returns each row's collection `id`, and `/healthz` includes it while
   every previously-asserted key is unchanged.
-- [ ] 3.19 The health pill renders a link with a visible "Degraded · 1 collection" label when one
+- [x] 3.19 The health pill renders a link with a visible "Degraded · 1 collection" label when one
   collection is stale, and `base.html` renders **no** "Healthy" text before the poll (assert the
   `Checking…` placeholder). Assert `settings.html` no longer contains a static health pill.
-- [ ] 3.20 A scan that skips an un-storable filename writes `runs.errors >= 1` and a non-empty
+- [x] 3.20 A scan that skips an un-storable filename writes `runs.errors >= 1` and a non-empty
   `error_sample`, and the collection card renders "partial — N file(s) skipped". Assert the stored
   sample is ASCII-safe (round-trips through `str.encode("utf-8")`).
-- [ ] 3.21 A collection whose newest `kind='scan'` run is `interrupted` renders the neutral note and
+- [x] 3.21 A collection whose newest `kind='scan'` run is `interrupted` renders the neutral note and
   **not** a failure marker, and its `last_scan` still reports the last *completed* scan.
-- [ ] 3.22 A collection whose only run is `interrupted` renders "never" for last scan.
-- [ ] 3.23 Verify — **retry offered**: a transport failure and an `inconclusive` result each render
+- [x] 3.22 A collection whose only run is `interrupted` renders "never" for last scan.
+- [x] 3.23 Verify — **retry offered**: a transport failure and an `inconclusive` result each render
   the reason (transport) and a Retry control that posts the same `file_id` to `/verify/run`.
-- [ ] 3.24 Verify — **retry NOT offered**, one case each: never-notarized, queued-to-stamp,
+- [x] 3.24 Verify — **retry NOT offered**, one case each: never-notarized, queued-to-stamp,
   unreadable proof, and a digest mismatch under each `mismatch_blame` attribution. Assert
   `message` appears nowhere in any of these responses.
-- [ ] 3.25 **`compute_health` legs** (`tests/test_scheduler.py`), one test per leg:
+- [x] 3.25 **`compute_health` legs** (`tests/test_scheduler.py`), one test per leg:
   (a) newest completed scan inside the window → `fresh`; outside → `stale`;
   (b) a `running` scan whose `heartbeat_at` is seconds old, `started` **well past** the cadence
   window, and **no** completed scan → `fresh` (issue #5: a long live scan must not age out its own
@@ -334,21 +343,21 @@ only).
   first scan that terminated `error`/`interrupted` **inside** the grace window → `stale` (grace is
   gated on the absence of every `kind='scan'` run, per the normative requirement);
   (e) a recent `stamp`/`upgrade` run alone → still `stale`.
-- [ ] 3.26 **Panel health is owner-scoped, `/healthz` is not:** user B owns a stale collection and
+- [x] 3.26 **Panel health is owner-scoped, `/healthz` is not:** user B owns a stale collection and
   user A owns only fresh ones → A's `/health-pill` renders healthy and none of A's cards carry a
   stale marker, while `/healthz` (unauthenticated, fleet-global) returns 503 `degraded` and lists
   both collections.
-- [ ] 3.27 **Duplicate names across owners:** two collections with the *same name*, different owners,
+- [x] 3.27 **Duplicate names across owners:** two collections with the *same name*, different owners,
   one stale → the stale marker attaches to the right card by `id` (assert the fresh owner's
   identically-named card carries none).
-- [ ] 3.28 **Sample bounds** (`tests/test_scanner.py`): (a) a single skipped path whose rendering
+- [x] 3.28 **Sample bounds** (`tests/test_scanner.py`): (a) a single skipped path whose rendering
   exceeds 256 B is stored truncated, ends with `...`, and is ≤ 256 B encoded; (b) many skipped files
   produce a stored value ≤ 4096 B encoded with ≤ 20 real entries plus the
   `"+N more skipped (sample truncated)"` marker, whose N + real entries == `runs.errors`; (c) the
   stored value is pure ASCII (`value.encode("ascii")` does not raise) and `json.loads` returns a
   list of `str`; (d) the finalize WARNING (3.9b) is emitted for a `stat`-OSError-only skip, i.e. for
   a cause that logs nothing today.
-- [ ] 3.29 **Run-result rendering at every site**, matrixed: for each of `partial`, `error`,
+- [x] 3.29 **Run-result rendering at every site**, matrixed: for each of `partial`, `error`,
   `interrupted` (newer than the last completed scan) and a clean `ok`, assert the rendering at all
   three sites of 3.13 — the collection card, the collection-detail header (**both** `ots_mode`
   values), and the `ots_mode == 'none'` "Last scan" tile sub-line. Plus the combination the audit
