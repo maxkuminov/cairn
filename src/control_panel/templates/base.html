@@ -93,13 +93,16 @@
           </div>
           <div class="topbar__spacer"></div>
 
-          <div id="health-pill"
-               hx-get="/health-pill" hx-trigger="load, every 30s" hx-swap="outerHTML"
-               class="health-pill" title="Exposed at /healthz for external monitors">
-            {{ m.dot("var(--ok)", size=7, pulse=true) }}
-            <span class="health-pill__label">Healthy</span>
-            <span class="health-pill__url mono">/healthz</span>
-          </div>
+          {# The ONE health indicator, in its neutral pre-poll state. This used to be a hand-copied
+             pill hardcoded to a green "Healthy", rendered on every page load before the poll had
+             answered — a computed-from-nothing verdict on the very surface that means "the
+             dead-man's switch is fine". `status=None` renders "Checking…" instead, and the
+             `load` trigger fills it in from `/health-pill` (owner-scoped) a moment later.
+             Deliberately NOT a `compute_health()` call in `_base_context`: that would run a
+             per-collection query loop on every page render to fill a pill that repolls anyway. #}
+          {% with status=None, stale_count=0, health_pill_trigger="load, every 30s" %}
+            {% include "partials/health_pill.html" %}
+          {% endwith %}
 
           <a class="icon-btn" href="/mode/toggle"
              title="Switch to {{ 'light' if mode == 'dark' else 'dark' }} mode"

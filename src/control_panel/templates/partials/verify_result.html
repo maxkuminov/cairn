@@ -64,6 +64,10 @@
           The proof's Bitcoin attestation does not match the block it points at, so the proof may be corrupt (or the explorer returned inconsistent block data). <strong>This is not evidence that <span class="mono">{{ filename }}</span> changed</strong> &mdash; its fingerprint is still exactly the one the proof records.
         {% elif transport_error %}
           Cairn could not reach the Bitcoin record to check this proof, so nothing was established either way. It says nothing about <span class="mono">{{ filename }}</span> &mdash; try again in a moment.
+          {# The TYPED transport reason, not the backend's generic `message` (design D8). The card
+             tells the operator the backend could not be reached; without the reason they cannot
+             tell a DNS failure from a timeout from a refused connection, and cannot fix either. #}
+          <div class="verdict__note mono">{{ transport_error }}</div>
         {% elif inconclusive %}
           The Bitcoin-node backend reported a failure it cannot explain. Three things are possible: the proof is <em>not yet confirmed</em>, <em>or</em> <span class="mono">{{ filename }}</span> no longer matches it, <em>or</em> the Bitcoin node could not be reached. That backend cannot tell them apart.
         {% elif unreadable_proof %}
@@ -94,10 +98,24 @@
          outranks a transport failure must still disclose it, or the swallow has only moved one
          layer out. Muted sub-line, never a second verdict style. #}
       {% if transport_error and (verdict == "ok" or proof_mismatch) %}
-        <div class="verdict__note">Note: {{ failed_lookups }} attestation lookup{{ "" if failed_lookups == 1 else "s" }} failed; the verdict is based on the attestations reached.{% if proof_mismatch %} The mismatch is established only over the attestations that could be fetched.{% endif %}</div>
+        <div class="verdict__note">Note: {{ failed_lookups }} attestation lookup{{ "" if failed_lookups == 1 else "s" }} failed; the verdict is based on the attestations reached.{% if proof_mismatch %} The mismatch is established only over the attestations that could be fetched.{% endif %} <span class="mono">{{ transport_error }}</span></div>
       {% endif %}
     </div>
-    <a class="btn btn--ghost" href="/verify">{{ m.icon("arrowLeft", size=15) }} Verify another</a>
+    <div class="flex gap-8" style="flex-shrink:0">
+      {# Retry, offered ONLY where re-running the same check can produce a different answer:
+         `can_retry` is set in the route from the transport-failure and inconclusive outcomes alone.
+         Never on never-notarized, queued-to-stamp, an unreadable proof or any digest disagreement
+         — a retry button beside a settled finding presents it as provisional and invites the
+         operator to re-run a check whose answer is already known. It re-posts the SAME file_id to
+         the same route and replaces the result in place; the CSRF token rides on htmx's global
+         header hook in base.html, exactly as the search-result rows' POSTs do. #}
+      {% if can_retry %}
+        <button class="btn btn--subtle" type="button" hx-post="/verify"
+                hx-vals='{"file_id": {{ file_id }}}'
+                hx-target="#verify-pane" hx-swap="innerHTML">{{ m.icon("refresh", size=15) }} Retry</button>
+      {% endif %}
+      <a class="btn btn--ghost" href="/verify">{{ m.icon("arrowLeft", size=15) }} Verify another</a>
+    </div>
   </div>
 
   <div class="card card--flush">

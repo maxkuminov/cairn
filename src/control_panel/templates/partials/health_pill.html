@@ -1,10 +1,32 @@
 {% import "_macros.html" as m %}
+{#- The panel's ONE health indicator (#28). Three properties are load-bearing:
+
+    1. It is a LINK to /collections, not an inert <div>. The number it states is only actionable if
+       the operator can reach the collections it counted.
+    2. Its elaboration is VISIBLE ("Degraded · 2 collections"), never a `title` alone: touch devices
+       never fire a tooltip and `panel.css` hides the hint at phone widths, so a `title` is the same
+       dead end in different markup.
+    3. `status=None` is a real, neutral state — "Checking…", used by base.html before the first poll
+       answers. It must NEVER default to Healthy: asserting a verdict that has not been computed, on
+       the one surface that means "the dead-man's switch is fine", is this change's whole defect
+       class in miniature.
+
+    `stale_count` is the number of the VIEWER's own stale collections, from the same HealthReport
+    that produced `status` (the panel's health is owner-scoped; /healthz stays fleet-global). -#}
+{%- set unknown = status is none -%}
 {%- set ok = status == "ok" -%}
-<div id="health-pill"
-     hx-get="/health-pill" hx-trigger="every 30s" hx-swap="outerHTML"
-     class="health-pill {% if not ok %}is-{{ status }}{% endif %}"
-     title="Exposed at /healthz for external monitors">
-  {{ m.dot("var(--ok)" if ok else "var(--danger)", size=7, pulse=true) }}
-  <span class="health-pill__label">{{ "Healthy" if ok else ("Degraded" if status == "degraded" else "Error") }}</span>
+{%- set n = stale_count | default(0) -%}
+<a id="health-pill" href="/collections"
+   hx-get="/health-pill" hx-trigger="{{ health_pill_trigger | default('every 30s') }}" hx-swap="outerHTML"
+   class="health-pill {% if unknown %}is-unknown{% elif not ok %}is-{{ status }}{% endif %}"
+   title="Collection scan freshness — exposed at /healthz for external monitors">
+  {{ m.dot("var(--text-3)" if unknown else ("var(--ok)" if ok else "var(--danger)"), size=7, pulse=not unknown) }}
+  <span class="health-pill__label">
+    {%- if unknown -%}Checking&hellip;
+    {%- elif ok -%}Healthy
+    {%- elif status == "degraded" -%}Degraded &middot; {{ n }} collection{{ "" if n == 1 else "s" }}
+    {%- else -%}Error
+    {%- endif -%}
+  </span>
   <span class="health-pill__url mono">/healthz</span>
-</div>
+</a>
