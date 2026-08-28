@@ -66,17 +66,26 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
   `transport_error`.** The route's `except OtsError` was never the main path: `_verify_via_explorer`
   returns an unreachable explorer as `verified=False, state="complete"`, and `_verify_via_cli`
   returns a dead Bitcoin node as `state=<the proof's own state>` — which is how an unreachable node
-  renders as "pending confirmation" today.
+  renders as "pending confirmation" today. The explorer accumulates its fetch failures and attaches
+  them to **every** terminal result — verified, proof-mismatch and all-failed alike — so no reason is
+  lost because another outcome was decided first.
+- **A verified proof is never overruled by a mismatched sibling attestation.** OTS verification is
+  existential: one attestation confirmed against its real block is proof. `proof_mismatch` is set
+  only when *no* attestation validated and at least one mismatched; today's aggregation tests
+  `if mismatch:` first, so one bad sibling renders a red "this proof does not check out" over a
+  genuinely anchored proof.
 - **`verify_run` chooses the verdict by reason, in order**: live file unavailable → digest mismatch
-  → proof mismatch → verified → transport failure → inconclusive → genuinely pending → other.
-  Mismatch is tested *before* transport, so a mismatch established before the network failed is not
-  thrown away.
+  → verified → proof mismatch → transport failure → inconclusive → awaiting confirmation → queued to
+  stamp → other. Mismatch is tested *before* transport, so a mismatch established before the network
+  failed is not thrown away; `verified` sits above `proof_mismatch` as belt-and-braces on the
+  source-level rule; and the two not-yet-confirmed states get two branches, never one.
 - **A transport failure gets a fourth, neutral verdict style** ("Couldn't check right now"), not
   red: an unreachable explorer is not evidence against the file, and crying wolf in red teaches the
   operator to dismiss the red card that means a real mismatch.
 - **The node backend stops reading as "pending".** It cannot distinguish a mismatch from an
-  unanchored proof, so instead of guessing (a false alarm on the core signal) it returns
-  `inconclusive` and the panel names both possibilities.
+  unanchored proof from its own unreachability, so instead of guessing (a false alarm on the core
+  signal) it returns `inconclusive` and the panel names **all three** possibilities. The ambiguity is
+  carried in the copy; nothing classifies it by pattern-matching the CLI's output.
 - **`src/cli.py`'s `verify` command branches in the same order.** `VerifyResult` has two consumers;
   fixing only the panel leaves the identical false negative live on the command line.
 - **`partials/verify_results.html` renders `m.ots_badge(f.state, "sm")`** instead of the literal
@@ -122,11 +131,15 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
   path is reachable only from the page that explains it. When `issues == 0 and new > 0`, the
   harmless **Baseline new files** button stays, with a light confirm. Any remaining Accept form
   carries a confirm.
-- **The detail-page accept route re-checks at submit time.** Render-time visibility cannot protect
-  against a scan landing between GET and POST, which would turn a confirmed "baseline 40 new files"
-  into the deletion of `missing` records the operator never saw. The route re-counts
-  modified + missing (and refuses while an operation is in flight) and sends the operator to the
-  review view instead of re-baselining.
+- **Both accept-family routes are bound to the population their form was rendered for.** Each form
+  carries a hidden **population fingerprint**; the POST recomputes it *inside the same write
+  transaction* as `accept_collection`'s reads and writes (SQLite's single-writer serialization is
+  what makes the check-and-act atomic) and refuses on any drift, redirecting to
+  `/collection/{id}/review?stale=1`, where a banner explains it. A recount that is not inside that
+  transaction is not a guard — the scan can commit between the recount and the first `DELETE`.
+  The **review page is not exempt**: its list is a render, so a scan landing after it makes "exactly
+  what you see below" false and the operator deletes a record they never saw. `active_run()` stays,
+  demoted to belt-and-braces for the long window.
 - **`collection_detail` honours `view` and `filter` query parameters**, threading `status_filter`
   into the *initial* `query_files` call and templating the Tree/List `is-active` class, so a deep
   link into the filtered list actually lands filtered.
@@ -169,9 +182,9 @@ Sprint 1 is deliberately bounded. Out of scope, each tracked by its own issue:
 
 - **The `accept_collection` scope-split and the full vocabulary rewrite** (#16, #17's deeper half).
   Sprint 1 does the renames, counts, confirms and button styles only; it does not add a scope
-  parameter, a per-file variant, or new verbs. The detail-page route's submit-time refusal *is* in
-  scope — it is a guard that makes the unscoped verb safe to expose in the one state it is offered
-  in, not the scoping itself.
+  parameter, a per-file variant, or new verbs. The accept routes' submit-time refusal *is* in scope —
+  it is a guard binding the unscoped verb to the population its form was rendered for, not the
+  scoping itself, and #16's scoped verbs will subsume it.
 - **A fleet-wide `/review` page** (#27). `GET /review` is a 404 today; nothing here links to it.
   The multi-collection case of the "Open issues" tile points at `/collections` until #27 lands.
 - **The proof-overwrite and restored-file-digest guards** (#15, #21) — the only two places where
@@ -246,15 +259,15 @@ Sprint 1 is deliberately bounded. Out of scope, each tracked by its own issue:
 | Issue | Audit ref | Slice | Tasks |
 |---|---|---|---|
 | #13 verify says "pending" for a digest mismatch (panel **and** CLI) | A1 | A | 2.1–2.10 |
-| #14 collection-detail Accept is primary + unconfirmed (+ the stale-form race) | A2 | B | 3.9–3.12 |
+| #14 collection-detail Accept is primary + unconfirmed (+ the stale-form race, both accept routes) | A2 | B (+ C's template) | 3.9–3.13, 3.18, 4.6 |
 | #17 rename Acknowledge → Mark reviewed; scope/confirm bulk acks; un-invert row colours | A5 | C | 4.1–4.5 |
 | #18 inert "Open issues" tile; unlabelled sidebar badge | A6 | B | 3.1–3.4 |
 | #19 `/verify` hardcodes the green Anchored badge | A7 | A | 2.11 |
 | #20 proof tiles claim "all confirmed" with no proofs | A8 | B | 3.5–3.7 |
-| #22 restored file leaves its missing alert open | A10 | C | 4.6–4.9 |
+| #22 restored file leaves its missing alert open | A10 | C | 4.7–4.10 |
 | #23 "Incomplete" vs "pending" — three words, two states, one name each | A11 | A (badge) + D (learn) | 2.12, 5.3 |
 | #26 `/learn` teaches an `ots verify` that needs a node | A14 | D | 5.1–5.2 |
 | #31 zero-file collections report "All clear / All files verified" | A19 | B | 3.6, 3.8 |
-| #32 copy and deep-link batch (7 items) | A20 | A/B/C/D | 2.13, 3.13–3.15, 4.10–4.12 |
+| #32 copy and deep-link batch (7 items) | A20 | A/B/C/D | 2.13, 3.14–3.16, 4.11–4.13 |
 | #33 mobile: op badge squeezes the collection name to zero width | A21 | D | 5.6 |
 | #34 Settings → Verification renders dead radio cards | A22 | D (settings) + A (verify_result) | 5.4–5.5, 2.14 |

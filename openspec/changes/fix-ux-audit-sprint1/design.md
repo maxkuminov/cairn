@@ -43,10 +43,14 @@ regex guess on the CLI's wording, and a *false* mismatch is a false alarm on the
 which is the configured default and the one every homelab deploy runs (the node path needs a
 reachable `bitcoind`). The node backend does **not** guess. It also does not get to keep today's
 reassuring reading: its non-success return sets `inconclusive=True`, and the panel and the CLI
-render that as a verdict that *names both possibilities* — **"Not yet confirmed — or the file no
-longer matches; the Bitcoin-node backend cannot tell these apart."** No mismatch is invented and no
-false reassurance is given: the operator is told exactly what that backend established, which is
-nothing. Teaching the node backend to distinguish the cases (verifying locally the way the explorer
+render that as a verdict that *names every possibility it cannot separate* — **"Not yet confirmed —
+or the file no longer matches, or the Bitcoin node could not be reached; the Bitcoin-node backend
+cannot tell these apart."** All three are named because all three produce the identical non-success
+exit: `ots verify -d` reports an unanchored proof, a changed file and a dead node the same way.
+Naming only the first two would invent a file-change scare for what is usually a down node, and
+classifying by regexing the CLI's stderr is the guess this decision exists to refuse — the copy
+carries the ambiguity instead. No mismatch is invented and no false reassurance is given: the
+operator is told exactly what that backend established, which is nothing. Teaching the node backend to distinguish the cases (verifying locally the way the explorer
 path does) is follow-up work for #24-adjacent verify hardening, not sprint 1 — recorded in the spec
 delta as a scoped, documented limitation of the non-default backend rather than left implicit.
 
@@ -84,12 +88,18 @@ transport_error: str | None = None  # the backend could not be reached; nothing 
 inconclusive: bool = False          # this backend cannot tell pending/mismatch/unreachable apart
 ```
 
-Every row of that table is populated at its source: the explorer's `best is None` return sets
-`transport_error` to the joined fetch errors; `_verify_via_cli` catches `OtsError` from `_run_ots`
-and returns `transport_error=str(exc)` rather than letting it propagate, and sets `inconclusive=True`
-on the non-success exit (D1). The partial-fetch row keeps `verified=True` — one attestation
-confirmed against a real block *is* the proof — but still records `transport_error`, so nothing is
-swallowed silently; a verified result is never downgraded by it. The route's `except OtsError`
+Every row of that table is populated at its source. `_verify_via_cli` catches `OtsError` from
+`_run_ots` and returns `transport_error=str(exc)` rather than letting it propagate, and sets
+`inconclusive=True` on the non-success exit (D1). The explorer **accumulates** every
+`_fetch_block_merkleroot` failure and attaches the joined reasons to **every** terminal result it
+returns after the fetch loop — the verified one, the `proof_mismatch` one and the `best is None` one
+alike. A fetch error is never dropped because some other outcome was decided first: an operator told
+that a proof does not check out also needs to know that two of its three attestations could not be
+fetched, since that is the difference between "this proof is bad" and "this proof is bad as far as
+the half of it I could see". A recorded `transport_error` never downgrades a verified result (one
+attestation confirmed against a real block *is* the proof) and never outranks a mismatch (verdict
+order below); on those results it is diagnostic detail, and it is the verdict itself only where
+nothing else was established. The route's `except OtsError`
 fallback survives as a belt-and-braces net and now constructs
 `VerifyResult(verified=False, state="none", transport_error=str(exc))`, dropping `fe.ots_state`
 entirely.
@@ -98,16 +108,37 @@ entirely.
 
 1. `live_unavailable` — there are no bytes to check
 2. `digest_mismatch` → `danger`, "File no longer matches its proof"
-3. `proof_mismatch` → `danger`, "This proof does not check out" (blames the proof, not the file)
-4. `result.verified` → `ok`
+3. `result.verified` → `ok`
+4. `proof_mismatch` → `danger`, "This proof does not check out" (blames the proof, not the file)
 5. `transport_error` → `unavailable`, "Couldn't check right now"
-6. `inconclusive` → `unavailable`, "Couldn't confirm — pending or changed"
-7. `state in ("incomplete", "pending")` → `warn`, "Proof pending confirmation"
-8. otherwise → `danger`, "Could not verify"
+6. `inconclusive` → `unavailable`, "Couldn't confirm — pending, changed, or unreachable"
+7. `state == "incomplete"` → `warn`, "Pending confirmation"
+8. `state == "pending"` → `warn`, "Queued to stamp"
+9. otherwise → `danger`, "Could not verify"
+
+**A verified result outranks `proof_mismatch` — and the flag is defined so that conflict cannot
+arise in the first place.** OpenTimestamps verification is *existential*: one Bitcoin attestation
+confirmed against its real block is proof, and a proof may legitimately carry more than one
+attestation. So `_verify_via_explorer` sets `proof_mismatch` **only when no attestation validated
+and at least one mismatched**; a bad sibling beside a good one is kept as diagnostic detail in
+`message` and never changes the verdict. That inverts today's aggregation, which tests `if mismatch:`
+before it looks at `best` and so lets one bad sibling override a valid attestation with a red "this
+proof does not check out". Crying mismatch over a proof that is genuinely anchored is the same class
+of error as calling a changed file pending, pointed the other way — and on this product's core
+signal, a false alarm is what teaches the operator to dismiss the real one. Ordering `verified`
+above `proof_mismatch` in the verdict chain is belt-and-braces on top of that source-level rule.
 
 Mismatch is evaluated **before** transport deliberately: a mismatch established before the network
 failed is knowledge, and discarding it because a later fetch timed out would throw away the one
-finding that matters.
+finding that matters. `digest_mismatch` stays above `verified` for the mirror reason: it is only ever
+set on a not-verified return, and if both were ever set, "these are not the bytes that were stamped"
+is the finding that must win.
+
+`incomplete` and `pending` are **two branches, not one** (D13): `incomplete` is submitted and waiting
+on Bitcoin, so it reads "Pending confirmation"; `pending` is queued locally and never submitted, so
+it reads **"Queued to stamp"** and carries no awaiting-confirmation wording anywhere in its copy.
+Collapsing them tells an operator to wait for a confirmation that nothing has asked for, which is
+exactly how a stuck stamping queue hides behind the wording for a healthy young proof.
 
 `unavailable` is a **fourth, neutral verdict style** (one small CSS addition) — not `warn`/"pending"
 (the bug being fixed), and **not `danger`**: issue #24, the fuller verify-failure-card split queued
@@ -232,20 +263,23 @@ scan landing between render and submit turns a button labelled "Baseline 40 new 
 deletion of `missing` rows the operator has never seen — and the light confirmation they clicked
 described something else entirely. Visibility rules cannot fix that; only the route can.
 
-**Decision:** `collection_accept` re-computes the collection's `modified + missing` counts **inside
-the POST**, before doing anything. If either is non-zero, or `collections_svc.active_run()` reports
-an operation still in flight that could change the population, it **refuses**: it does not call
-`accept_collection`, and it lands the operator on a clear message — *"This collection changed since
-the page loaded — review the issues instead"*. Rendering shape (decided by the supervisor so
-Slice B does not have to invent one): the panel has no flash-message mechanism, so the refusal is a
-**303 redirect to `/collection/{id}/review`** — the page that lists exactly the issues that caused
-the refusal, with the clearing controls in reach; no new partial, no new message plumbing. The review
-page's own accept is unaffected: that route lists on the same page exactly the issues it is about to
-adopt, which is what makes it the explained path.
+**Decision:** the detail-page form is bound to the population it was rendered for by the shared
+**population fingerprint** guard specified in **D14**, which the review page's Accept uses
+identically. A submit-time recount alone would not do it: the recount is a separate statement from
+the accept, and the same scan can claim, run and commit between the two.
+
+**The review page is not exempt.** Its list is a *render*, and the claim that makes it the explained
+path — "these are exactly the files this button will adopt" — stops being true the moment a scan
+records another missing file. The operator would then delete a record they never saw, from the one
+page whose entire purpose is that they saw it. So `collection_review_accept` carries the same hidden
+field, runs the same check inside the same transaction, and refuses the same way.
 
 This is a **guard, not the vocabulary split.** A scoped `accept_collection` (a new-files-only
-variant, per-file accept) is #16 and a later change; until it exists, the only safe rule is that the
-detail-page form acts only in the state it was rendered for, and says so when that state is gone.
+variant, per-file accept) is #16 and a later change; until it exists, the only safe rule is that an
+accept-family form acts on the population it was rendered for and refuses when that population has
+moved. #16's scoped verbs subsume this guard — a per-file accept carries its own scope and needs no
+fingerprint — which is why D14 is deliberately the minimum honest mechanism rather than a new
+abstraction to keep alive.
 
 
 ## D8 — which button styles get swapped
@@ -339,8 +373,8 @@ boundaries are chosen so the regions are far apart in the file:
 | Region | Owner |
 |---|---|
 | `verify_run` (and only it) | A |
-| `_STATUS_META`, `_collection_status`, `_ots_counts`, `_op_status_c`, `_collection_view`, `_base_context`, `_event_feed`, `dashboard`, `ack_event`, `collection_detail`, `collection_accept`, new `_alert_badge_count` | B |
-| — (C needs no routes.py change; `review_open` and `total_issues` are already in the review context) | C |
+| `_STATUS_META`, `_collection_status`, `_ots_counts`, `_op_status_c`, `_collection_view`, `_base_context`, `_event_feed`, `dashboard`, `ack_event`, `collection_detail`, `collection_accept`, `collection_review`, `collection_review_accept`, new `_alert_badge_count`, new `_population_fingerprint` | B |
+| — (C owns no routes.py region; `review_open` and `total_issues` are already in the review context, and D14's `population_fp` / `stale` keys are published by B's `collection_review`) | C |
 | `settings_page` context only | D |
 
 **`src/control_panel/static/css/panel.css`**
@@ -368,7 +402,16 @@ in the panel. `src/services/scanner.py` remains **C**'s alone.
   with the verify work, not with `settings.html`).
 - `learn.html` → **D** (both #26's verification section and #23's pending-vs-anchored addition;
   A owns only the `_macros.html` badge label).
-- `collection_detail.html` → **B** (both the #14 header and the #32 browser toolbar).
+- `collection_detail.html` → **B** (the #14 header, the #32 browser toolbar, and D14's hidden
+  `population_fp` field in the baseline form).
+- `collection_review.html` → **C**, *including* the two lines D14 needs there: the hidden
+  `population_fp` field inside the Accept form (the same hunk C already edits to give it
+  `btn--danger`, D8) and the `stale` banner. The alternative — a B-owned partial that C has to
+  `{% include %}` — still puts a cross-slice edit in C's file, so it buys nothing but an extra file.
+  The seam is a **context contract** instead: B's `collection_review` publishes `population_fp` and
+  `stale`; C renders them. Both halves land in the same integration merge (§6.1 checks it), and the
+  route **fails closed** on an absent or empty field, so a half-merge refuses accepts rather than
+  accepting them unguarded.
 
 `partials/op_status.html` → **B** (the zero-file status pill, D5). It is *included* by
 `_collection_card.html` and `collection_detail.html`, both of which are also B's, so the three move
@@ -405,3 +448,78 @@ Summaries never add the first two together. Where both are non-zero the line rea
 and the other reads on its own. This is #23's requirement taken one level deeper than the issue
 states it: the fix is not to spend one word on both states, it is to stop presenting them as one
 state.
+
+## D14 — the accept-family population fingerprint (one guard, two routes)
+
+Two routes call the unscoped `accept_collection`: `collection_accept` (the detail page's
+Baseline / Accept form, D7) and `collection_review_accept` (the review page's "Accept all changes").
+Both render a page and then act on whatever the collection looks like at *submit* time, and the
+scheduler can complete a scan in between. Neither a render-time visibility rule nor a submit-time
+recount closes that: the recount is a separate statement from the accept, so a scan can claim, run
+and commit in the gap between them and the accept still deletes `missing` rows the operator never
+saw. `active_run()` has the same shape of hole — a collection with no run in flight when it is
+checked can have one a millisecond later.
+
+**Decision — one mechanism, used identically by both routes.**
+
+*The fingerprint.* Each accept-family form renders a hidden `population_fp` field: the SHA-256 of a
+canonical description of the population that button claims to act on.
+
+| Form | Scope tag | Hashed |
+|---|---|---|
+| detail-page **Baseline new files** | `baseline-new` | `issues=<missing+modified count>` (zero whenever this form is rendered at all — the zero-issue assertion travels *inside* the hash) then the sorted `id:status` pairs of the collection's `new` files |
+| review-page **Accept all changes** | `review-accept` | the sorted `id:status` pairs of the collection's `missing` + `modified` files |
+
+Serialized as `"{scope}|{collection_id}|{issues=N|}" + ";".join(f"{id}:{status}")` and hashed, so a
+fingerprint minted for one form can never validate the other, and one collection's can never
+validate another's. Each pair carries `status` as well as `id` because a file flipping
+`new → modified` between render and submit changes what accepting it *means* without changing the
+id set.
+
+The review page's fingerprint is computed **over the whole population in SQL, not over the rendered
+rows**: the list is capped at `REVIEW_ROW_LIMIT` (500) while accept acts on all of it, so hashing
+the visible rows would leave every issue past the cap outside the guard — the exact collections
+(a whole deleted folder) where the guard matters most.
+
+*The check is atomic with the act.* The POST does not "check, then call". It opens **one write
+transaction** and does both inside it:
+
+1. **take the write lock first**, before the reads the guard depends on — one no-op write against
+   the collection's own row (`UPDATE collections SET name = name WHERE id = :id`). SQLite escalates
+   a transaction to a writer on its first write statement and holds that lock until commit or
+   rollback, so from here no other connection can commit anything;
+2. recompute the fingerprint (and, for the detail form, re-assert `issues == 0`);
+3. compare it with the submitted value — an absent or empty field counts as a mismatch, so the
+   guard **fails closed**;
+4. only on a match, call `accept_collection(session, …)`, whose own trailing `commit()` is this
+   transaction's single commit.
+
+SQLite's single-writer serialization under WAL is what makes this a guard rather than a narrower
+race: the recount and the accept's own `UPDATE`/`DELETE`s sit in the same transaction as the write
+lock, so a scan cannot interleave between them — it blocks on the lock (`busy_timeout=5000` is
+already set on every connection) and commits strictly before or strictly after, never during.
+`collections_svc.active_run()` is still checked, but it is now **belt-and-braces**: it catches the
+*long* window (an operation in flight that is going to change the population) rather than being the
+guard against the short one.
+
+The engine-wide alternative — `BEGIN IMMEDIATE` via a driver-level `begin` hook — is rejected: it
+would make every read-only page render take the write lock and queue behind a running scan. If the
+escalation itself fails because another writer committed since this session's read snapshot
+(SQLite's `SQLITE_BUSY_SNAPSHOT`), that *is* drift, and it is handled as a refusal, never as a 500.
+
+*The refusal.* No mutation of any kind, and a **303 to `/collection/{id}/review?stale=1`** — the
+page that lists exactly the issues that caused the refusal, with the clearing controls in reach. The
+panel has no flash-message mechanism, so the marker is the message: `collection_review` accepts
+`stale` as a whitelisted query parameter (only `1` is recognized; anything else is ignored, exactly
+as `view` / `filter` are handled in D11) and renders a dismissable banner — *"This collection
+changed since the page loaded — the list below is current."* A bare redirect would land the operator
+on an ordinary review page with no account of why their click did nothing, which reads as a broken
+button and invites them to click it again.
+
+*Accepted limitation.* `accept_collection` also promotes every `new` file to `ok` and acknowledges
+every open event, and the review form's fingerprint does not cover the `new` set — so new files that
+appear between render and submit are still adopted by a review-page accept. That is today's unscoped
+verb, unchanged. The fingerprint's job here is the **destructive** half: the `missing` rows accept
+deletes and the alerts it clears. Covering the `new` set as well would refuse an accept on any
+actively-growing collection (Photos scans every 15 minutes) for a promotion that deletes nothing —
+the wrong trade. Scoping the verb properly is #16.

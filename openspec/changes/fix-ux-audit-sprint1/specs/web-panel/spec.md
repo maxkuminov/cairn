@@ -12,11 +12,19 @@ SHALL deep-link here and verify immediately.
 
 The verdict SHALL be chosen by *why* verification did not succeed, not by the proof's stored state.
 The panel SHALL evaluate the outcomes in this order: the live file being unavailable, then a
-**digest mismatch**, then a **proof mismatch**, then a verified result, then a **transport
-failure**, then an **inconclusive** result, then a proof that is genuinely not yet confirmed, then
-anything else. Mismatch SHALL be evaluated before transport: a mismatch that was established before
-the backend became unreachable is knowledge, and SHALL NOT be discarded in favour of the transport
-outcome.
+**digest mismatch**, then a **verified** result, then a **proof mismatch**, then a **transport
+failure**, then an **inconclusive** result, then a proof **awaiting Bitcoin confirmation**, then a
+proof **queued for stamping**, then anything else. Mismatch SHALL be evaluated before transport: a
+mismatch that was established before the backend became unreachable is knowledge, and SHALL NOT be
+discarded in favour of the transport outcome.
+
+A **verified result SHALL outrank a proof mismatch**. Timestamp verification is existential: a
+proof may carry several Bitcoin attestations and one of them confirmed against its real block is
+sufficient proof, so a mismatched sibling attestation SHALL NOT turn a verified proof into a
+failure. It MAY be reported as diagnostic detail alongside the verified verdict. Rendering a red
+"this proof does not check out" over a genuinely anchored proof is a false alarm on the same signal
+a digest mismatch reports truthfully, and false alarms are what teach an operator to dismiss the
+real one.
 
 A file whose bytes no longer match the digest its proof commits to SHALL be rendered as a failure
 that names that fact — it SHALL NOT be rendered as a proof awaiting confirmation, and SHALL NOT be
@@ -40,9 +48,17 @@ not only from a raised error, because the backends report most unreachability as
 returned result.
 
 Where the configured backend cannot distinguish "not yet confirmed" from "the file no longer
-matches", the panel SHALL render an **inconclusive** verdict that names both possibilities and says
-which backend cannot separate them. It SHALL NOT present such a result as a proof awaiting
-confirmation.
+matches" from "the backend itself could not be reached", the panel SHALL render an **inconclusive**
+verdict that names **every** possibility that backend cannot separate — including its own
+unreachability — and says which backend cannot separate them. It SHALL NOT present such a result as
+a proof awaiting confirmation, and it SHALL NOT narrow the list by inferring a cause from the
+backend's output text: an inferred cause is a guess, and naming only "not yet confirmed or changed"
+raises a file-change alarm for what is most often an unreachable node.
+
+The two not-yet-confirmed proof states SHALL produce **two different verdicts**, never one: a proof
+submitted and awaiting Bitcoin confirmation, and a proof queued for stamping that has not been
+submitted at all. The verdict for the queued state SHALL NOT contain awaiting-confirmation wording,
+because there is nothing yet to await.
 
 Every list of already-anchored files SHALL render each row's **actual** notarization state. A row
 SHALL NOT be given a fixed "Anchored" badge: the badge is what an operator reads to decide whether a
@@ -70,9 +86,24 @@ asserting a fixed backend.
 
 - **WHEN** the node backend returns a not-verified, not-yet-anchored result, which on that backend
   may equally mean the file no longer matches or that the node was unreachable
-- **THEN** the panel SHALL render an inconclusive verdict naming both possibilities and stating that
-  the Bitcoin-node backend cannot tell them apart, and SHALL NOT render a "pending confirmation"
-  title or copy suggesting the result will settle on its own
+- **THEN** the panel SHALL render an inconclusive verdict naming **all three** possibilities — not
+  yet confirmed, the file no longer matching, and the node being unreachable — and stating that the
+  Bitcoin-node backend cannot tell them apart, and SHALL NOT render a "pending confirmation" title
+  or copy suggesting the result will settle on its own
+
+#### Scenario: A valid attestation is not overruled by a mismatched sibling
+
+- **WHEN** a proof carries two Bitcoin attestations for the file's current digest, one of which
+  confirms against its real block while the other does not
+- **THEN** the panel SHALL render the verified verdict, and SHALL NOT render the proof-mismatch
+  failure
+
+#### Scenario: A queued proof is not described as awaiting confirmation
+
+- **WHEN** the verified file's proof is queued for stamping and has not been submitted to a
+  calendar, with no mismatch, transport failure or inconclusive outcome on the result
+- **THEN** the verdict SHALL say the proof is queued to stamp, and SHALL NOT use the
+  awaiting-confirmation wording reserved for a submitted proof
 
 #### Scenario: A proof mismatch does not blame the file
 
@@ -214,15 +245,31 @@ harmless baseline action directly, and it SHALL require a confirmation naming wh
 re-baseline form rendered on this page SHALL carry a confirmation.
 
 Choosing what to render is not sufficient, because the collection can change between the page being
-rendered and the form being submitted. The collection-detail re-baseline endpoint SHALL therefore
-**re-check at submit time** that the collection is still in the harmless state the form was rendered
-for: it SHALL re-count the collection's modified and missing files inside the request and, if any
-exist — or if an operation is in flight that could still change that population — it SHALL refuse,
-SHALL NOT re-baseline anything, and SHALL tell the operator that the collection changed since the
-page loaded and direct them to the review view. Without that check, a scan that detects a deletion
-between render and submit turns a button confirmed as baselining new files into the deletion of
-records the operator has never seen, under a confirmation that described something else. The review
-view's own accept is unaffected: it lists the issues it is about to adopt on the same page.
+rendered and the form being submitted. **Every endpoint that re-baselines a collection SHALL be
+bound to the population its form was rendered for** — the collection-detail baseline action and the
+review view's accept alike. Neither is exempt: a rendered list is a statement about the past, so a
+scan that records another missing file after the render makes "these are the files this button will
+adopt" false, and the operator removes a record they never saw.
+
+Each such form SHALL carry a **fingerprint of the population it claims to act on**, and the endpoint
+SHALL recompute that fingerprint from the datastore and refuse unless it still matches. The
+fingerprint SHALL cover each file's identity **and** its status, SHALL be scoped so that a
+fingerprint issued for one form or one collection cannot validate another, and SHALL be computed
+over the **whole** population the action would affect rather than over any truncated list the page
+displayed. An absent or empty fingerprint SHALL be treated as a mismatch, so the check fails closed.
+
+The recomputation and the re-baseline SHALL happen **within a single write transaction**, entered
+before the recomputation reads anything it depends on, so that no concurrent scan can commit between
+the check and the mutation. A check that is merely "recount, then call the service" is not a guard:
+the recount and the deletion are separate statements, and a scan can claim, run and commit in the
+gap. An in-flight-operation check SHALL also be made, but as a secondary precaution covering the
+long window, not as the mechanism relied on for the short one.
+
+On refusal the endpoint SHALL mutate nothing — no file record removed, no baseline rewritten, no
+event acknowledged — and SHALL redirect to the review view **carrying a marker that the view
+renders as an explanation** that the collection changed since the page loaded and that the list
+shown is current. A refusal with no visible explanation is indistinguishable from a broken button
+and invites the operator to click it again.
 
 "Scan now" SHALL run the scan **asynchronously** — it SHALL start the scan in the background and
 return immediately rather than blocking the request until the scan completes, so the panel can show
@@ -247,21 +294,43 @@ one.
 
 - **WHEN** the user opens a collection whose only non-baselined files are new, a scan then records a
   file missing, and the user submits the already-rendered baseline form
-- **THEN** the endpoint SHALL refuse, SHALL NOT re-baseline or remove any file record, and SHALL
-  report that the collection changed since the page loaded, pointing at the review view
+- **THEN** the endpoint SHALL refuse, SHALL NOT re-baseline or remove any file record and SHALL
+  leave the new missing file's event unacknowledged, and SHALL redirect to the review view with the
+  marker that makes the refusal visible
+
+#### Scenario: The review view's accept is refused after its list goes stale
+
+- **WHEN** the user opens the review view listing one missing file, a scan then records a second
+  file missing, and the user submits the already-rendered accept form
+- **THEN** the endpoint SHALL refuse, SHALL NOT remove either missing file's record or acknowledge
+  either event, and SHALL redirect to the review view with the marker that makes the refusal visible
+
+#### Scenario: A refused submission is explained on the review view
+
+- **WHEN** the review view is opened with the staleness marker a refused re-baseline redirects to
+- **THEN** the view SHALL render a dismissable notice saying the collection changed since the page
+  loaded and that the list shown is current, and SHALL NOT render that notice on an ordinary visit
+  or for an unrecognized marker value
+
+#### Scenario: A submission with no fingerprint is refused
+
+- **WHEN** a re-baseline is submitted without the population fingerprint, or with an empty one
+- **THEN** the endpoint SHALL refuse and SHALL NOT re-baseline anything
 
 #### Scenario: A re-baseline is refused while an operation is in flight
 
-- **WHEN** the user submits the collection-detail re-baseline form while a scan or stamp operation
-  is running on that collection
+- **WHEN** the user submits a re-baseline form while a scan or stamp operation is running on that
+  collection
 - **THEN** the endpoint SHALL refuse rather than re-baseline against a population that is still
   changing
 
 #### Scenario: Accept changes from the review view
 
-- **WHEN** the user accepts changes from the collection's review view
+- **WHEN** the user accepts changes from the collection's review view and the population it listed
+  has not changed since the page was rendered
 - **THEN** the collection SHALL be re-baselined (new/modified → ok, missing removed, events
-  acknowledged) and the stat row + table SHALL refresh
+  acknowledged) and the stat row + table SHALL refresh — the guard SHALL NOT stand in the way of an
+  accept that is still acting on what it displayed
 
 #### Scenario: Scan now starts in the background and returns immediately
 

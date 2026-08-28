@@ -13,10 +13,10 @@ The result SHALL additionally distinguish, as separate reportable outcomes rathe
 
 - a **digest mismatch** — the supplied digest is not the one the proof commits to, i.e. the file's
   bytes changed after it was stamped. This is the event this product exists to detect;
-- a **proof mismatch** — the proof's Bitcoin attestation commits to something other than the real
-  block's merkle root. The file's bytes may be exactly what was stamped; what failed is the proof or
-  the block data used to check it, so it SHALL be reported as its own outcome and SHALL NOT be
-  reported as a digest mismatch;
+- a **proof mismatch** — **no** Bitcoin attestation in the proof commits to its real block's merkle
+  root, and at least one commits to something else. The file's bytes may be exactly what was
+  stamped; what failed is the proof or the block data used to check it, so it SHALL be reported as
+  its own outcome and SHALL NOT be reported as a digest mismatch;
 - a **transport failure** — the verification backend could not be reached, so nothing about the file
   or the proof was established. The reason SHALL be carried on the result;
 - an **inconclusive** outcome — the backend cannot distinguish "not yet anchored" from "the digest
@@ -25,11 +25,23 @@ The result SHALL additionally distinguish, as separate reportable outcomes rathe
 Callers cannot otherwise tell these apart from a proof that is merely not yet anchored, which is the
 false-negative this requirement exists to prevent.
 
+Verification SHALL be **existential over the proof's Bitcoin attestations**: a result SHALL be
+verified when **any** attestation's commitment equals its real block's merkle root, regardless of
+what the other attestations do. A mismatching attestation beside a matching one SHALL NOT make the
+result not-verified and SHALL NOT set the proof-mismatch indicator; it MAY be recorded as diagnostic
+detail on the verified result. The proof-mismatch indicator SHALL therefore be set only where no
+attestation validated. A proof legitimately carries more than one attestation, and reporting one bad
+sibling as a failed proof is a false alarm on the signal this product exists to make trustworthy.
+
 A transport failure SHALL be carried on the returned result at **every** point where the
 implementation swallows a network or subprocess failure into an otherwise ordinary return, not only
-where it raises. A result that is verified SHALL remain verified when some, but not all, of its
-attestations could be fetched — one attestation confirmed against a real block is proof — while
-still recording the transport failure that occurred.
+where it raises. This includes results whose verdict was decided by something else: a result that is
+verified, and a result carrying a proof mismatch, SHALL each still record any fetch failure that
+occurred while reaching it. A result that is verified SHALL remain verified when some, but not all,
+of its attestations could be fetched — one attestation confirmed against a real block is proof —
+while still recording the transport failure. Dropping the transport reason because another outcome
+was decided first hides the difference between "this proof is bad" and "this proof is bad as far as
+the part of it that could be checked".
 
 The explorer backend parses the proof locally and therefore knows the file digest the proof commits
 to and the commitment each attestation makes; it SHALL set the digest-mismatch and proof-mismatch
@@ -61,10 +73,25 @@ limitation of the non-default backend.
 
 #### Scenario: A merkle-root mismatch is reported as a proof mismatch, not a file mismatch
 
-- **WHEN** the explorer backend finds a Bitcoin attestation whose commitment does not equal the real
-  block's merkle root, while the supplied digest is exactly the one the proof commits to
+- **WHEN** the explorer backend finds that no Bitcoin attestation's commitment equals its real
+  block's merkle root and at least one differs, while the supplied digest is exactly the one the
+  proof commits to
 - **THEN** the result SHALL be not-verified and SHALL carry the proof-mismatch indicator, and the
   digest-mismatch indicator SHALL remain unset
+
+#### Scenario: One valid attestation outranks a mismatched sibling
+
+- **WHEN** a proof carries two Bitcoin attestations for the committed digest, one confirming against
+  its real block and one whose commitment differs
+- **THEN** the result SHALL be verified with the proof-mismatch indicator unset, and the mismatching
+  attestation MAY appear only as diagnostic detail
+
+#### Scenario: A proof mismatch alongside an unreachable fetch records both
+
+- **WHEN** the explorer backend cannot fetch the block for one attestation and finds the only
+  attestation it could fetch mismatching
+- **THEN** the result SHALL carry the proof-mismatch indicator **and** the transport failure with
+  its reason, so the fetch failure is not lost to the mismatch verdict
 
 #### Scenario: An unreachable explorer is reported as a transport failure
 
@@ -83,7 +110,8 @@ limitation of the non-default backend.
 - **WHEN** the node backend verifies a proof and `ots verify -d` reports no success
 - **THEN** the result SHALL be not-verified with both mismatch indicators unset **and** SHALL be
   marked inconclusive, because that backend cannot distinguish a mismatch from an unanchored proof
-  or from its own unreachability
+  or from its own unreachability, and it SHALL NOT infer which of those occurred from the tool's
+  output text
 
 #### Scenario: An unusable verification tool is a transport failure, not a pending proof
 
@@ -104,8 +132,13 @@ false negative live wherever the operator happens to be looking.
 A digest mismatch SHALL be reported as a failure naming that the bytes no longer match what was
 stamped. A proof mismatch SHALL be reported as a failure of the proof, not of the file. A transport
 failure SHALL be reported as verification being unavailable, with its reason, and SHALL NOT be
-reported as a pending proof. An inconclusive result SHALL name both possibilities it cannot separate.
-Every one of these SHALL exit non-zero.
+reported as a pending proof. An inconclusive result SHALL name every possibility it cannot separate,
+including the backend's own unreachability. Every one of these SHALL exit non-zero.
+
+Where none of those reasons is present, the command SHALL distinguish the two not-yet-confirmed
+proof states in the same words the panel uses: a proof awaiting Bitcoin confirmation, and a proof
+merely queued for stamping. The queued state SHALL NOT be reported with awaiting-confirmation
+wording.
 
 #### Scenario: A changed file is not reported as pending on the command line
 
@@ -118,3 +151,10 @@ Every one of these SHALL exit non-zero.
 - **WHEN** `cairn verify` receives a result carrying a transport failure or an inconclusive outcome
 - **THEN** the command SHALL report that verification could not be completed, naming the reason, and
   SHALL NOT print its pending wording
+
+#### Scenario: The command line names the queued state as queued
+
+- **WHEN** `cairn verify` receives a result whose proof is queued for stamping, with no mismatch,
+  transport failure or inconclusive outcome
+- **THEN** the command SHALL report it as queued to stamp and SHALL NOT use its
+  awaiting-confirmation wording
