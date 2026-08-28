@@ -41,6 +41,8 @@
         {% if c.counts.new > 0 %}<span class="legend__stat">{{ m.dot("var(--accent)", size=7) }}{{ c.counts.new }} new</span>{% endif %}
       {% elif c.counts.new > 0 %}
         <span class="legend__stat">{{ m.dot("var(--accent)", size=7) }}{{ c.counts.new }} new</span>
+      {% elif c.is_empty %}
+        <span class="legend__stat">{{ m.dot("var(--text-3)", size=7) }}No files indexed yet</span>
       {% else %}
         <span class="legend__stat">{{ m.dot("var(--ok)", size=7) }}All files verified</span>
       {% endif %}
@@ -54,7 +56,13 @@
       {% else %}
         <span class="text-3" style="display:inline-flex">{{ m.icon("bitcoin", size=15, cls="") }}</span>
         <span style="font-size:12px;color:var(--text-2)">
-          <strong style="color:var(--text)">{{ "{:,}".format(c.ots_counts.complete) }}</strong> anchored{% set pend = c.ots_counts.pending + c.ots_counts.incomplete %}{% if pend > 0 %}<span style="color:var(--warn)"> · {{ pend }} pending</span>{% endif %}
+          {% if c.is_empty %}
+            No files indexed yet
+          {% elif c.all_confirmed %}
+            <strong style="color:var(--text)">{{ "{:,}".format(c.ots_counts.complete_active) }}</strong> anchored · all confirmed
+          {% else %}
+            <strong style="color:var(--text)">{{ c.anchored_ratio }}</strong> anchored{% if c.pending_line %}<span style="color:var(--warn)"> · {{ c.pending_line }}</span>{% endif %}{% if c.not_stamped > 0 %}<span style="color:var(--warn)"> · {{ "{:,}".format(c.not_stamped) }} not stamped</span>{% endif %}
+          {% endif %}
         </span>
       {% endif %}
     </div>

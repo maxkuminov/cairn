@@ -38,7 +38,7 @@
             {{ m.icon("dashboard", size=18, stroke=2.1 if page == 'dashboard' else 1.8) }}
             <span class="nav-item__label">Dashboard</span>
             <span id="sidebar-alert-badge">
-              {% if alert_count and alert_count > 0 %}<span class="nav-badge">{{ alert_count }}</span>{% endif %}
+              {% if alert_count and alert_count > 0 %}<span class="nav-badge" title="{{ alert_count }} file{{ '' if alert_count == 1 else 's' }} missing or changed — open dashboard" aria-label="{{ alert_count }} file{{ '' if alert_count == 1 else 's' }} missing or changed — open dashboard">{{ alert_count }}</span>{% endif %}
             </span>
           </a>
           <a class="nav-item {% if page in ('collections', 'collection', 'addCollection') %}is-active{% endif %}" href="/collections">

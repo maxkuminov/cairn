@@ -4,5 +4,5 @@
   {% include "partials/_events_controls.html" %}
 </span>
 <span id="sidebar-alert-badge" hx-swap-oob="innerHTML">
-  {% if alert_count and alert_count > 0 %}<span class="nav-badge">{{ alert_count }}</span>{% endif %}
+  {% if alert_count and alert_count > 0 %}<span class="nav-badge" title="{{ alert_count }} file{{ '' if alert_count == 1 else 's' }} missing or changed — open dashboard" aria-label="{{ alert_count }} file{{ '' if alert_count == 1 else 's' }} missing or changed — open dashboard">{{ alert_count }}</span>{% endif %}
 </span>

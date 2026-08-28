@@ -892,3 +892,10 @@
 .mini-stat--link { display: block; text-decoration: none; color: inherit; transition: border-color 0.14s, box-shadow 0.14s; }
 .mini-stat--link:hover { border-color: var(--danger); box-shadow: var(--shadow-lg); }
 .mini-stat__cta { color: var(--danger); font-weight: 600; white-space: nowrap; }
+
+/* --- ux-audit sprint 1: tiles & links (slice B) --- */
+/* The dashboard "Open issues" tile becomes a link at issues > 0 (#18), reusing the hover treatment
+   the collection page's `.mini-stat--link` already uses so the two red stats read as one pattern. */
+.tile--link { display: block; text-decoration: none; color: inherit; transition: border-color 0.14s, box-shadow 0.14s; }
+.tile--link:hover { border-color: var(--danger); box-shadow: var(--shadow-lg); }
+.tile__cta { color: var(--danger); font-weight: 600; white-space: nowrap; }
