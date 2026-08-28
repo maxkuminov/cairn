@@ -164,7 +164,8 @@ asserting a fixed backend.
 
 The dashboard SHALL show summary tiles, a per-collection card for each collection, and a
 recent-events feed. Unacknowledged events SHALL offer a "mark reviewed" action that, on use, removes
-the call-to-action and decrements the open-issue counts without a full page reload.
+the call-to-action and decrements the unreviewed-event count — the count of events awaiting a
+reading, not the file-derived issue counts — without a full page reload.
 
 The vocabulary SHALL distinguish the two state machines the panel tracks. Marking an event reviewed
 writes only to the reading log: the file's own state is unchanged, so the collection's status and
@@ -256,17 +257,27 @@ Status indicators SHALL use visually distinct icons for the "attention" and "ale
 ### Requirement: Accept and scan actions are available from the panel
 
 The collection detail page SHALL offer "Scan now", and SHALL offer a re-baseline action only in the
-state where that action is harmless. Both mutate via the existing services and refresh the affected
-view without a full reload.
+state where that action is harmless. Both mutate via the existing services and leave the operator on
+an up-to-date view of the collection; the re-baseline action MAY do so by an ordinary form
+submission followed by a redirect to a freshly rendered page rather than an in-place refresh.
 
 Re-baselining is irreversible: it rewrites the expected version of modified files and removes the
 records of missing ones. The collection detail page SHALL NOT present it as the page's primary
 action while the collection has missing or modified files. In that state the primary action SHALL be
 a link to the review view, which explains the choice between noting a change and adopting it; the
 re-baseline action SHALL be reachable only from there. When the collection has no missing or
-modified files but does have files that are merely not yet baselined, the page MAY offer that
-harmless baseline action directly, and it SHALL require a confirmation naming what it will do. Any
-re-baseline form rendered on this page SHALL carry a confirmation.
+modified files, **no open (unreviewed) events**, and does have files that are merely not yet
+baselined, the page MAY offer that harmless baseline action directly, and it SHALL require a
+confirmation naming what it will do. Any re-baseline form rendered on this page SHALL carry a
+confirmation.
+
+Both conditions are required because the re-baseline verb acts on two populations: it promotes
+not-yet-baselined files **and** it marks every open event on the collection reviewed. A file that
+was missing and has since been restored is healthy again while its alert remains open, so a
+collection can have no missing or modified files and still have an unread alert; offering the
+"harmless" baseline action there would clear that alert behind a confirmation that describes only a
+new-file promotion. Where the collection has open events, the primary action SHALL remain the link
+to the review view, which is where those events can be read and cleared deliberately.
 
 Choosing what to render is not sufficient, because the collection can change between the page being
 rendered and the form being submitted. **Every endpoint that re-baselines a collection SHALL be
@@ -279,11 +290,16 @@ Each such form SHALL carry a **fingerprint of the population it claims to act on
 SHALL recompute that fingerprint from the datastore and refuse unless it still matches.
 
 The fingerprint SHALL identify each file by a **durable identity, not by a row identifier alone**:
-it SHALL cover the file's path and its status, and its content digest wherever one is recorded, in
-addition to its row identifier. A row identifier can be reused by the datastore after the row it
-named is deleted, so a fingerprint built from identifiers and statuses alone can match a population
-that shares no file with the one the form was rendered for — precisely the replay this guard exists
-to prevent. For the same reason the fingerprint SHALL be scoped by the collection's creation time as
+it SHALL cover the file's path and its status, its content digest wherever one is recorded, and the
+time the record itself was created, in addition to its row identifier. A row identifier can be
+reused by the datastore after the row it named is deleted, so a fingerprint built from identifiers
+and statuses alone can match a population that shares no file with the one the form was rendered for
+— precisely the replay this guard exists to prevent. The record's creation time is what separates
+one **generation** of a record from the next: a file record removed by an accept and later
+re-created at the same path with the same content — even reusing the freed identifier — is a
+different record that the operator has never been shown, and it SHALL NOT validate a form minted for
+its predecessor. That creation time SHALL be set when the record is inserted and SHALL NOT be
+rewritten while the record survives. For the same reason the fingerprint SHALL be scoped by the collection's creation time as
 well as its identifier, so that a recreated collection reusing an identifier cannot validate a
 fingerprint issued for its predecessor. The fingerprint SHALL also be scoped so that a fingerprint
 issued for one form cannot validate another, and its encoding SHALL be unambiguous for every legal
@@ -295,6 +311,16 @@ any truncated list the page displayed: for the review view's accept, the collect
 with the assertion that the collection has no missing or modified files. An absent or empty
 fingerprint SHALL be treated as a mismatch, so the check fails closed.
 
+Because the same verb also marks every open event on the collection reviewed, the fingerprint SHALL
+additionally cover the collection's **count of open (unreviewed) events**, recomputed inside the
+same guarded transaction as the file records, and a change in that count between render and submit
+SHALL be a refusal. Without it a form can be validated by a population that has returned to its
+rendered value while an alert the operator never saw is silently cleared: a file may be recorded
+modified, then missing, then restored between render and submit, leaving the protected file set
+exactly as rendered while its alert stays open by design. For the collection-detail baseline action
+that count SHALL be zero, and the fingerprint SHALL carry that zero assertion, so the action cannot
+clear an alert behind a confirmation that promises only a new-file promotion.
+
 The review view's accept also promotes files that are merely **not yet baselined**, and that set is
 deliberately **outside** the fingerprint: a new file appearing between render and submit SHALL NOT
 cause a refusal, and SHALL be baselined by the accept along with the rest. This is an accepted
@@ -302,7 +328,9 @@ limitation, not an oversight. The guard's purpose is the *destructive* half — 
 accept removes and the alerts it clears — and a collection that is actively growing (a scan every
 few minutes adding photos) would otherwise refuse every accept over a promotion that deletes
 nothing, which would train the operator to work around the guard. Narrowing the re-baseline verb so
-it acts only on what was displayed is separate work.
+it acts only on what was displayed is separate work. The open-event term does not reintroduce that
+refusal: events recording a merely-added file are written already reviewed, so a file first seen
+between render and submit does not change the collection's open-event count.
 
 The recomputation and the re-baseline SHALL happen **within a single write transaction**, entered
 before the recomputation reads anything it depends on, so that no concurrent scan can commit between
@@ -340,10 +368,18 @@ one.
 
 #### Scenario: Baselining new files is offered, and confirmed
 
-- **WHEN** the user opens a collection with no missing or modified files but with files not yet
-  baselined
+- **WHEN** the user opens a collection with no missing or modified files, no open events, but with
+  files not yet baselined
 - **THEN** the page MAY offer a baseline action, which SHALL require a confirmation before
   submitting
+
+#### Scenario: The baseline action is withheld while an alert is unread
+
+- **WHEN** the user opens a collection that has files not yet baselined and no missing or modified
+  files, but still has an open event — a file that was missing and has since been restored
+- **THEN** the page SHALL NOT offer the baseline action, and SHALL offer the review view link as its
+  primary action instead, so the outstanding alert is read on the view that shows it rather than
+  cleared by a new-file promotion
 
 #### Scenario: A stale baseline form is refused after the collection changes
 
@@ -381,6 +417,26 @@ one.
 - **THEN** the endpoint SHALL refuse, SHALL NOT remove the replacement file's record or acknowledge
   its event, and SHALL redirect to the review view with the staleness marker — a reused identifier
   SHALL NOT be sufficient for a fingerprint to still match
+
+#### Scenario: An unchanged file set does not validate a form once a new alert exists
+
+- **WHEN** the review view is rendered for a collection, a *different* file is then recorded
+  modified, recorded missing, and restored — so the collection's missing + modified set returns to
+  exactly the set the form was rendered for while that file's alert remains open — and the operator
+  submits the already-rendered accept form
+- **THEN** the endpoint SHALL refuse, SHALL NOT acknowledge the newly opened event, SHALL NOT remove
+  any file record, and SHALL redirect to the review view with the staleness marker
+
+#### Scenario: A re-created record does not validate a form minted for its predecessor
+
+- **WHEN** an accept-family form is rendered listing a missing file, that record is then removed and
+  a file is re-created at the **same path with the same content**, whose new record reuses the
+  removed record's identifier and is itself recorded missing, and the operator submits the
+  originally rendered form
+- **THEN** the endpoint SHALL refuse, SHALL NOT remove the re-created record or acknowledge its
+  event, and SHALL redirect to the review view with the staleness marker — an identical path,
+  digest and identifier SHALL NOT be sufficient for a fingerprint to still match across record
+  generations
 
 #### Scenario: A recreated collection does not validate its predecessor's fingerprint
 
@@ -451,8 +507,10 @@ each `missing` file and each WORM `modified` file for the collection, and for ea
 happened (missing vs modified) with its last-seen / detected time, its size, and whether the file
 was notarized. The review view SHALL let the operator mark an individual file's event reviewed, mark
 all of the collection's open events reviewed, and accept (re-baseline) the collection, reusing the
-existing acknowledge/accept behavior and refreshing the "need action" count and sidebar alert badge
-in place without a full page reload. The review view SHALL provide **recovery guidance that assumes
+existing acknowledge/accept behavior. Marking one or all events reviewed SHALL refresh the "need
+action" count and the sidebar alert badge in place without a full page reload; the accept
+(re-baseline) action MAY instead complete as an ordinary form submission followed by a redirect to a
+freshly rendered review view. The review view SHALL provide **recovery guidance that assumes
 no particular backup tool**: a copyable list of the affected file paths and tool-neutral recovery
 instructions; for files that were notarized it SHALL note that their OpenTimestamps proof of prior
 existence survives. All review and recovery actions SHALL be scoped to the current user's own

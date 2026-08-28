@@ -227,16 +227,25 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
 - [ ] 3.9 `collection_detail.html:26-38`: when `c.issues > 0`, **remove the Accept form from the
   header** and make "Review issues" the `btn--primary` (design D7). The destructive path is reachable
   only from the page that explains it.
-- [ ] 3.10 When `c.issues == 0 and c.counts.new > 0`, keep **"Baseline new files"** with an
-  `onsubmit` light confirm naming the count. When both are zero, render neither.
+- [ ] 3.10 When `c.issues == 0` **and the collection's open-event count is 0** and `c.counts.new >
+  0`, keep **"Baseline new files"** with an `onsubmit` light confirm naming the count. With
+  `issues == 0` but open events outstanding, render **"Review issues"** as the primary action and no
+  baseline form (design D7): `accept_collection` also acknowledges every open event, so a restored
+  file's unread alert would otherwise be cleared under a confirm that promises only a new-file
+  promotion. When issues, open events and `new` are all zero, render neither. The count is the same
+  `acknowledged_at IS NULL` count the D14 fingerprint hashes — compute it once in
+  `_collection_view` and reuse it, so the render gate and the guard can never disagree.
 - [ ] 3.11 `routes.py`: add the shared **population fingerprint** guard (design D14) and apply it to
   `collection_accept`. New `async def _population_fingerprint(session, collection, scope) -> str`
   (it takes the `Collection` row `_get_owned_collection` already loaded, because the collection's
   `created_at` is part of the preimage) returning the hex SHA-256 of design D14's **canonical
   encoding**, over the population that scope names: header
-  `f"{scope}\x1f{collection.id}\x1f{collection.created_at.isoformat()}"` (plus `f"\x1fissues={n}"`
-  for `baseline-new` only — the zero-issue assertion hashed *inside* the fingerprint), then one
-  record per file `f"{id}\x1f{len(relpath.encode())}\x1f{relpath}\x1f{status}\x1f{sha256 or ''}"`,
+  `f"{scope}\x1f{collection.id}\x1f{collection.created_at.isoformat()}\x1fopen_events={k}"` — where
+  `k` is `select(func.count()).select_from(Event).where(Event.collection_id == collection.id,
+  Event.acknowledged_at.is_(None))`, read in the **same** transaction as the file rows — plus
+  `f"\x1fissues={n}"` for `baseline-new` only (that scope's two zero assertions, `issues == 0` and
+  `open_events == 0`, are hashed *inside* the fingerprint), then one record per file
+  `f"{id}\x1f{len(relpath.encode())}\x1f{relpath}\x1f{status}\x1f{sha256 or ''}\x1f{first_seen.isoformat() if first_seen else ''}"`,
   records sorted by `relpath` and joined with `\x1e`, the whole preimage UTF-8 encoded.
   `baseline-new` hashes the collection's `new` files; `review-accept` (3.12) its `missing` +
   `modified` files. **`relpath` and `sha256` are load-bearing, not decoration:** `files.id` /
@@ -244,16 +253,26 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   deleted row's id to a later insert — an id-and-status-only preimage is byte-identical for two
   populations sharing no file, and the old form would then delete a record the operator never saw.
   `relpath` pins the logical file, `sha256` (empty string when NULL) pins the content generation,
-  and the collection's `created_at` does the same job for a recreated collection reusing its id. The
+  **`first_seen` pins the row generation** — it is `NOT NULL`, written at row insertion and never
+  rewritten in place, so a row deleted by an accept and re-created at the *same path with the same
+  digest* on the *same reused id* still encodes differently and cannot validate the stale form —
+  and the collection's `created_at` does the same job for a recreated collection reusing its id.
+  **`open_events` is the third population:** `accept_collection` acknowledges every open event, and
+  that set is not derivable from the file rows (a modified → missing → restored file returns the
+  protected set to its rendered value while its alert stays open), so a change in the count between
+  render and submit is a refusal. `added`/`restored`/`moved` events are born acknowledged, so the
+  term does not defeat the documented `new`-set exception. The
   byte-length prefix on `relpath` keeps the encoding unambiguous for paths containing `\x1f`/`\x1e`.
   Sort by `relpath` (unique per collection), never by `id`. One `select(FileEntry.id,
-  FileEntry.relpath, FileEntry.status, FileEntry.sha256)` — every column is already on the entity
-  `query_files` / `collection_review` select, so this adds no join.
+  FileEntry.relpath, FileEntry.status, FileEntry.sha256, FileEntry.first_seen)` plus the one
+  `count()` over `Event` — every column is already on the entity `query_files` /
+  `collection_review` select, so this adds no join.
   `collection_detail.html` renders it as a hidden `population_fp` input in
   the baseline form. The POST then, **in one write transaction**: (1) takes the write lock first with
   a no-op write on the collection's own row (`UPDATE collections SET name = name WHERE id = :id`) —
-  SQLite holds that lock until commit, so nothing can interleave; (2) recomputes the fingerprint and
-  re-asserts `issues == 0`; (3) compares — an absent or empty field is a **mismatch** (fail closed);
+  SQLite holds that lock until commit, so nothing can interleave; (2) recomputes the fingerprint —
+  file rows *and* the open-event count read inside this transaction — and re-asserts `issues == 0`
+  and `open_events == 0`; (3) compares — an absent or empty field is a **mismatch** (fail closed);
   (4) only then calls `accept_collection`, whose own `commit()` closes the same transaction. Keep the
   `collections_svc.active_run()` check as belt-and-braces for the long window. On any refusal:
   **no mutation**, 303 to `/collection/{id}/review?stale=1`. A recount that is not inside the
@@ -261,7 +280,8 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   recount statement and the accept's first `DELETE`.
 - [ ] 3.12 `routes.py`: the **review page's accept is guarded by the same mechanism** (design D14).
   `collection_review` publishes `population_fp` (scope `review-accept`, hashed over the collection's
-  **entire** `missing + modified` set in SQL — *not* the `REVIEW_ROW_LIMIT`-capped rendered rows, and
+  **entire** `missing + modified` set in SQL plus the header's `open_events` count — *not* the
+  `REVIEW_ROW_LIMIT`-capped rendered rows, and
   deliberately **not** the `new` set the same accept promotes: that exclusion is the documented
   accepted limitation (design D14, stated normatively in the delta), so do not "complete" the
   fingerprint by folding `new` in — it would refuse every accept on a collection that scans every
@@ -311,7 +331,15 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   delete the missing row, insert a *different* `relpath` that reuses the freed id (set it explicitly)
   and mark it `missing` — the already-rendered `population_fp` is refused and the replacement row
   survives; do the same for a collection deleted and recreated on the same `collection_id` with a
-  new `created_at`. **The `new`-set exception (design D14 / the delta's accepted limitation):** add a
+  new `created_at`. **Row generation:** the harder variant — delete the missing row and reinsert
+  **the same `relpath` with the same `sha256` on the same reused `id`**, marked `missing`, differing
+  only in `first_seen`; the stale form is refused and the replacement row survives (this is the case
+  `id + relpath + status + sha256` alone cannot see). **ABA on the event population:** with the
+  protected file set returned to exactly its rendered value (take a *second* file `modified`, then
+  `missing`, then restore it to `ok`, leaving its `modified` event open), the already-rendered
+  `population_fp` is refused on both routes and that event is **still unacknowledged** afterwards;
+  and the detail page renders **no** baseline form for a collection with zero issues, a non-zero
+  `new` count and one open event (design D7). **The `new`-set exception (design D14 / the delta's accepted limitation):** add a
   not-yet-baselined file between render and POST on `/collection/{id}/review/accept` and assert the
   accept **succeeds** and promotes it — the guard must not refuse on a growing collection. Assert the
   *absence* of mutation on every refusal, not just the status code — a guard that redirects and still
@@ -474,8 +502,10 @@ mobile section), new `tests/test_ux_docs.py`.
   backend path that could still return a normal-looking result for an unreachable explorer or node;
   the restore ack's placement inside `_drain`'s transaction and its `kind` scoping; **the D14
   fingerprint guard on both accept-family routes — whether the recount and the accept really share
-  one write transaction, whether any interleaving still deletes an unseen `missing` row, and whether
-  the fingerprint can be replayed across forms or collections**; and every place a completeness claim
+  one write transaction, whether any interleaving still deletes an unseen `missing` row or clears an
+  unseen alert, whether the fingerprint can be replayed across forms, collections or **record
+  generations** (same path, same digest, reused id), and whether every population
+  `accept_collection` mutates is bound by it**; and every place a completeness claim
   is now conditional (including the perfile-only fleet-wide population). Tell it explicitly that
   OpenTimestamps verification is existential — one valid attestation is proof — so a *false mismatch*
   is as expensive here as a false clean bill.

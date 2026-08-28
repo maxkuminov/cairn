@@ -128,8 +128,10 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
   clear" they share).
 - **The collection-detail header stops offering Accept while there are issues.** When `issues > 0`,
   **Review issues** is the `btn--primary` and Accept is not in the header at all — the destructive
-  path is reachable only from the page that explains it. When `issues == 0 and new > 0`, the
-  harmless **Baseline new files** button stays, with a light confirm. Any remaining Accept form
+  path is reachable only from the page that explains it. When `issues == 0`, **no open events** and
+  `new > 0`, the harmless **Baseline new files** button stays, with a light confirm — both zeroes
+  are required, because the same verb also clears every open alert, and a restored file leaves one
+  open while the file set reads clean. Any remaining Accept form
   carries a confirm.
 - **Both accept-family routes are bound to the population their form was rendered for.** Each form
   carries a hidden **population fingerprint**; the POST recomputes it *inside the same write
@@ -140,8 +142,11 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
   The **review page is not exempt**: its list is a render, so a scan landing after it makes "exactly
   what you see below" false and the operator deletes a record they never saw. `active_run()` stays,
   demoted to belt-and-braces for the long window. The fingerprint identifies each file by path,
-  status and digest — not by row id alone, which SQLite reuses after a delete — and being unable to
-  take the write lock is itself a refusal, never a 500. **One deliberate exception:** the review
+  status, digest and `first_seen` — not by row id alone, which SQLite reuses after a delete, and not
+  by content alone, so a same-path/same-bytes record re-created on a reused id is a different
+  generation the stale form cannot validate — and it binds the collection's **open-event count**,
+  the other population the verb mutates. Being unable to take the write lock is itself a refusal,
+  never a 500. **One deliberate exception:** the review
   accept's fingerprint covers only the *protected* `missing` + `modified` population, so a
   not-yet-baselined file that appears between render and submit is still adopted rather than
   refusing the accept — guarding the harmless promotion too would refuse every accept on an actively

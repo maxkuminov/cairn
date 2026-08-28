@@ -253,13 +253,29 @@ Per #14, with the header's button set made explicit so no state is left ambiguou
 | State | Header buttons (left → right) |
 |---|---|
 | `issues > 0` | Edit · Scan now · Stamp all · **Review issues (`btn--primary`)** — no Accept |
-| `issues == 0 and new > 0` | Edit · Scan now · Stamp all · **Baseline new files (`btn--primary`, `onsubmit` confirm)** |
-| `issues == 0 and new == 0` | Edit · Scan now · Stamp all |
+| `issues == 0 and open_events > 0` | Edit · Scan now · Stamp all · **Review issues (`btn--primary`)** — no Accept |
+| `issues == 0 and open_events == 0 and new > 0` | Edit · Scan now · Stamp all · **Baseline new files (`btn--primary`, `onsubmit` confirm)** |
+| `issues == 0 and open_events == 0 and new == 0` | Edit · Scan now · Stamp all |
 
 "Baseline new files" keeps `btn--primary` because in that state it is the only call to action and it
 is harmless (`new → ok`, no deletion, no baseline rewrite). Its confirm is deliberately *light*
 ("Baseline N new files as the expected version?") — a heavy warning on a harmless action trains the
 operator to click through the heavy warning on the destructive one.
+
+**"Harmless" is a claim about two populations, so the gate tests both.** `accept_collection` is one
+unscoped verb: it promotes `new → ok` *and* acknowledges every open event on the collection. Zero
+issues alone does not make it harmless — a file that went `missing` and has since been restored is
+back to `ok` while its alert stays open (D9's restored-but-unreviewed state), so a collection can
+read `issues == 0` with a real, unread alert outstanding. Offering "Baseline new files" there would
+clear that alert under a light confirm describing a new-file promotion. Hence the button renders
+**only when `issues == 0` and the open-event count is 0**, and both zeroes are asserted inside the
+D14 fingerprint rather than only at render time.
+
+That gate does not strand the restored-file case: its outlet is the review page, which this same
+change makes reachable whenever the collection has open events regardless of file state (#22 / D9) —
+the operator marks the restored file's event reviewed there, the open-event count falls to zero, and
+"Baseline new files" appears on the next detail-page render. The clearing of an alert stays on the
+page that shows the operator what they are clearing.
 
 **The destructive Accept survives only on the review page**, where the contrast card explains it and
 its `onsubmit` confirm already exists. The side benefit #14 notes holds: a deletion landing between
@@ -478,16 +494,18 @@ canonical description of the population that button claims to act on.
 
 | Form | Scope tag | Population hashed |
 |---|---|---|
-| detail-page **Baseline new files** | `baseline-new` | `issues=<missing+modified count>` (zero whenever this form is rendered at all — the zero-issue assertion travels *inside* the hash) then the collection's `new` files |
-| review-page **Accept all changes** | `review-accept` | the collection's `missing` + `modified` files |
+| detail-page **Baseline new files** | `baseline-new` | `open_events=<open event count>` (zero whenever this form is rendered at all) + `issues=<missing+modified count>` (likewise zero — both assertions travel *inside* the hash) then the collection's `new` files |
+| review-page **Accept all changes** | `review-accept` | `open_events=<open event count>` + the collection's `missing` + `modified` files |
 
 *Canonical encoding.* Two ASCII control characters do the framing: **US** = `\x1f` between fields,
 **RS** = `\x1e` between records.
 
-- **Header** — `f"{scope}\x1f{collection_id}\x1f{collection.created_at.isoformat()}"`, and for
-  `baseline-new` only, a further `f"\x1fissues={n}"`.
+- **Header** —
+  `f"{scope}\x1f{collection_id}\x1f{collection.created_at.isoformat()}\x1fopen_events={k}"`, where
+  `k` is the count of the collection's events with `acknowledged_at IS NULL`; and for `baseline-new`
+  only, a further `f"\x1fissues={n}"`.
 - **One record per file** —
-  `f"{id}\x1f{len(relpath.encode('utf-8'))}\x1f{relpath}\x1f{status}\x1f{sha256 or ''}"`.
+  `f"{id}\x1f{len(relpath.encode('utf-8'))}\x1f{relpath}\x1f{status}\x1f{sha256 or ''}\x1f{first_seen.isoformat() if first_seen else ''}"`.
 - **Order** — records sorted by `relpath`, which is unique within a collection
   (the ORM's `uq_files_collection_relpath` unique constraint on `(collection_id, relpath)`), so the
   order is total and deterministic.
@@ -509,15 +527,41 @@ set. **`relpath` and `sha256` are there because a SQLite integer id is not a dur
 delete SQLite may hand the freed rowid to the next insert: an accept deletes the highest-id `missing`
 row, a later scan inserts a different file that reuses that id, and a scan marks it `missing` again —
 and an id-and-status-only preimage is byte-identical for two populations that share no file. Adding
-`relpath` pins the *logical file* (the unique key within the collection) and `sha256` pins the
+`relpath` pins the *logical file* (the unique key within the collection), `sha256` pins the
 *content generation* (a same-path file restamped with different bytes is a different record to
-accept). Both are already loaded wherever the guard runs: `collection_review` and `query_files` both
+accept), and **`first_seen` pins the *row generation***. `first_seen` is `NOT NULL` and is written
+**at row insertion** (the scanner sets it on first sight; `_reconcile_moves` deliberately carries it
+across a rename precisely because it is the row's birth mark) and is never rewritten in place — so
+the one case `id + relpath + sha256` cannot separate is separated: an accept deletes
+`archive/a.pdf` (id 17, digest D), the identical bytes are restored at the same path, a scan inserts
+a fresh row that reuses the freed rowid 17 and a later scan marks it `missing` again. Every other
+field of that record is byte-identical to the stale form's, and without `first_seen` that form would
+validate and delete a generation of the record the operator never saw. All three are already loaded
+wherever the guard runs: `collection_review` and `query_files` both
 select whole `FileEntry` entities, so the columns are on the ORM object and the fingerprint's own
 `SELECT` adds no join and no new column. A NULL `sha256` (an unhashed row) encodes as the empty
 string and simply contributes no content pinning — `id + relpath + status` still pin the logical
 file. The collection's own `created_at` (NOT NULL; `_get_owned_collection` already loads the whole
 row) does the same job one level up: a deleted-and-recreated collection that reuses `collection_id`
 gets a different creation timestamp, so an old fingerprint cannot validate against the replacement.
+(`first_seen` is a `datetime` that is never NULL on a stored row; it is encoded defensively as the
+empty string if it ever reads NULL, which contributes no generation pinning rather than raising.)
+
+*The event population is inside the guard too, by count.* `accept_collection` does not only touch
+file rows — it acknowledges **every open event on the collection**, and that population is not
+derivable from the file rows. A file can go `modified`, then `missing`, then be restored between
+render and submit: its status returns to `ok` (so the protected `missing` + `modified` set can come
+back to exactly what the form was rendered for) while its `modified` event stays open by design —
+D9's restored-but-unreviewed state. Without an event term the fingerprint matches and the accept
+silently clears an alert that was never on the rendered page. So the header carries
+`open_events=<the collection's count of events with an unset acknowledgement>`, computed by the
+same helper on both sides: at **mint** while the page is rendered, and at **check** inside the
+write-locked transaction, in the same read snapshot as the file rows — so the whole preimage
+describes one consistent state and any change in that count between render and submit is a refusal.
+A count rather than per-event identity is the right granularity because the acknowledgement is
+all-or-nothing (`accept_collection` clears the whole open set): the count changes whenever the set
+does — an event opening, an event being acknowledged in another tab — and no ABA is reachable
+without a scan committing in between, which the write lock already serializes against.
 
 The review page's fingerprint is computed **over the whole protected population in SQL, not over the
 rendered rows**: the list is capped at `REVIEW_ROW_LIMIT` (500) while accept acts on all of it, so hashing
@@ -531,7 +575,8 @@ transaction** and does both inside it:
    the collection's own row (`UPDATE collections SET name = name WHERE id = :id`). SQLite escalates
    a transaction to a writer on its first write statement and holds that lock until commit or
    rollback, so from here no other connection can commit anything;
-2. recompute the fingerprint (and, for the detail form, re-assert `issues == 0`);
+2. recompute the fingerprint — file rows **and** the open-event count read inside this
+   transaction — and, for the detail form, re-assert `issues == 0` and `open_events == 0`;
 3. compare it with the submitted value — an absent or empty field counts as a mismatch, so the
    guard **fails closed**;
 4. only on a match, call `accept_collection(session, …)`, whose own trailing `commit()` is this
@@ -574,15 +619,26 @@ changed since the page loaded — the list below is current."* A bare redirect w
 on an ordinary review page with no account of why their click did nothing, which reads as a broken
 button and invites them to click it again.
 
-*Accepted limitation.* `accept_collection` also promotes every `new` file to `ok` and acknowledges
-every open event, and the review form's fingerprint does not cover the `new` set — so new files that
+*Coverage, stated plainly.* `accept_collection` mutates three populations, and the guard now binds
+each of them: the **file rows it deletes and rewrites**, by identity *and* generation
+(`id + relpath + status + sha256 + first_seen`); the **event population it acknowledges**, by count
+(`open_events=` in the header); and the **`new` set it promotes**, which is the one deliberate,
+disclosed exception below. There is no fourth thing the verb touches.
+
+*Accepted limitation.* The review form's fingerprint does not cover the `new` set — so new files that
 appear between render and submit are still adopted by a review-page accept. That is today's unscoped
 verb, unchanged. The fingerprint's job here is the **destructive** half: the `missing` rows accept
 deletes and the alerts it clears. Covering the `new` set as well would refuse an accept on any
 actively-growing collection (Photos scans every 15 minutes) for a promotion that deletes nothing —
 the wrong trade. Scoping the verb properly is #16. The spec delta is narrowed to match: what the
 review form's fingerprint SHALL cover is the collection's whole **protected** population — its
-untruncated `missing` + `modified` set — and the `new` set's exclusion is written there as an
-explicit accepted limitation rather than left as a contradiction of a broader "whole population"
-SHALL. (The detail page's baseline form is unaffected: its population *is* the `new` set, and it
-covers all of it plus the zero-issue assertion.)
+untruncated `missing` + `modified` set plus its open-event count — and the `new` set's exclusion is
+written there as an explicit accepted limitation rather than left as a contradiction of a broader
+"whole population" SHALL. (The detail page's baseline form is unaffected: its population *is* the
+`new` set, and it covers all of it plus the zero-issue and zero-open-event assertions.)
+
+The `open_events` term does **not** quietly re-close that exception: `streamline-event-acknowledgement`
+has the scanner write `added` (and `restored` / `moved`) events **already acknowledged**, so a file
+first seen between render and submit leaves the open-event count untouched. The count moves only for
+the kinds that actually alarm — a new `missing`, or a WORM `modified` — which is exactly the
+population the guard is meant to bind.
