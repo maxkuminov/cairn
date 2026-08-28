@@ -15,8 +15,13 @@ Standing guardrails for every slice:
 - **Honour `proposal.md`'s Non-goals and #12's "Do NOT implement these".** In particular: no
   `files.status = 'gone'` (rejected fix 3); no blanket `WHERE file_id = …` acknowledgement
   (rejected fix 7 — the restore ack keeps its `kind='missing'` scoping); no proof is ever deleted,
-  including a superseded one; no per-file accept, no accept re-scoping, no `/review` fleet page.
+  including a superseded one, and no preserved proof is ever overwritten or discarded — not even for
+  a duplicate digest (design D1, "Archive collision"); no per-file accept, no accept re-scoping, no
+  `/review` fleet page.
 - **Do not bundle findings from other audit issues.** Sprints 2 and 3 are sequenced on purpose.
+- **Every proof-mutating entry point runs under the collection's operation claim** (design D10). Do
+  not add a lock inside `_place_proof`, `stamp_pending` or `upgrade_incomplete` — the claim wraps
+  them from the caller, and those functions are called from callers that already hold one.
 - **`ots_digest` is never filled from an *uncorroborated* read of the proof** (design D2). Only
   placement, corroborated adoption, and the corroborated fill in the daily upgrade pass (design D3)
   write it — and the latter two only when the parsed proof digest equals the row's `sha256`. No
@@ -36,11 +41,20 @@ Standing guardrails for every slice:
     task 2.11a); no table rebuild.
   - `events.kind` CHECK widened to include `restored_changed`, via `op.batch_alter_table("events")`
     — mirror `0005_rename_detection.py` exactly (it did the same rebuild on the same table).
-  - A `downgrade()` that reverses both.
+  - A `downgrade()` that reverses both — **and refuses rather than losing evidence**: it SHALL first
+    `SELECT count(*) FROM events WHERE kind='restored_changed'` and, if non-zero, raise with a
+    message naming the kind and the count and telling the operator to export or deliberately
+    re-classify those events before downgrading. It must NOT delete them and must NOT rewrite them to
+    `modified` (design D4a). With no such rows it narrows the CHECK and drops `ots_digest` normally.
 - [ ] 1.4 `src/models/db.py`: add `FileEntry.ots_digest: Mapped[str | None] =
   mapped_column(String(64))` with a docstring/comment stating it records **the digest the proof
   Cairn placed at `ots_path` commits to**, written with `ots_path`/`ots_state` and cleared with
   them; and extend `ck_events_kind` to `('added','modified','missing','restored','moved','restored_changed')`.
+- [ ] 1.4a Test the migration against a **populated** database: apply `0011`, insert a
+  `restored_changed` event, run `alembic downgrade` and assert it **fails** with the count-naming
+  error and that every table is untouched (no event deleted or re-kinded); then delete that event and
+  assert the downgrade succeeds, restoring the old CHECK and dropping `files.ots_digest` while
+  preserving every other row. Lives with shared prep because shared prep owns the migration.
 - [ ] 1.5 Baseline the gates so slice failures are attributable: `PYTHONPATH=. pytest -q` and
   `ruff check .` green, and `alembic upgrade head` clean against a scratch DB.
 - [ ] 1.6 Commit shared prep on the base branch **before** creating any worktree — agent worktrees
@@ -48,9 +62,10 @@ Standing guardrails for every slice:
 
 ## 2. Slice A — a stamp never destroys a proof, and each proof records its digest (#15, D1 IOU)
 
-Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify_run`,
-`src/cli.py::_cmd_verify`, `templates/partials/verify_result.html`, `tests/test_ots.py`, new
-`tests/test_proof_preservation.py`.
+Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify_run`, `src/cli.py`
+(`_cmd_verify`, `_cmd_stamp`, `_cmd_upgrade`, and `_cmd_scan`'s refusal line only),
+`src/services/scheduler.py` (claim audit only), `templates/partials/verify_result.html`,
+`tests/test_ots.py`, new `tests/test_proof_preservation.py`, new `tests/test_proof_serialization.py`.
 
 ### Proof reading
 
@@ -66,20 +81,30 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   `<proof_store>/.superseded/<collection_id>/<digest[:2]>/<digest>.ots`, and
   `…/<collection_id>/unknown/<uuid>.ots` for an unreadable proof. Names are **fixed-length**: no
   watched filename may influence archive path length (design D1), so the archive can never trip
-  `ENAMETOOLONG` and `_proof_output_writable` keeps applying only to the canonical path.
+  `ENAMETOOLONG` and `_proof_output_writable` keeps applying only to the canonical path. On a taken
+  name the builder yields `<digest>.1.ots`, `<digest>.2.ots`, … — the first free index (design D1,
+  "Archive collision").
 - [ ] 2.3 `_place_proof`: when the canonical output path is **unoccupied**, behave exactly as today
   (`mkdir` + `os.replace`, same ENAMETOOLONG-permanent / everything-else-transient classification).
   This is the only path an ordinary new-file stamp takes; do not add cost to it beyond one `stat`.
-- [ ] 2.4 `_place_proof`: when the canonical path **is** occupied, apply the four-way rule (design
-  D1 table): same digest + complete → **keep existing, discard staged**; same digest + incomplete →
-  archive then place; different digest → archive under its digest then place; unreadable → archive
-  under `unknown/` then place.
+- [ ] 2.4 `_place_proof`: when the canonical path **is** occupied, apply the placement rule (design
+  D1 table): same digest + complete + anchor not disproven → **keep existing, discard staged**; same
+  digest + complete + **anchor disproven by the caller** → archive then place; same digest +
+  incomplete → archive then place; different digest → archive under its digest then place;
+  unreadable → archive under `unknown/` then place. `_place_proof` stays **offline** — it takes the
+  caller's disproven verdict as an argument (default: no verdict) rather than reaching the network,
+  so a forged syntactic attestation cannot hold the canonical path (design D1a).
 - [ ] 2.5 `_place_proof`: **archive first, place second** — never the reverse. A failure to archive
   **refuses the placement** and raises a **transient** `OtsError` (the member stays `pending`; it is
   never dropped to `none`, because archiving is not the final output path — see `ots.py`'s module
   docstring rule, which must not be contradicted).
-- [ ] 2.6 `_place_proof`: if the archive target already exists, **discard the incoming duplicate,
-  do not overwrite** (design D1: the earlier-archived proof for a digest is the stronger claim).
+- [ ] 2.6 `_place_proof`: the archive **never discards and never overwrites**. If the archive target
+  exists, preserve under the next free monotonic suffix so **both** proofs survive (design D1 —
+  strength comparison is a judgement the archive must not make; the earlier-archived proof is not
+  reliably the stronger one). Write it as an **exclusive create** (`os.link` to the candidate name —
+  `EEXIST` ⇒ try the next index — then `os.unlink` the source), not `os.replace`, which silently
+  overwrites. Index selection is safe because the whole sequence runs under the collection claim
+  (task 2.8a) and the archive path is already scoped by `<collection_id>`.
 - [ ] 2.7 `_place_proof`: log at `WARNING` naming **both** paths whenever a proof is superseded or a
   staged proof is discarded — the archive has no panel surface, so the log is its discoverability.
 - [ ] 2.8 `_place_proof` returns an outcome (`placed: bool`, `digest`, `state`) instead of `None`;
@@ -87,13 +112,45 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   (with `None` still meaning "this member failed, fall back to a single-file stamp"). Update the two
   call sites in `proofs.py` and the existing `tests/test_ots.py` expectations.
 
+### Single-writer serialization (design D10)
+
+- [ ] 2.8a `src/cli.py::_cmd_stamp`: wrap the whole stamp in the collection's operation claim.
+  Replace the direct `mark_unstamped_pending` + `stamp_pending` calls with the existing
+  `proofs.run_stamp_backfill` for `--all`, and for the plain (already-`pending`) case open and
+  `collections.claim_run` a `kind='stamp'` run the same way before calling `stamp_pending`. A lost
+  claim **refuses**: print that an operation is already in progress for that collection, stamp
+  nothing, do not wait, and exit non-zero.
+- [ ] 2.8b `src/cli.py::_cmd_upgrade`: stop calling `upgrade_incomplete(session)` fleet-wide with no
+  run. Iterate collections, and for each open + `claim_run` a `kind='upgrade'` run exactly as
+  `scheduler.run_daily_upgrade` does, calling `upgrade_incomplete(session, collection)`. A collection
+  whose slot is held is skipped **and named**; if every collection was skipped, exit non-zero.
+  Prefer factoring the scheduler's existing per-collection upgrade body into a shared helper over
+  duplicating it.
+- [ ] 2.8c `src/cli.py::_cmd_scan`: a collection whose scan returned `result='skipped'` (the claim
+  was lost) must print that it was skipped because an operation is in progress — not the ordinary
+  all-zeroes result line, which reads as a clean scan. Do not change `scanner.py` (Slice B owns it);
+  `summary.result == "skipped"` already carries the fact.
+- [ ] 2.8d `src/services/scheduler.py`: audit only — confirm the scan pass and the daily upgrade both
+  claim (they do: `scan_collection`'s `claim_run`, and `run_daily_upgrade`'s own). Expected diff is
+  zero or a comment pointing at design D10. Do **not** add a claim inside `stamp_pending` or
+  `upgrade_incomplete` — they are called from inside callers that already hold one (`scanner.py:540`).
+
 ### Adoption + provenance writes
 
-- [ ] 2.9 `proofs.stamp_pending`: before building the batch, drop from `work` any pending file whose
-  canonical proof already exists **and** commits to the row's own `sha256` — record `ots_path`,
-  `ots_state` (from the parsed attestation), `ots_digest`, and count it as stamped without spending a
-  staging symlink or a calendar round-trip. This is the cheap path for #15's headline
-  accept→restore→rescan case.
+- [ ] 2.9 `proofs.stamp_pending`: before building the batch, adopt — and drop from `work` — any
+  pending file whose canonical proof (a) parses, (b) commits to the row's own `sha256`, **and** (c)
+  either matches the row's already-recorded `ots_digest` **or** whose Bitcoin attestation verifies
+  via the configured backend (`ots.verify` with the configured backend/explorer/node, off the event
+  loop like every other blocking OTS call). Record `ots_path`, `ots_state`, `ots_digest`, leave
+  `ots_stamped_at` **unchanged**, and count it as stamped without a staging symlink or a calendar
+  round-trip. **Never adopt** an `incomplete` proof, an unverifiable one, or one whose anchor could
+  not be checked because the backend was unreachable — those fall through to the normal stamp path,
+  where task 2.4's four-way rule archives the existing proof and places the new one (design D1a).
+  Log each adoption with the file, digest and confirming block. Where the backend **answered** that
+  the existing proof's anchor does not confirm, pass that verdict into `_place_proof` (task 2.4) so
+  its keep-existing branch cannot resurrect the proof adoption just rejected; where the backend was
+  merely unreachable, pass **no** verdict — nothing was disproven, so the anchored proof rightly
+  stays canonical and only a round-trip is wasted.
 - [ ] 2.10 `proofs.stamp_pending`: write `ots_digest` on every successful placement, in the same
   transaction as `ots_path`/`ots_state`/`ots_stamped_at`. On the **kept-existing** outcome set
   `ots_state='complete'` and `ots_digest`, and **leave `ots_stamped_at` unchanged** (design D1 —
@@ -115,10 +172,14 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
 - [ ] 2.12 `ots.py`: add `proof_digest: str | None = None` to `VerifyResult`; set it in
   `_verify_via_explorer` on the returns where the proof was parsed. The node backend sets nothing
   (it establishes no digest disagreement — sprint-1 D1).
-- [ ] 2.13 `routes.py::verify_run`: extend the `mismatch_blame` ladder per design D7. Where
-  `fe.ots_digest` is NULL, the sprint-1 heuristic and its wording are **unchanged**.
-- [ ] 2.14 `src/cli.py::_cmd_verify`: the same ladder and the same distinctions, so the panel and
-  the command line never disagree about which artifact is blamed.
+- [ ] 2.13 `routes.py::verify_run`: extend the `mismatch_blame` ladder per design D7, **in that
+  order**. The "`proof_digest` known and ≠ `ots_digest`" branch is evaluated **first** among the
+  provenance branches; `proof-stale` is reachable **only** when `proof_digest == ots_digest` and
+  `ots_digest != live`. Where `ots_digest` is recorded but `proof_digest` is unavailable, fall
+  through to the NULL-provenance wording — never to `proof-stale`. Where `fe.ots_digest` is NULL, the
+  sprint-1 heuristic and its wording are **unchanged**.
+- [ ] 2.14 `src/cli.py::_cmd_verify`: the same ladder in the same order and the same distinctions,
+  so the panel and the command line never disagree about which artifact is blamed.
 - [ ] 2.15 `templates/partials/verify_result.html`: split the `proof` verdict's copy — with
   provenance it is a positive finding about the **proof** ("this is not the proof Cairn placed for
   these bytes"), without it, sprint 1's "Cairn cannot tell which" survives verbatim. Neither
@@ -142,10 +203,18 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   proof (batch isolation is preserved).
 - [ ] 2.22 The unwritable-proof-path skip clears `ots_digest` along with `ots_path`.
 - [ ] 2.23 Blame: with `ots_digest == live` and a disagreeing proof → `proof`, established wording;
-  with `ots_digest != live` → `proof-stale`; with `ots_digest` NULL → sprint 1's exact wording.
-  Assert the same three for `cairn verify`.
-- [ ] 2.24 A pending file whose canonical proof already commits to its digest is adopted **without**
-  invoking `ots stamp` (assert the subprocess/stamp helper was not called).
+  with `ots_digest != live` **and `proof_digest == ots_digest`** → `proof-stale`; with `ots_digest`
+  NULL → sprint 1's exact wording. Assert the same three for `cairn verify`.
+- [ ] 2.23a Blame, the **A/B/C** case: recorded provenance `A`, live == baseline `B`, stored proof
+  committing to a third digest `C`. Assert **`proof`** with the established "not the proof Cairn
+  recorded placing" wording, and assert the proof-predates-this-version wording is **absent** — a
+  staleness-first ladder passes every other blame test and fails this one. Panel **and**
+  `cairn verify`.
+- [ ] 2.23b Blame, provenance recorded but no parsed `proof_digest` on the result: falls back to the
+  NULL-provenance wording, **not** to `proof-stale`. Panel and `cairn verify`.
+- [ ] 2.24 A pending file whose canonical proof commits to a **different** digest is **not** adopted:
+  it is stamped normally and the existing proof is preserved intact in the archive. (The positive
+  adoption cases are 2.31/2.32; the three refusal cases are 2.33/2.34/2.35.)
 - [ ] 2.25 Upgrade backfill, matching case: a row with `ots_digest` NULL whose stored proof commits
   to its `sha256` comes out of `upgrade_incomplete` with `ots_digest` set to that digest, and the
   upgrade outcome (`upgraded` / `still_incomplete`) is unchanged by the fill.
@@ -155,6 +224,40 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
 - [ ] 2.27 Upgrade backfill leaves an already-recorded `ots_digest` untouched (including when the
   proof on disk now parses to something else — that disagreement is verify's finding to report, not
   the upgrade pass's to overwrite), and an unreadable/absent `.ots` leaves it NULL without raising.
+- [ ] 2.28 **Archive collision keeps both**: archive digest `D`, then archive a *different* proof for
+  the same `D`. Assert both files exist, byte-identical to what went in, under `<D>.ots` and
+  `<D>.1.ots`, and that neither was overwritten.
+- [ ] 2.29 **Interrupted between archive and place**: simulate a failure after the archive move and
+  before the placement. Assert the old proof is intact in the archive, the canonical path is absent,
+  the row is still `pending` with `ots_state`/`ots_digest` unwritten, and a re-run completes the
+  placement.
+- [ ] 2.30 **Interrupted after placement, before the DB commit**: assert the canonical path holds the
+  new proof, the old proof is in the archive, and the row's un-committed state leaves the file
+  `pending` — the next pass re-enters placement, finds its own same-digest proof, and (per 2.9)
+  either adopts it or archives-and-replaces it, in neither case losing a proof.
+- [ ] 2.31 **Adoption, anchored**: a pending file whose canonical proof commits to its `sha256` and
+  whose anchor verifies is adopted — `ots_state='complete'`, `ots_digest` set, `ots_stamped_at`
+  **not** moved forward — with the stamp helper asserted un-called.
+- [ ] 2.32 **Adoption, own provenance**: a pending row whose `ots_digest` already equals the proof's
+  digest and its `sha256` is adopted **without** a backend lookup (assert `ots.verify` un-called).
+- [ ] 2.33 **Incomplete is never adopted**: a same-digest `incomplete` canonical proof is archived and
+  a fresh proof placed; the row ends `incomplete` with `ots_stamped_at = now` (so it stays visible to
+  `stale_incomplete`), and the old proof is intact in the archive.
+- [ ] 2.34 **Forged / unverifiable is never adopted _and_ never kept**: a same-digest proof carrying
+  an attestation the backend does not confirm is archived and the fresh proof takes the canonical
+  path; `ots_digest` is recorded from the **newly placed** proof, never from the rejected one. Assert
+  the canonical path's bytes **changed** — a `_place_proof` that ignored the caller's verdict would
+  keep the forgery and pass every other test here.
+- [ ] 2.35 **Unreachable backend does not adopt and does not demote**: with the verification backend
+  unreachable, a same-digest anchored proof is *not* adopted — the file is stamped normally — and
+  placement's ordinary keep-existing branch leaves the anchored proof byte-identical at the canonical
+  path. An outage must cost a round-trip, never the claim.
+- [ ] 2.36 **Concurrent stampers**: two stamps of one collection from separate sessions/processes —
+  the second is refused (message names the collection), places/adopts nothing, does not block, and
+  every proof the first placed is intact. Cover `cairn stamp` and `cairn upgrade`; assert the
+  refused-everywhere case exits non-zero.
+- [ ] 2.37 **`cairn scan` refusal reads as a refusal**: a scan whose claim is lost prints the
+  in-progress message and not an all-zeroes result line.
 
 ## 3. Slice B — a file that comes back different is not "restored" (#21)
 
@@ -209,6 +312,13 @@ new `tests/test_restored_changed.py`.
   queues a re-stamp → the stamp pass runs. Assert the **original bytes' proof still exists** in the
   archive and the canonical path now holds the new bytes' proof. Without #15 this scenario destroys
   the old proof; without #21 it never happens at all.
+- [ ] 4.2a **The accepted #39 limitation, pinned by a test** (it crosses both slices): move a file so
+  `_reconcile_moves` repoints its `relpath` while `ots_path` still names the old path, then add and
+  stamp a new file at that old path. Assert the moved row's original proof is **preserved** (not
+  destroyed), that `/verify` on the moved row now reports the established `proof` blame rather than
+  passing green, and that verification / download / export / upgrade all still resolve the moved
+  row's recorded `ots_path` — i.e. the other file's proof. This is the qualification the
+  canonical-consumer scenario carries; the test exists so the limitation is asserted, not assumed.
 - [ ] 4.3 Grep for production callers of every new export (`_place_proof`'s outcome type, the archive
   path builder, the proof parser, `ots_digest`) — fan-out ships green-but-unwired code.
 - [ ] 4.4 `openspec validate guard-proof-and-restore-integrity --strict` green.

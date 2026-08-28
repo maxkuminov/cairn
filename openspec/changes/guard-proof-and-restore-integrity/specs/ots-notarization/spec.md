@@ -126,15 +126,30 @@ recorded baseline, the command SHALL report that the file is not what moved, and
 distinction the panel makes, **using the recorded provenance of the stored proof where the file has
 it**:
 
-- where the file records the digest its stored proof was placed committing to, and that recorded
-  digest **equals** the live digest, the stored proof at that path commits to something other than
-  what the system recorded placing there: the command SHALL report **as established** that the
-  stored proof is not the proof recorded for this file — corrupted, swapped or misfiled — and SHALL
-  NOT suggest that the disagreement might be explained by the file having moved on;
-- where that recorded digest **differs** from the live digest, the stored proof was made from
-  earlier bytes: the command SHALL report **as established** that the proof predates this version of
-  the file, and that this is not evidence against the current file. It SHALL state that a re-stamp
-  is pending only where the record actually says one is owed;
+These readings SHALL be evaluated **in the order given**, and the "not the proof recorded for this
+file" reading SHALL be reached **before** any reading that calls the stored proof merely old. A proof
+that commits to neither the live digest nor the digest the system recorded placing there is not an
+older proof of this file at all, and reporting it as one is a false reassurance about the very
+artifact the operator is asking about:
+
+- where the file records the digest its stored proof was placed committing to, the digest the stored
+  proof actually commits to is known, and the two **differ**, the proof at that path is not the one
+  the system recorded placing there: the command SHALL report **as established** that the stored
+  proof is not the proof recorded for this file — corrupted, swapped or misfiled — and SHALL NOT
+  suggest that the disagreement might be explained by the file having moved on. This SHALL hold
+  whether or not the recorded provenance also differs from the live digest;
+- where the recorded provenance **equals** the live digest, the same conclusion SHALL be reported as
+  established even where the stored proof's own committed digest is unavailable: the system recorded
+  placing a proof for exactly these bytes, and the proof at that path disagrees with them;
+- where the recorded provenance **differs** from the live digest **and** the stored proof's committed
+  digest is known to **equal** that recorded provenance — so the proof at that path is the one the
+  system recorded placing, made from earlier bytes — the command SHALL report **as established** that
+  the proof predates this version of the file, and that this is not evidence against the current
+  file. It SHALL state that a re-stamp is pending only where the record actually says one is owed;
+- where the recorded provenance differs from the live digest but the stored proof's committed digest
+  is **not** available, neither of those findings is established and the command SHALL fall back to
+  the wording used where no provenance is recorded. It SHALL NOT report the proof as predating this
+  version on the strength of the recorded provenance alone;
 - where the file records **no** provenance for its stored proof, the command SHALL fall back to the
   file record's own state: where it indicates a re-stamp is owed — its proof state is
   queued for stamping, or its status is modified or new — it SHALL report that the stored proof
@@ -188,10 +203,19 @@ wording.
 #### Scenario: Recorded provenance establishes that the proof predates this version
 
 - **WHEN** `cairn verify` receives a digest disagreement for a file whose live bytes still hash to
-  the digest Cairn recorded for it, and whose recorded proof provenance differs from that digest
+  the digest Cairn recorded for it, whose recorded proof provenance differs from that digest, and
+  whose stored proof commits to exactly that recorded provenance
 - **THEN** the command SHALL report as established that the proof predates this version of the file,
   SHALL state that this is not evidence against the current file, and SHALL claim a re-stamp is
   pending only if the record says one is owed
+
+#### Scenario: A proof matching neither the file nor the record is not reported as merely old
+
+- **WHEN** `cairn verify` receives a digest disagreement for a file whose live bytes still hash to
+  the digest Cairn recorded for it, whose recorded proof provenance is a **different, earlier**
+  digest, and whose stored proof commits to a **third** digest matching neither
+- **THEN** the command SHALL report as established that the stored proof is not the proof recorded
+  for this file, and SHALL NOT report that the proof merely predates this version of the file
 
 #### Scenario: The command line reports a proof that predates the file while a re-stamp is owed
 
@@ -270,10 +294,19 @@ Before placing a proof the system SHALL determine whether its output path is alr
 if so, SHALL read the existing proof's committed digest and whether it carries a Bitcoin attestation,
 and act as follows:
 
-- existing proof commits to the **same** digest and carries a Bitcoin attestation — the existing
-  proof SHALL be kept in place and the newly produced proof SHALL be discarded. A newly produced
-  proof is never Bitcoin-anchored, so replacing an anchored proof for the same bytes is a strict
-  downgrade of the claim;
+- existing proof commits to the **same** digest and carries a Bitcoin attestation that has not been
+  shown to be false — the existing proof SHALL be kept in place and the newly produced proof SHALL be
+  discarded. A newly produced proof is never Bitcoin-anchored, so replacing an anchored proof for the
+  same bytes is a strict downgrade of the claim;
+- existing proof commits to the **same** digest and carries a Bitcoin attestation the caller has
+  **established does not confirm** against the configured verification backend — the existing proof
+  SHALL be preserved and the new one placed. The inspection performed here reads a local file and
+  reaches the network for nothing, so "carries an attestation" is a syntactic fact that anyone able
+  to write into the proof store can manufacture. Keeping such a proof would discard a genuine proof
+  produced moments earlier in favour of a fabricated one, and would defeat the adoption rule below by
+  the simple route of writing the forgery to the canonical path. Where the caller has established no
+  such finding — including where the backend could not be reached, which establishes nothing — the
+  preceding case applies;
 - existing proof commits to the **same** digest and is not yet anchored — the existing proof SHALL
   be preserved and the new one placed. A proof the calendars never anchored may legitimately be
   refreshed, and nothing is lost;
@@ -291,9 +324,15 @@ The preserved location SHALL be derived from the preserved proof's own committed
 NOT incorporate any component of the watched file's name or relative path. Names the system does not
 control are what makes a proof path un-writable (see "Notarization tolerates un-writable proof output
 paths"); a preservation path that could inherit that failure would make preservation fail exactly
-where a proof is most at risk. Where two proofs for the same digest would be preserved to the same
-location, the one already preserved SHALL be kept and the later duplicate discarded — both attest the
-same fact, and the earlier-preserved one was stamped earlier.
+where a proof is most at risk. Preservation SHALL NOT discard, overwrite or replace anything already preserved. Where a proof would
+be preserved to a location already holding a preserved proof, the incoming proof SHALL be preserved
+under a distinct, monotonically suffixed name in the same location, and both SHALL survive. Two
+proofs committing to one digest are NOT interchangeable: one may carry a Bitcoin attestation the
+other lacks, and which of them is the stronger evidence is a judgement the preservation store SHALL
+NOT make. Keeping the earlier and discarding the later can therefore discard an anchored proof in
+favour of an unanchored one, which is the loss this requirement exists to prevent. The suffix SHALL
+be derived only from how many proofs are already preserved at that location, so it cannot inherit any
+component of a watched file's name.
 
 Preservation SHALL happen **before** the placement, never after, so no interruption between the two
 operations can leave the earlier proof destroyed. A failure to preserve SHALL **refuse the
@@ -316,6 +355,21 @@ Each preservation, and each discarded newly-produced proof, SHALL be logged nami
   digest
 - **THEN** the canonical path SHALL hold the proof for the new digest, and the earlier proof SHALL
   still exist unmodified in the preserved location
+
+#### Scenario: A disproven anchor does not keep the canonical path
+
+- **WHEN** a proof is placed over a path holding an `.ots` that commits to the same digest and
+  carries a Bitcoin attestation which the caller has established does not confirm against the
+  configured backend
+- **THEN** the existing proof SHALL be preserved and the newly produced proof SHALL be placed at the
+  canonical path, and the newly produced proof SHALL NOT be discarded
+
+#### Scenario: Preserving a second proof for one digest keeps both
+
+- **WHEN** a proof committing to a digest is preserved, and later a different proof committing to
+  that same digest is preserved
+- **THEN** both proofs SHALL exist afterwards, each byte-identical to what was preserved, under
+  distinct names, and neither SHALL have been overwritten or discarded
 
 #### Scenario: The accept-restore-rescan cycle does not destroy the original proof
 
@@ -343,29 +397,165 @@ Each preservation, and each discarded newly-produced proof, SHALL be logged nami
 
 #### Scenario: Consumers still resolve proofs through the canonical path
 
-- **WHEN** a proof has been superseded and preserved
+- **WHEN** a proof has been superseded and preserved, for a file whose recorded proof path still
+  corresponds to its own current relative path
 - **THEN** verification, proof download, export and the upgrade pass SHALL all resolve the file's
   proof through its recorded proof path and SHALL find the proof for the file's current digest
 
-### Requirement: An already-stamped digest is adopted instead of re-submitted
+#### Scenario: A moved file's superseded proof is reachable only outside the product
 
-The system SHALL adopt an existing proof instead of submitting a duplicate stamp: where a file
-queued for stamping already has a proof at its canonical output path that commits to the digest
-recorded for that file, that proof SHALL be recorded as the file's proof — with its state and its
-committed digest — and the file SHALL NOT be submitted to the calendars. The
-common route into a duplicate stamp is a file that was accepted as missing and then restored
-unchanged, where the calendar round-trip buys nothing and the proof it produces would be weaker than
-the one already held.
+- **WHEN** a file was reconciled as moved, so its recorded proof path still names its former
+  relative path, and another file has since been stamped onto that path, displacing the moved file's
+  proof into the preserved location
+- **THEN** verification, proof download, export and the upgrade pass SHALL all continue to resolve
+  that recorded proof path — reaching the other file's proof, not the moved file's — and the moved
+  file's own proof SHALL be recoverable only from the preserved location by an operator, until the
+  recorded proof path is made to follow the file
 
-The digest recorded for the file is what makes this adoption safe: the provenance written is
-corroborated by the file's own bytes, never taken on the stored proof's word alone.
+### Requirement: Proof mutation runs under the collection's single-operation claim
 
-#### Scenario: A restored, unchanged file is not re-submitted to the calendars
+Every operation that can create, replace, preserve, adopt or upgrade a collection's proofs SHALL
+first claim that collection's single in-progress operation slot, and SHALL hold it for the whole
+sequence that inspects the output path, preserves any proof found there, places the new proof and
+records the result against the file. The placement rules above are a read-then-act sequence: without
+serialization two writers can both find an output path unoccupied and both write to it, and the
+proof written first is destroyed with no trace — the same loss the placement rules exist to prevent,
+reached by a different route. Serializing only the final move is insufficient, because the decision
+of what to do and the record of what was done both sit outside it.
 
-- **WHEN** a file queued for stamping already has a proof at its canonical path committing to the
-  digest recorded for that file
-- **THEN** the system SHALL record that proof, its state and its committed digest for the file
-  without invoking a stamp submission
+The claim SHALL be the same collection-scoped mechanism the system already uses to admit one
+operation per collection at a time, so that it serializes **across processes** and not only within
+one. A guard local to a single process (an in-memory lock or flag) SHALL NOT be relied on: the
+command line and the running panel are separate processes over one datastore, and that is exactly
+the pairing that races.
+
+This SHALL hold for every production entry point, whichever front door the work arrives through:
+scheduled scans, the scheduled upgrade pass, panel-initiated scans and stamp backfills, and the
+command-line scan, stamp and upgrade commands. Work invoked from **inside** an operation that
+already holds the collection's claim SHALL NOT take a second claim.
+
+A command-line entry point that cannot obtain the claim SHALL **refuse and return**, never wait: it
+SHALL report that an operation is already in progress for that collection, SHALL NOT perform any
+proof mutation for it, and SHALL NOT report the work as done. Waiting would stall a scheduled
+invocation behind an unrelated long-running pass, and the work is idempotent — the next invocation
+takes it up. Where a command acts on several collections it SHALL process those it can claim and name
+those it skipped; where every collection it was asked to act on was refused it SHALL exit non-zero, so
+that a scheduled invocation which did nothing is visibly distinguishable from one that succeeded.
+
+#### Scenario: A second concurrent stamper is refused rather than racing
+
+- **WHEN** one process is stamping a collection's pending files and a second stamp of the same
+  collection is started from another process
+- **THEN** the second SHALL be refused with a message naming the collection and the operation in
+  progress, SHALL NOT place, preserve or adopt any proof, and SHALL NOT wait for the first to finish
+- **AND** every proof placed by the first SHALL be intact afterwards
+
+#### Scenario: The command-line stamp claims the collection's operation slot
+
+- **WHEN** `cairn stamp` is run against a collection with no operation in progress
+- **THEN** it SHALL claim the collection's in-progress operation slot for the duration of the stamp,
+  so that a concurrent scan or panel-initiated operation on that collection is refused while it runs
+
+#### Scenario: The command-line upgrade claims each collection it processes
+
+- **WHEN** `cairn upgrade` runs while one collection has an operation in progress and another does
+  not
+- **THEN** it SHALL upgrade the proofs of the collection it can claim, SHALL skip and name the one it
+  cannot, and SHALL NOT upgrade any proof of the skipped collection
+
+#### Scenario: A command-line entry point refused everywhere exits non-zero
+
+- **WHEN** a command-line stamp or upgrade is refused for every collection it was asked to act on
+- **THEN** it SHALL report the refusal and SHALL exit non-zero
+
+#### Scenario: A scan refused the claim is reported as refused, not as a clean scan
+
+- **WHEN** `cairn scan` is run against a collection that already has an operation in progress
+- **THEN** the command SHALL report that the collection was skipped because an operation is in
+  progress, and SHALL NOT report it as a completed scan with no findings
+
+### Requirement: An already-anchored proof is adopted instead of re-submitted
+
+The system SHALL adopt an existing proof instead of submitting a duplicate stamp, but only where the
+proof has been shown to be evidence the system may stand behind. Adoption both promotes a file out
+of the stamp queue and records provenance from a proof the system did not itself place, so a digest
+match alone SHALL NOT be sufficient. Where a file queued for stamping has a proof at its canonical
+output path, the system SHALL adopt it **if and only if** all of the following hold:
+
+- the proof can be read; **and**
+- it commits to the digest recorded for that file's content — so the file's own bytes corroborate
+  the provenance about to be recorded; **and**
+- **either** the file already records that same digest as the provenance of its stored proof — the
+  system's own record of having placed that proof for those bytes — **or** the proof's Bitcoin
+  attestation is confirmed against the configured verification backend at the moment of adoption.
+
+Where adoption applies, the proof SHALL be recorded as the file's proof with its state and its
+committed digest, and the file SHALL NOT be submitted to the calendars. The common route into a
+duplicate stamp is a file that was accepted as missing and then restored unchanged, where the
+calendar round-trip buys nothing and the proof it produces would be weaker than the one already
+held.
+
+Where any condition fails, the file SHALL NOT be adopted and SHALL be stamped normally, so that the
+placement rules above preserve whatever proof is at that path and place the newly produced one.
+Specifically:
+
+- a proof that commits to the recorded digest but carries **no confirmed Bitcoin attestation** SHALL
+  NOT be adopted. It has no anchor to confirm, and adopting it would freeze a proof the calendars
+  never anchored in place of the refresh the incomplete-proof rules require;
+- a proof whose attestation **cannot be confirmed** — fabricated, corrupt, or disagreeing with the
+  chain — SHALL NOT be adopted. A proof committing to the right digest is trivial to fabricate for
+  anyone able to write into the proof store; only the chain distinguishes one the system may adopt;
+- where the verification backend **cannot be reached**, the condition is not satisfied and the file
+  SHALL be stamped normally. Adoption SHALL NOT fall back to accepting the proof's own word, because
+  that would make an unreachable backend sufficient to have a forged proof adopted. The cost of
+  degrading this way is one calendar round-trip and a preserved proof; nothing is lost.
+
+Adoption SHALL NOT move the file's recorded stamp time forward: no submission was made, so recording
+one would assert a notarization that did not happen, and the proof's own attestation carries the real
+date. Consequently no adoption SHALL leave a file recorded as submitted-but-unconfirmed with no
+recorded stamp time — the only adopted state is confirmed — so an adopted proof can never become
+invisible to the stuck-proof report. Each adoption SHALL be logged naming the file, the digest, and
+the block the attestation was confirmed against where confirmation was the qualifying condition.
+
+#### Scenario: A restored, unchanged file with an anchored proof is not re-submitted
+
+- **WHEN** a file queued for stamping already has a readable proof at its canonical path committing
+  to the digest recorded for that file, whose Bitcoin attestation confirms against the configured
+  backend
+- **THEN** the system SHALL record that proof as the file's proof with a `complete` state and its
+  committed digest as the file's proof provenance, SHALL NOT invoke a stamp submission, and SHALL
+  NOT move the file's recorded stamp time forward
+
+#### Scenario: The system's own recorded provenance qualifies a proof for adoption
+
+- **WHEN** a file queued for stamping has a readable proof at its canonical path committing to the
+  digest recorded for that file, and the file already records that same digest as the provenance of
+  its stored proof
+- **THEN** the system SHALL adopt that proof without invoking a stamp submission and without
+  requiring a backend lookup
+
+#### Scenario: An unanchored same-digest proof is not adopted
+
+- **WHEN** a file queued for stamping has a proof at its canonical path that commits to the digest
+  recorded for that file but carries no Bitcoin attestation
+- **THEN** the system SHALL NOT adopt it, SHALL stamp the file normally, and SHALL preserve that
+  existing proof rather than replacing it
+
+#### Scenario: A same-digest proof whose anchor cannot be confirmed is not adopted
+
+- **WHEN** a file queued for stamping has a proof at its canonical path committing to the digest
+  recorded for that file, carrying a Bitcoin attestation that does not confirm against the configured
+  backend, and the file records no provenance for it
+- **THEN** the system SHALL NOT adopt it, SHALL stamp the file normally, and SHALL preserve that
+  existing proof
+
+#### Scenario: An unreachable backend does not qualify a proof for adoption
+
+- **WHEN** a file queued for stamping has a proof at its canonical path committing to the digest
+  recorded for that file, the file records no provenance for it, and the verification backend cannot
+  be reached
+- **THEN** the system SHALL NOT adopt it and SHALL stamp the file normally, preserving the existing
+  proof
 
 #### Scenario: A proof committing to other bytes is not adopted
 

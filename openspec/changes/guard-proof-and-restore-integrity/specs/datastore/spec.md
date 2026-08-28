@@ -60,11 +60,35 @@ and `events`.
   database holding existing files
 - **THEN** `files.ots_digest` SHALL exist as a nullable TEXT column, every existing row's value
   SHALL be NULL, and no existing row SHALL be otherwise altered
-- **AND** `alembic downgrade` SHALL drop the column
+
+A migration that widens an event-kind constraint SHALL NOT reverse itself by discarding or
+reinterpreting the rows that constraint now admits. Where a downgrade would narrow `events.kind`
+while rows of the removed kind exist, it SHALL **refuse**, raising an error naming the kind and how
+many rows carry it, and SHALL leave the database untouched. Deleting those rows would destroy the
+audit record of the incidents the kind was added to record; rewriting them to an older kind would
+assert something the system never detected — and in a `churn` collection would convert an alarm into
+a silently re-baselined change. The migration cannot reverse itself without a judgement about
+evidence, so it hands that judgement to the operator rather than making it silently. Where no such
+rows exist the downgrade SHALL proceed normally.
 
 #### Scenario: The restored-changed migration widens the event-kind constraint
 
 - **WHEN** the same revision is applied
 - **THEN** `events.kind` SHALL accept `restored_changed` in addition to the existing kinds, existing
-  event rows SHALL be preserved unchanged, and `alembic downgrade` SHALL reverse the constraint
+  event rows SHALL be preserved unchanged
+
+#### Scenario: Downgrading past the widened constraint is refused while such rows exist
+
+- **WHEN** `alembic downgrade` is run past that revision against a database holding at least one
+  `restored_changed` event
+- **THEN** the downgrade SHALL fail with an error naming the kind and the number of rows carrying it,
+  and every table SHALL be left exactly as it was — no event row deleted, rewritten to another kind,
+  or otherwise altered
+
+#### Scenario: Downgrading past the widened constraint succeeds with no such rows
+
+- **WHEN** `alembic downgrade` is run past that revision against a database holding events but no
+  `restored_changed` event
+- **THEN** the downgrade SHALL restore the previous `events.kind` constraint, drop `files.ots_digest`,
+  and preserve every existing row
 

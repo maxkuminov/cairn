@@ -66,16 +66,31 @@ NOT say the file changed. What it may say about the **proof** depends on whether
 the digest its stored proof was placed committing to.
 
 **Where that provenance is recorded, the attribution is established, not inferred.** The recorded
-provenance is what the system itself wrote when it placed the proof, so:
+provenance is what the system itself wrote when it placed the proof. These readings SHALL be
+evaluated **in the order given**, and the panel SHALL reach the "not the proof recorded for this
+file" reading **before** any reading that describes the stored proof as merely older than the file.
+Where the recorded provenance is one digest, the live and baseline bytes are a second, and the stored
+proof commits to a third, the proof is not an earlier proof of this file at all — it is a proof of
+something else sitting at this file's path — and describing it as an old proof of this file is a
+false reassurance on the very page an operator opens to ask whether their evidence is sound:
 
-- where the recorded provenance **equals** the live digest, the system recorded placing a proof for
-  exactly these bytes and the proof at that path commits to other bytes: the panel SHALL report as
-  established that the stored proof is not the proof recorded for this file — corrupted, swapped or
-  misfiled — and SHALL NOT offer the proof-predates-this-version explanation;
-- where the recorded provenance **differs** from the live digest, the stored proof was placed for
-  earlier bytes: the panel SHALL report as established that the proof **predates this version** of
-  the file and SHALL state that this is not evidence against the current file. It SHALL claim a
-  re-stamp is pending only where the record indicates one is owed.
+- where the digest the stored proof commits to is known and **differs** from the recorded
+  provenance, the proof at that path is not the one the system recorded placing there: the panel
+  SHALL report as established that the stored proof is not the proof recorded for this file —
+  corrupted, swapped or misfiled — and SHALL NOT offer the proof-predates-this-version explanation.
+  This SHALL hold whether or not the recorded provenance also differs from the live digest;
+- where the recorded provenance **equals** the live digest, the panel SHALL report that same
+  established finding even where the digest the stored proof commits to is unavailable: the system
+  recorded placing a proof for exactly these bytes and the proof at that path disagrees with them;
+- where the recorded provenance **differs** from the live digest **and** the stored proof is known
+  to commit to exactly that recorded provenance — so the proof at that path is the one the system
+  recorded placing, made from earlier bytes — the panel SHALL report as established that the proof
+  **predates this version** of the file and SHALL state that this is not evidence against the
+  current file. It SHALL claim a re-stamp is pending only where the record indicates one is owed;
+- where the recorded provenance differs from the live digest but the digest the stored proof commits
+  to is **not** available, neither finding is established: the panel SHALL fall back to the wording
+  it uses where no provenance is recorded, and SHALL NOT report the proof as predating this version
+  on the strength of the recorded provenance alone.
 
 Neither of those readings SHALL say anything against the file, whose bytes still match their
 recorded baseline.
@@ -339,11 +354,19 @@ asserting a fixed backend.
 #### Scenario: Recorded provenance establishes that the proof predates this version
 
 - **WHEN** the panel verifies a file whose live bytes still hash to the digest Cairn recorded for it,
-  whose recorded proof provenance differs from that digest, and whose stored proof commits to a
-  different digest
+  whose recorded proof provenance differs from that digest, and whose stored proof commits to exactly
+  that recorded provenance
 - **THEN** the panel SHALL report as established that the proof predates this version of the file,
   SHALL state that this is not evidence against the current file, and SHALL claim a re-stamp is
   pending only if the record indicates one is owed
+
+#### Scenario: A proof matching neither the file nor the record is not shown as merely old
+
+- **WHEN** the panel verifies a file whose live bytes still hash to the digest Cairn recorded for it,
+  whose recorded proof provenance is a **different, earlier** digest, and whose stored proof commits
+  to a **third** digest matching neither
+- **THEN** the panel SHALL report as established that the stored proof is not the proof recorded for
+  this file, and SHALL NOT report that the proof merely predates this version of the file
 
 #### Scenario: A digest disagreement while a re-stamp is owed reads as a proof that predates the file
 

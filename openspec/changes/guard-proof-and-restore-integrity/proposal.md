@@ -105,7 +105,8 @@ the DB is an index — the guarantee is bytes + `.ots`).
 
   | existing proof at the canonical path | outcome |
   |---|---|
-  | commits to the **same** digest and is **complete** (Bitcoin-anchored) | the existing proof is **kept canonical**; the freshly staged proof is discarded. An anchored proof is never demoted for a same-bytes re-stamp — this is #15's headline case. |
+  | commits to the **same** digest and is **complete** (Bitcoin-anchored), anchor not disproven | the existing proof is **kept canonical**; the freshly staged proof is discarded. An anchored proof is never demoted for a same-bytes re-stamp — this is #15's headline case. |
+  | commits to the **same** digest, carries an attestation the caller **established does not confirm** | the existing proof is archived; the new one is placed. Placement reads a local file and checks no chain, so a fabricated attestation must not be able to hold the canonical path. |
   | commits to the **same** digest and is **incomplete** | the existing proof is archived; the new one is placed. A never-anchored proof can still be refreshed, and nothing is lost. |
   | commits to a **different** digest | the existing proof is archived under that digest; the new one is placed. |
   | **unreadable** | archived under an opaque name; the new one is placed. |
@@ -115,6 +116,10 @@ the DB is an index — the guarantee is bytes + `.ots`).
   cannot collide with a collection directory — those are integers — exactly as `.staging` does not).
   The name is a fixed-length digest, so no watched filename can push the archive path past
   `NAME_MAX` and re-open the class of failure `tolerate-unstampable-proof-paths` closed.
+- **The archive never discards and never overwrites.** Two proofs for one digest are not
+  interchangeable — one may carry a Bitcoin attestation the other lacks — and deciding which is
+  stronger is a judgement an archive must not make. A collision is stored under a monotonically
+  suffixed name (`<digest>.1.ots`, `.2.ots`, …), created exclusively so nothing can be replaced.
 - **The canonical path keeps serving the current digest's proof**, so `/verify`, "Download .ots
   proof", `cairn verify`, `cairn export` and `upgrade` are unchanged — they read `files.ots_path`
   and find exactly what they find today.
@@ -123,14 +128,29 @@ the DB is an index — the guarantee is bytes + `.ots`).
   first, so no interruption can destroy a proof before it is preserved, and a failure to preserve
   **refuses the placement** (a transient `OtsError` → the file stays `pending` for retry) rather
   than proceeding over an unpreserved proof.
-- **`stamp_pending` stops paying a calendar round-trip for a proof it already has**: a pending file
-  whose canonical proof already commits to its recorded digest is *adopted* (state and provenance
-  recorded from the existing proof) before anything is submitted. The `_place_proof` guard remains
-  the authoritative backstop.
+- **`stamp_pending` stops paying a calendar round-trip for a proof it already has** — but only for a
+  proof it may stand behind. A pending file's existing canonical proof is *adopted* (state and
+  provenance recorded from it, no submission) only when it parses, commits to the row's recorded
+  digest, **and** either the row already records that digest as its own provenance or the proof's
+  Bitcoin anchor **verifies** against the configured backend. An `incomplete`, forged or
+  unverifiable same-digest proof is never adopted: it takes the archive-then-re-stamp path, so the
+  incomplete-proof refresh rule still applies and a fabricated `.ots` can never be promoted into
+  recorded provenance. An unreachable backend degrades to re-stamping, never to adopting. Adoption
+  never moves `ots_stamped_at` forward, and never records an `incomplete` state — so nothing adopted
+  can slip out of the stuck-proof report. The `_place_proof` guard remains the authoritative backstop.
+- **All of it runs under the collection's single-operation claim.** Inspect → preserve → place →
+  record is check-then-act, so without cross-process serialization two writers can both find a path
+  free and one proof is lost. Cairn already has the right primitive: the DB-enforced one-run-per-
+  collection claim (`claim_run` + the partial unique index), which the scheduler and the panel
+  routes take today. This change makes `cairn stamp` and `cairn upgrade` take it too (`cairn scan`
+  already does via `scan_collection`), and a CLI entry point that cannot get it **refuses with a
+  clear message and never waits**.
 
 ### Each stored proof's committed digest is recorded (#15 + sprint-1 D1)
 
-- **New `files.ots_digest` column** (nullable TEXT, additive migration): the digest the proof Cairn
+- **New `files.ots_digest` column** (nullable TEXT, additive migration; the same revision widens
+  `events.kind`, whose **downgrade refuses** — naming the count — while any `restored_changed` row
+  exists, rather than deleting or re-labelling the audit rows the kind was added to record): the digest the proof Cairn
   placed at `ots_path` commits to, written **atomically with `ots_path`/`ots_state`** in the same
   transaction, and cleared whenever `ots_path` is cleared.
 - **Written only where the file's own bytes corroborate it** — at placement, at adoption, or in the
