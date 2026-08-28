@@ -262,6 +262,31 @@ def test_sidebar_badge_is_labelled_and_counts_missing_plus_modified(cairn_env):
         assert ">2</div>" in body  # the Open issues tile value
 
 
+def test_the_new_files_tile_accounts_for_watched_but_not_baselined_files(cairn_env):
+    """web-panel "Watched-but-not-baselined files are explained" (matrix 4.4).
+
+    The delta marks this scenario "existing", but the matrix walk found no test asserting the tile.
+    It is what makes `Total != OK + issues` legible: `new` files ARE watched and notarized, and
+    without the tile the dashboard's own arithmetic reads like a discrepancy.
+    """
+    root = cairn_env / "new-tile"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [
+            ("fresh-a.txt", "new", "none"),
+            ("fresh-b.txt", "new", "none"),
+            ("fine.txt", "ok", "none"),
+        ]))
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/").text
+        tile = body.split("New files", 1)[1].split("</div>\n  </div>", 1)[0]
+        assert ">2</div>" in tile
+        assert "watched, not yet baselined" in tile
+
+
 def test_badge_label_is_singular_at_one(cairn_env):
     root = cairn_env / "one-issue"
     root.mkdir()

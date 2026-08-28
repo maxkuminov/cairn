@@ -657,6 +657,7 @@ async def dashboard(
 ):
     collections = await collections_svc.list_collections(session, user_id=user.id)
     views = [await _collection_view(session, c) for c in collections]
+    await _attach_health_state(session, user, views)
 
     total_files = sum(v["file_count"] for v in views)
     total_size = sum(v["size_bytes"] for v in views)

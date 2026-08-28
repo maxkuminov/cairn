@@ -237,18 +237,18 @@ only).
   call `compute_health` from `_base_context`.
 - [x] 3.6 `settings.html:205-206`: remove the static `pill--ok` "Healthy" pill from the
   health-endpoint card. Leave the endpoint documentation and the copy control as they are.
-- [ ] 3.7 `dashboard()` and `collections_list()`: one `compute_health(session, settings,
+- [x] 3.7 `dashboard()` and `collections_list()`: one `compute_health(session, settings,
   user_id=user.id)` call per render; attach `health_state` (`fresh`/`pending`/`stale`) to each
   collection view by **id** — never by name, which no constraint makes unique across owners.
-  - **HALF DONE — finish at integration (4.2).** Slice B shipped the shared helper
-    `routes._attach_health_state(session, user, views)` (one owner-scoped `compute_health` per
-    render, matched by id) and wired `collections_list()`, which is Slice B's function. The
-    `dashboard()` call site was **not** written here: `dashboard()` belongs to Slice A (design D9)
-    and editing it from this worktree is the cross-slice edit that ownership exists to prevent. On
-    the merged tree add one line after `views = [await _collection_view(session, c) for c in
-    collections]` in `dashboard()`:
-    `await _attach_health_state(session, user, views)`. Until then the dashboard's cards simply
-    render no stale marker (`c.health_state` is undefined ⇒ falsy) — degraded, never wrong.
+  - **DONE.** Slice B shipped the shared helper `routes._attach_health_state(session, user, views)`
+    (one owner-scoped `compute_health` per render, matched by id) and wired `collections_list()`,
+    which is Slice B's function. The `dashboard()` call site was deliberately left to integration —
+    `dashboard()` belongs to Slice A (design D9), so writing it from Slice B's worktree is the
+    cross-slice edit that ownership exists to prevent. Wired on the merged tree (task 4.2): one
+    `await _attach_health_state(session, user, views)` after `dashboard()`'s
+    `views = [await _collection_view(...)]`. Covered by
+    `test_the_stale_marker_reaches_the_cards_on_both_listing_pages`, which asserts the marker on the
+    right card (by id) for **both** `/` and `/collections` — it fails on `/` without this line.
 - [x] 3.8 `_collection_card.html`: a **stale** marker in the "Last scan" meta cell when
   `health_state == "stale"`, naming the state in words ("scan overdue"), not by colour alone.
 
@@ -366,18 +366,62 @@ only).
 
 ## 4. Integration (on the merged result, after both slices land)
 
-- [ ] 4.1 Merge both branches; resolve `routes.py` by function boundary (design D9). Nothing outside
-  the owned functions may differ.
-- [ ] 4.2 Grep for production callers of everything new: `/review` is reachable from the dashboard
+- [x] 4.1 Merge both branches; resolve `routes.py` by function boundary (design D9). Nothing outside
+  the owned functions may differ. **Both slices merged cleanly** (A `c60bb8a`, B `794bef1`); the
+  merged `routes.py` diff against the shared-prep base was walked line by line and every **removed**
+  line falls inside an owned function (`health_pill`, `_event_feed`, `dashboard`, `ack_event`,
+  `collections_list`, `_guarded_accept`, `collection_file_accept`, `verify_run`). `collection_review`
+  — the function whose name a couple of hunk headers carry, because the new `fleet_review` route was
+  appended after it — is byte-unchanged. Neither slice reformatted the file.
+- [x] 4.2 Grep for production callers of everything new: `/review` is reachable from the dashboard
   tile; `run_health_note` is called from all three render sites; `health_state` is attached by both
   page routes; `runs.errors` is written by the scanner and read by `_collection_view`. Fan-out ships
   green-but-unwired code — verify each seam by hand.
-- [ ] 4.3 Full gates on the merged tree: `PYTHONPATH=. pytest -q`, `ruff check .`,
-  `alembic upgrade head` against a copy of a populated DB, `make audit`.
-- [ ] 4.4 `openspec validate add-fleet-review-and-run-health --strict` green, **and** §6's
+  - **One real seam found and closed: task 3.7's dashboard half.** `_attach_health_state` had a
+    single production caller (`collections_list`); `dashboard()` now calls it too, so the dashboard's
+    cards carry the stale marker the pill's count refers to (test below; it fails on `/` without the
+    line). Everything else was already wired:
+  - `fleet_review` / `review_fleet.html` ← `GET /review`, reached from `dashboard()`'s `issues_href`
+    (`/review` for ≥2 affected collections) and the collection cards.
+  - `_review_return_base` ← `_guarded_accept`'s refusal redirect **and** `collection_file_accept`'s
+    success redirect (the fixed pair, both legs).
+  - `row_from` / `row_view` ← set by `review_fleet.html` (literal `"fleet"`) and by `ack_event`'s
+    fleet branch; both default to the collection page, whose markup is unchanged. `review_row.html`
+    is included only by `collection_review.html`, `review_fleet.html` and `review_ack_row.html` —
+    Slice B's card/detail templates never include it, so the new params collide with nothing.
+  - `pill_id` ← `ack_event` (`review-open-pill-{id}` for the fleet view, the bare id otherwise).
+  - `run_health_note` ← all three sites: `_collection_card.html` "Last scan", `collection_detail.html`
+    header (both `ots_mode` values) and the tripwire "Last scan" tile.
+  - `partials/health_pill.html` ← `base.html` (`status=None`, `load, every 30s`) and the
+    `/health-pill` route. Asserted on **every** page shell — `/`, `/collections`, `/review`,
+    `/settings`, collection detail — by `test_the_neutral_pill_is_rendered_by_every_page_shell`,
+    which also covers Slice A's new page inheriting Slice B's shell.
+  - `runs.errors` / `runs.error_sample` ← written at `scanner.py`'s finalize site
+    (`_build_error_sample`), read by `_collection_view` (`last_errors` / `_decode_error_sample`) and
+    rendered by `run_health_note`.
+  - `can_retry` ← set in `verify_run`, gated in `verify_result.html`. `CollectionHealth.id` ←
+    `_attach_health_state` and `/healthz`.
+  - CSS: **only Slice B touched `panel.css`** (`.health-pill.is-unknown`, `.stale-marker`,
+    `.run-health*`), so there was no cross-slice CSS conflict; every class Slice A's
+    `review_fleet.html` uses already had a rule (it reuses the collection review page's
+    `.review-list__*` / `.review-row__*` vocabulary and added none of its own).
+- [x] 4.3 Full gates on the merged tree: `PYTHONPATH=. pytest -q` (**660 passed, 2 skipped**),
+  `ruff check src tests` clean, `alembic upgrade head` to `0012_run_error_visibility` on a scratch DB
+  (`runs` carries `errors` + `error_sample`), `make audit` — no known vulnerabilities.
+- [x] 4.4 `openspec validate add-fleet-review-and-run-health --strict` green, **and** §6's
   scenario ↔ test matrix walked row by row: every scenario in the four spec deltas has a named test
   that exists and passes. A scenario with no test is a requirement nothing checks.
-- [ ] 4.5 Update `CLAUDE.md`'s working notes with a paragraph for this change (fleet review page,
+  - Every scenario in the four deltas has a matrix row, and every row now names a test that exists
+    and passes. **Two rows claimed "existing" for coverage that did not exist**, both found by the
+    walk and both closed here rather than left as a requirement nothing checks:
+    `app-runtime` "Datastore unreachable" (the 503/`error` leg of the dead-man's switch — the one
+    `/healthz` outcome nothing asserted) → `test_healthz_reports_error_when_the_datastore_cannot_be_reached`;
+    `web-panel` "Watched-but-not-baselined files are explained" → `test_the_new_files_tile_accounts_for_watched_but_not_baselined_files`.
+  - **Noted, not changed:** the `app-runtime` matrix carries one row ("A failed first scan inside
+    grace is stale, not pending") with no `#### Scenario:` heading of its own in the delta. It is not
+    a gap — the requirement prose covers it explicitly ("and when its only scan runs never
+    completed") and 3.25(d) tests it — but the delta could carry it as a scenario of its own.
+- [x] 4.5 Update `CLAUDE.md`'s working notes with a paragraph for this change (fleet review page,
   feed ordering, health pill, `runs.errors`/`error_sample`, migration 0012, and the
   `interrupted`-is-normal rendering rule).
 
@@ -422,7 +466,7 @@ gap** — add the test, do not delete the row.
 | Unreviewed events are visible in the feed that offers to clear them | 2.18 |
 | A healthy system's feed is not emptied | 2.18 |
 | The badge and the tile agree | existing |
-| Watched-but-not-baselined files are explained | existing |
+| Watched-but-not-baselined files are explained | 4.4 (`test_the_new_files_tile_accounts_for_watched_but_not_baselined_files`) |
 | The last-activity tile names a non-scan run for what it is | 2.26 (`stamp`, `upgrade` cases) |
 | The last-activity tile names a partial or failed run | 2.26 (`partial`, `error` cases) |
 | The last-activity tile treats an interrupted run neutrally | 2.26 (`interrupted` case) |
@@ -484,7 +528,7 @@ gap** — add the test, do not delete the row.
 | No completed scan and no running scan is stale | 3.25(d) |
 | The reported age describes a completed scan | 3.25(b) (`last_scan_age_seconds is None`) |
 | A stamp or upgrade run does not refresh freshness | 3.25(e) |
-| Datastore unreachable | existing |
+| Datastore unreachable | 4.4 (`test_healthz_reports_error_when_the_datastore_cannot_be_reached`) |
 | Each freshness record identifies its corpus | 3.18 |
 | The endpoint reports every owner's corpora | 3.26 (`/healthz` half) |
 

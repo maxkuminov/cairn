@@ -329,6 +329,40 @@ def test_healthz_carries_the_collection_id_alongside_the_existing_keys(cairn_env
         assert entry["state"] == "fresh"
 
 
+def test_healthz_reports_error_when_the_datastore_cannot_be_reached(cairn_env):
+    """app-runtime "Datastore unreachable" (matrix 4.4).
+
+    The delta marks this scenario "existing", but the matrix walk found nothing asserting it: the
+    503/``error`` leg of the dead-man's switch was the one `/healthz` outcome no test covered.
+    It matters most exactly here — a switch that answered 200 with an unreadable datastore would
+    report health it never computed, which is this change's whole defect class.
+    """
+
+    async def seed():
+        await _new_collection(cairn_env / "hz-down", cadence=900)
+
+    with _make_client(seed) as client:
+        import src.main as main
+
+        async def _dead() -> bool:
+            return False
+
+        original, main.ping = main.ping, _dead
+        try:
+            resp = client.get("/healthz")
+        finally:
+            main.ping = original
+
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "error"
+        # No freshness list: an unreadable datastore yields no per-collection verdict to state.
+        assert "collections" not in body
+
+        # …and the switch recovers rather than latching.
+        assert client.get("/healthz").status_code == 200
+
+
 # --- 3.26 / 3.27 the panel is owner-scoped; /healthz is not -----------------------------------
 
 
@@ -385,6 +419,47 @@ def test_the_stale_marker_attaches_by_id_not_by_name(cairn_env):
         assert "Healthy" in client.get("/health-pill").text
 
 
+def _card_for(html: str, cid: int) -> str:
+    """The slice of a rendered page belonging to one collection card (cards are keyed by id)."""
+    marker = f'collection-card" href="/collection/{cid}"'
+    start = html.index(marker)
+    nxt = html.find('collection-card" href="/collection/', start + len(marker))
+    return html[start : nxt if nxt != -1 else len(html)]
+
+
+@pytest.mark.parametrize("page", ["/", "/collections"])
+def test_the_stale_marker_reaches_the_cards_on_both_listing_pages(cairn_env, page):
+    """3.7: `dashboard()` and `collections_list()` both attach owner-scoped freshness to their cards.
+
+    The pill says "Degraded - N collection(s)"; these markers are the only thing that says WHICH.
+    The dashboard is the page the operator is already on, so a missing call there leaves an overdue
+    collection rendering exactly like a freshly-scanned one.
+    """
+
+    async def seed():
+        fresh = await _new_collection(cairn_env / "dash-fresh", cadence=900, name="Fresh One")
+        stale = await _new_collection(cairn_env / "dash-stale", cadence=900, name="Stale One")
+        now = _utcnow()
+        await _add_run(fresh, result="ok", started=now, finished=now)
+        await _age_collection(stale, seconds=6 * 3600)  # no runs at all, past the grace
+        await _age_collection(fresh, seconds=6 * 3600)  # grace must not be what keeps it fresh
+        return fresh, stale
+
+    ids: dict[str, int] = {}
+
+    async def seed_and_record():
+        fresh, stale = await seed()
+        ids["fresh"], ids["stale"] = fresh, stale
+
+    with _make_client(seed_and_record) as client:
+        html = client.get(page).text
+        assert html.count("scan overdue") == 1
+        assert "scan overdue" in _card_for(html, ids["stale"])
+        assert "scan overdue" not in _card_for(html, ids["fresh"])
+        # ...and the count the pill names comes from the same owner-scoped report.
+        assert "Degraded" in client.get("/health-pill").text
+
+
 # --- 3.19 the pill names what is degraded, and nothing fabricates a verdict --------------------
 
 
@@ -417,6 +492,35 @@ def test_the_pill_claims_nothing_before_the_poll_has_answered(cairn_env):
         assert "health-pill__label" in page
         assert ">Healthy<" not in head
         assert 'hx-trigger="load, every 30s"' in page
+
+
+def test_the_neutral_pill_is_rendered_by_every_page_shell(cairn_env):
+    """Integration (4.2): the pill lives in `base.html`, so EVERY page that extends it — including
+    Slice A's new `/review` — must ship the neutral pre-poll state and the `load` trigger.
+
+    A page that rendered the shell without the include would show no health indicator at all; one
+    that re-hardcoded a green pill would be the original defect returning by another door.
+    """
+
+    async def seed():
+        cid = await _new_collection(cairn_env / "shell", cadence=900)
+        now = _utcnow()
+        await _add_run(cid, result="ok", started=now, finished=now)
+        return cid
+
+    ids: dict[str, int] = {}
+
+    async def seed_and_record():
+        ids["cid"] = await seed()
+
+    with _make_client(seed_and_record) as client:
+        for path in ("/", "/collections", "/review", "/settings", f"/collection/{ids['cid']}"):
+            html = client.get(path).text
+            assert 'id="health-pill"' in html, path
+            assert "Checking" in html, path
+            assert 'hx-trigger="load, every 30s"' in html, path
+            head = html.split('id="health-pill"')[1][:600]
+            assert ">Healthy<" not in head, path
 
 
 def test_the_settings_page_shows_no_fabricated_health_pill(cairn_env):

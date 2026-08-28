@@ -375,6 +375,56 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > files" is resolved: a new file appearing refuses nothing and is not promoted. Gates: 2-round spec
 > review, 3-round adversarial implementation review to PASS-zero, verifier 65/65, live pass 6/6.
 
+> Fleet review + run health (add-fleet-review-and-run-health): five audit issues, one defect class —
+> **a surface asserting a status it never computed**. (1) **`GET /review`** (`review_fleet.html`) is
+> the fleet-wide review page the dashboard's "Open issues" tile now lands on when two or more
+> collections are affected (one affected → its own review page; zero → an inert element). One
+> `_read_population` per collection, grouped `missing DESC, modified DESC, name`, capped by
+> `FLEET_COLLECTION_ROW_LIMIT=100` per group and `FLEET_ROW_LIMIT=500` overall — a group past the
+> budget still renders its header, counts and "Review all in X →" link with zero rows, so one huge
+> collection can never hide the others. Each row's open event comes from that same `pop.open_events`
+> snapshot (**never** `_latest_events_by_file`), so the state a row *displays* and the fingerprint it
+> *authorizes* can't come from two reads. **No collection-spanning bulk verb** — per-row accept and
+> mark-reviewed only. `partials/review_row.html` is shared with the collection review page via
+> `row_from`/`row_view` (both default to the collection page, whose markup is byte-identical);
+> `_review_return_base(collection_id, origin)` whitelists the return destination to a **fixed pair**
+> (`"fleet"` or the collection's own review page) — the `from` query value selects a destination and
+> never reaches the `Location` header, and the verb stays a route constant. (2) The **event feed**
+> orders `acknowledged_at IS NULL DESC` before `detected_at DESC` — ordered, never filtered (#12's
+> rejected fix 2), same `limit(20)`, same real COUNTs. (3) The **last-activity tile** names the run it
+> actually found (`"<collection> <kind>"` + `· <result>` when not `ok`) instead of labelling every
+> `stamp`/`upgrade`/`partial`/`error`/`interrupted` run a clean scan. (4) The **health pill** is now
+> one `partials/health_pill.html` include in `base.html`, rendered `status=None` → a neutral
+> **`Checking…`** (the old hardcoded green "Healthy" asserted the dead-man's switch was fine before
+> anything was computed) and filled in by a `load, every 30s` poll of `/health-pill`; degraded reads
+> **`Degraded · N collection(s)`** as a *visible* label on an `<a href="/collections">`. Panel health
+> is **owner-scoped** (`compute_health(..., user_id=user.id)`) and the per-card **"scan overdue"**
+> markers are attached by `routes._attach_health_state` — one report per render, matched **by id**
+> (no constraint makes a name unique across owners) — from `dashboard()` *and* `collections_list()`.
+> **`/healthz` stays fleet-global** (it monitors the installation) and its per-collection objects gain
+> an additive `id`. (5) **`compute_health`'s freshness classification changed**: a newest completed
+> `kind='scan'` run inside `max(2×cadence, floor)` is fresh; a `running` scan is fresh only while
+> `coalesce(heartbeat_at, started)` is inside `RUN_HEARTBEAT_TIMEOUT_SECONDS` — the same threshold the
+> reaper uses, so a **crashed** scanner's leftover `running` row now reads **stale** instead of fresh,
+> while a legitimately long live scan still can't age out its own freshness (issue #5). The startup
+> grace covers **never-scanned** collections only, so a first scan that ended `error`/`interrupted`
+> inside the window is stale. `last_scan_age_seconds` describes the newest *completed* scan (`None`
+> when there is none). (6) **Migration `0012`** (additive, no rebuild) adds `runs.errors` +
+> `runs.error_sample`; the scanner persists the skip count and a **bounded ASCII-safe JSON array of
+> diagnostic renderings — not paths** (20 entries / 256 B per entry / 4096 B serialized, last element
+> `"+N more skipped (sample truncated)"`; `runs.errors` always carries the true total) at all three
+> skip sites, plus one finalize WARNING covering all three causes (`stat` and hash skips were silent).
+> `_macros.run_health_note(c)` renders one honest line at all three sites a scan result is visible
+> (card, detail header for both `ots_mode` values, the tripwire "Last scan" tile): `partial — N
+> file(s) skipped` with the sample, a **muted, never red** note for an `interrupted` run ("app restart
+> or reclaimed claim" — a normal outcome, **not** a fault), and a real failure marker for `error`.
+> `_collection_view` keeps its existing freshness query and adds a *separate* `latest_run_result`
+> scalar, so a `partial` completed scan followed by a newer failure states both without either
+> erasing the other. (7) **#24 remainder:** the verify card renders the typed `transport_error` and
+> drops the generic backend `message`, and offers a **Retry** only when a transport failure or an
+> inconclusive result decided the verdict — never on a settled one (never-notarized, queued,
+> unreadable proof, any mismatch).
+
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
   Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).
