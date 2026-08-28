@@ -51,7 +51,7 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="population_fp" value="{{ population_fp }}" />
         <button class="btn btn--primary" type="submit"
-                title="Folds files Cairn found but you haven't vouched for into your expected set. They're already watched and notarized — this only clears the New label. There's no un-baseline.">{{ m.icon("check", size=15) }} Baseline new files</button>
+                title="Folds files Cairn found but you haven't vouched for into your expected set. They're already watched and notarized — this only clears the New label. There's no un-baseline.">{{ m.icon("check", size=15) }} Baseline {{ c.counts.new }} new file{{ '' if c.counts.new == 1 else 's' }}</button>
       </form>
     {% endif %}
   </div>

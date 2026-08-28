@@ -399,7 +399,7 @@ def test_detail_header_offers_no_accept_while_issues_are_open(cairn_env):
         body = client.get("/collection/1").text
         assert 'action="/collection/1/accept"' not in body
         assert "Accept changes" not in body
-        assert "Baseline new files" not in body
+        assert "Baseline " not in body
         assert 'href="/collection/1/review"' in body
 
 
@@ -415,7 +415,7 @@ def test_detail_header_hides_the_baseline_form_while_an_event_is_open(cairn_env)
 
     with _make_client(cairn_env, seed) as client:
         body = client.get("/collection/1").text
-        assert "Baseline new files" not in body
+        assert "Baseline " not in body
         assert 'action="/collection/1/accept"' not in body
         assert 'href="/collection/1/review"' in body
 
@@ -430,7 +430,7 @@ def test_detail_header_offers_the_light_baseline_confirm_when_everything_is_quie
 
     with _make_client(cairn_env, seed) as client:
         body = client.get("/collection/1").text
-        assert "Baseline new files" in body
+        assert "Baseline 1 new file</button>" in body
         assert "Baseline 1 new file as the expected version?" in body
         assert 'name="population_fp"' in body
 

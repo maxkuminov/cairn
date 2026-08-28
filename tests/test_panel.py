@@ -316,7 +316,7 @@ def test_new_only_collection_reads_all_clear_with_baseline_button(cairn_env):
         assert "All clear" in r.text
         assert "Attention" not in r.text
         # The baseline affordance is present (and labelled for new files, not "Accept changes").
-        assert "Baseline new files" in r.text
+        assert "new file" in r.text and "Baseline" in r.text
         assert "/collection/1/accept" in r.text
         # Regression: the form must be a plain POST→redirect (a real page refresh), not an htmx
         # hx-post with hx-swap="none" that silently discards the redirected page and leaves the UI
