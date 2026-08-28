@@ -457,8 +457,6 @@ def test_a_filter_without_an_explicit_view_implies_the_list_view(cairn_env):
 
 
 def test_review_route_publishes_the_fingerprint_and_stale_flag(cairn_env):
-    # TODO(seam): slice C renders `population_fp` (hidden input) and `stale` (banner) in
-    # collection_review.html; post-merge, assert the hidden field and the banner in the HTML.
     root = cairn_env / "ctx"
     root.mkdir()
 
@@ -468,7 +466,7 @@ def test_review_route_publishes_the_fingerprint_and_stale_flag(cairn_env):
 
     with _make_client(cairn_env, seed) as client:
         with _capture_context() as captured:
-            client.get("/collection/1/review")
+            plain = client.get("/collection/1/review").text
             client.get("/collection/1/review?stale=1")
             client.get("/collection/1/review?stale=yes")
 
@@ -479,6 +477,10 @@ def test_review_route_publishes_the_fingerprint_and_stale_flag(cairn_env):
     assert ctxs[0]["stale"] is False
     assert ctxs[1]["stale"] is True
     assert ctxs[2]["stale"] is False  # only `1` is recognized, exactly as view/filter are
+
+    # The template half renders it: the Accept form carries the very fingerprint that was minted,
+    # so a POST of the rendered page matches the recount (design D14).
+    assert f'name="population_fp" value="{ctxs[0]["population_fp"]}"' in plain
 
 
 # --- D14: the guard, both routes -------------------------------------------------------------

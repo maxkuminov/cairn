@@ -475,25 +475,25 @@ mobile section), new `tests/test_ux_docs.py`.
   `CAIRN_VERIFY_BACKEND`.
 
 ## 6. Integration (after all slices merge)
-- [ ] 6.1 Merge the slices and resolve `routes.py` / `panel.css` by the §D12 ownership map — if a
+- [x] 6.1 Merge the slices and resolve `routes.py` / `panel.css` by the §D12 ownership map — if a
   hunk falls outside its slice's declared region, that is a scope violation, not a merge conflict.
   Then check the one **cross-slice contract**: every accept-family form renders a non-empty
   `population_fp` (grep `collection_detail.html` and `collection_review.html`) and both routes
   recompute it. B's route half and C's template half must land in the same merge — the routes fail
   closed, so a half-merge refuses every accept rather than accepting one unguarded.
-- [ ] 6.2 Grep for stragglers of the renamed vocabulary: no user-facing `"Acknowledge"` outside the
+- [x] 6.2 Grep for stragglers of the renamed vocabulary: no user-facing `"Acknowledge"` outside the
   review page's explanatory contrast card (which keeps the noun deliberately); no user-facing
   `"Incomplete"` remaining; and **no surface applying "pending confirmation" to `ots_state='pending'`
   or summing it with `incomplete`** (design D13) — including the verify verdict, whose `pending`
   branch must read "Queued to stamp" in both the panel and the CLI.
-- [ ] 6.3 Confirm **no** file under `alembic/` changed and no model column was added — this change is
+- [x] 6.3 Confirm **no** file under `alembic/` changed and no model column was added — this change is
   schema-free by contract, so no `make migrate` after deploy.
-- [ ] 6.4 `PYTHONPATH=. pytest -q` — full suite green, including the pre-existing
+- [x] 6.4 `PYTHONPATH=. pytest -q` — full suite green, including the pre-existing
   `tests/test_panel.py` regression tests (the tile, badge, and review templates it already asserts
   on are edited here).
-- [ ] 6.5 `ruff check .` clean.
-- [ ] 6.6 `openspec validate fix-ux-audit-sprint1 --strict` passes.
-- [ ] 6.7 `make audit` (pip-audit) — unchanged dependency set, so this must stay green.
+- [x] 6.5 `ruff check .` clean.
+- [x] 6.6 `openspec validate fix-ux-audit-sprint1 --strict` passes.
+- [x] 6.7 `make audit` (pip-audit) — unchanged dependency set, so this must stay green.
 - [ ] 6.8 Adversarial Codex pass. Mandatory trigger: this change touches the verify verdict path.
   Frame it as a defensive control review and say what "wrong" means here — the expensive failure is a
   **false negative** (a changed or deleted file that reads clean, a proof that reads verified when it

@@ -10,9 +10,9 @@ Two levels are used deliberately:
 * **Route level** (TestClient) for everything the shipped `collection_review` route already
   publishes — `total_issues`, `review_open`, the rows.
 * **Template level** (render the Jinja template against a hand-built context) for `population_fp`
-  and `stale`, which are published by slice B's `collection_review` in a different worktree. The
-  template must render them when they are there and degrade to today's page when they are not, and
-  the template-level render is the only way to assert both halves of that before the merge.
+  and `stale`, which the route publishes on every render. The template must render them when they
+  are there and degrade to a fail-closed empty field when they are not, which a hand-built context
+  is the only way to exercise.
 
 Run from the repo root: ``PYTHONPATH=. pytest tests/test_ux_review.py``
 """
@@ -81,8 +81,8 @@ async def _seed_ok_file_and_open_event(cid: int) -> None:
 def _render_review(**overrides) -> str:
     """Render `collection_review.html` directly against a full, hand-built page context.
 
-    Slice B's route publishes `population_fp` / `stale`; this renders the template's half of that
-    contract without depending on the route, so the two can be merged in either order.
+    The route publishes `population_fp` / `stale`; this renders the template's half of that
+    contract independently, so the degraded (key-absent) render can be asserted too.
     """
     from starlette.requests import Request
 
@@ -271,16 +271,17 @@ def test_accept_form_is_the_loud_button_and_carries_the_population_field(cairn_e
 
     # Un-inverted (design D8): the destructive control is the loud one.
     assert 'class="btn btn--danger btn--full"' in body
-    assert 'name="population_fp"' in body
-    # TODO(seam): slice B's `collection_review` publishes a non-empty `population_fp`; once merged,
-    # assert `value="<64 hex chars>"` here instead of only on the template render below. The route
-    # fails closed on an absent or empty field, so a half-merge refuses accepts.
+    # The route publishes a real fingerprint, so the rendered form carries one (design D14). The
+    # POST fails closed on an absent or empty field, so an empty value here would refuse accepts.
+    field = re.search(r'name="population_fp" value="([^"]*)"', body)
+    assert field, "the accept form does not carry a population_fp field"
+    assert re.fullmatch(r"[0-9a-f]{64}", field.group(1))
 
 
 def test_population_fp_is_rendered_when_the_route_publishes_it(cairn_env):
     html = _render_review(population_fp="a" * 64)
     assert f'name="population_fp" value="{"a" * 64}"' in html
-    # Absent from the context (today's route), the field is still there and still fails closed.
+    # Absent from the context, the field is still there and still fails closed at the route.
     assert 'name="population_fp" value=""' in _render_review()
 
 
@@ -292,7 +293,7 @@ def test_stale_banner_renders_only_when_the_route_says_stale(cairn_env):
 
 
 def test_plain_review_get_has_no_stale_banner(cairn_env):
-    """Today's route publishes no `stale`; after the merge only the whitelisted value sets it."""
+    """Only the whitelisted `?stale=1` sets the banner; nothing else may claim a refusal."""
     root = cairn_env / "photos"
     root.mkdir()
 
@@ -304,4 +305,7 @@ def test_plain_review_get_has_no_stale_banner(cairn_env):
         assert STALE_COPY not in client.get("/collection/1/review").text
         # An unrecognized value is not a refusal and must never claim one.
         assert STALE_COPY not in client.get("/collection/1/review?stale=maybe").text
-        # TODO(seam): with slice B merged, `?stale=1` renders the banner — assert that here.
+        # Only the whitelisted `1` renders the refusal banner (design D14, D11's whitelist shape).
+        refused = client.get("/collection/1/review?stale=1").text
+        assert STALE_COPY in refused
+        assert 'id="stale-banner"' in refused

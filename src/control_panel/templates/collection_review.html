@@ -157,9 +157,8 @@
               onsubmit="return confirm('Accept all changes? Modified files become the new baseline and missing files stop being tracked. This does not delete anything on disk.');">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
           {# Binds this form to the population it was rendered for: the POST recomputes the same
-             fingerprint inside the write transaction and refuses on any drift (design D14).
-             TODO(seam): once Slice B's `collection_review` publishes `population_fp`, this value is
-             non-empty on every render — assert that in tests/test_ux_review.py post-merge. #}
+             fingerprint inside the write transaction and refuses on any drift (design D14). The
+             route always publishes a 64-hex value; an absent or empty field is refused. #}
           <input type="hidden" name="population_fp" value="{{ population_fp | default('', true) }}" />
           {# Un-inverted per design D8: this one rewrites baselines and deletes rows, so it is the
              loud button — not the per-row reading-log write. #}
