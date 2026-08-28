@@ -64,6 +64,13 @@ _NAME_MAX_BYTES = 255
 # without running a Bitcoin node.
 DEFAULT_EXPLORER_URL = "https://blockstream.info"
 
+# A Bitcoin block time can only fall between the genesis block (2009-01-03) and, generously, the
+# year 2100. A value outside that is a malformed explorer response, not a block: it is rejected at
+# the fetch boundary so it can never reach the attestation comparison (which would read as a proof
+# mismatch) or be formatted into an "existed by" date the operator is invited to rely on.
+_MIN_BLOCK_TIME = 1231006505
+_MAX_BLOCK_TIME = 4102444800
+
 
 def _ots_bin() -> str:
     """Resolve the ``ots`` executable.
@@ -137,22 +144,43 @@ class VerifyResult:
     # Why verification did not succeed. Reason and blame are separate signals, so they are
     # separate fields with separate copy (design D1/D2). Defaults keep every existing
     # construction site valid.
-    digest_mismatch: bool = False  # live digest != the digest the proof commits to  (explorer)
+    #
+    # `digest_mismatch` is the transport of a *neutral* finding: the live digest and the digest the
+    # proof commits to DISAGREE. Parsing the `.ots` establishes the disagreement, never which of the
+    # two artifacts moved — a flipped byte inside a structurally valid serialized `file_digest`
+    # produces exactly the same signal as a modified file. Blame is assigned by the callers, which
+    # hold the third data point this module does not: the file's recorded baseline digest
+    # (`files.sha256`). See design D1.
+    digest_mismatch: bool = False  # live digest and the proof's committed digest DISAGREE (explorer)
     proof_mismatch: bool = False  # attestation commitment != block merkle root      (explorer)
     transport_error: str | None = None  # backend unreachable; nothing was established
+    # How many lookups produced `transport_error`, carried structurally rather than recovered by
+    # splitting the human-readable text (one error may itself contain the "; " join separator).
+    transport_failures: int = 0
     inconclusive: bool = False  # this backend cannot tell pending/mismatch/unreachable apart
+    # The `.ots` could not be parsed at all: nothing — about the file OR the proof's content — was
+    # established. Distinct from every "not verified" outcome, which all presuppose a readable proof.
+    unreadable_proof: bool = False
 
 
-def failed_lookup_count(transport_error: str | None) -> int:
-    """How many attestation lookups the joined ``transport_error`` reports (0 when unset).
+def failed_lookup_count(result: VerifyResult | None) -> int:
+    """How many attestation lookups failed on ``result`` (0 when there was no transport failure).
 
-    ``_verify_via_explorer`` joins its fetch failures with ``"; "``; both consumers of
-    :class:`VerifyResult` (the panel card and ``cairn verify``) disclose the count under a verdict
-    that outranks the transport failure, so the split lives here rather than in each of them.
+    Read from the structural ``transport_failures`` counter, never recovered by splitting the joined
+    ``transport_error`` text: a single human-readable error may itself contain the ``"; "`` the join
+    uses (``HTTP Error 503: retry later; overloaded``), and reporting one failed lookup as two
+    overstates how much of a proof went unchecked. Both consumers of :class:`VerifyResult` (the panel
+    card and ``cairn verify``) disclose this count under a verdict that outranks the transport
+    failure, so the accessor lives here rather than in each of them.
+
+    A result carrying a reason but no count (a hand-built fallback at a call site) reports one
+    failure — the reason itself. Never zero, which would silently drop the disclosure.
     """
-    if not transport_error:
+    if result is None:
         return 0
-    return len([part for part in transport_error.split("; ") if part.strip()])
+    if result.transport_failures:
+        return result.transport_failures
+    return 1 if result.transport_error else 0
 
 
 def _run_ots(args: list[str], timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, str]:
@@ -173,6 +201,11 @@ def _run_ots(args: list[str], timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str,
         raise OtsError("the 'ots' CLI is not installed or not on PATH") from exc
     except subprocess.TimeoutExpired as exc:
         raise OtsError(f"ots {args[0] if args else ''} timed out after {timeout}s") from exc
+    except OSError as exc:  # pragma: no cover - environment guard (EACCES, ENOEXEC, EMFILE...)
+        # Every other process-start failure is normalised to the module's own error type, so the
+        # callers' `except OtsError` transport boundaries actually cover it instead of letting a
+        # raw OSError escape into a caller that has no catch at all (`cairn verify`).
+        raise OtsError(f"could not run the 'ots' CLI: {exc}") from exc
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
 
@@ -509,7 +542,20 @@ def _verify_via_cli(
     :func:`info` supplies the state and calendars.
     """
     ots_path = Path(ots_path)
-    proof = info(ots_path)
+    try:
+        # `info` shells out too (`ots info`), so a missing binary or a timeout here fails exactly
+        # the way the verification call does — and must land on the same typed transport result.
+        # Left outside the boundary it escaped as an exception: the panel's outer `except OtsError`
+        # masked it, but `cairn verify` has no catch and aborted instead of printing COULD NOT CHECK.
+        proof = info(ots_path)
+    except OtsError as exc:
+        return VerifyResult(
+            verified=False,
+            state="none",
+            transport_error=str(exc),
+            transport_failures=1,
+            message=str(exc),
+        )
     if proof.state == "none":
         return VerifyResult(
             verified=False,
@@ -534,26 +580,37 @@ def _verify_via_cli(
             state="none",
             calendars=proof.calendars,
             transport_error=str(exc),
+            transport_failures=1,
             message=str(exc),
         )
     combined = f"{out}\n{err}"
     match = _VERIFY_SUCCESS_RE.search(combined)
-    if match:
+    if rc == 0:
+        # The PROCESS EXIT STATUS is the success contract, not the shape of a stdout line. `ots
+        # verify -d` exits 0 only when the attestation checked out against the node; regexing the
+        # wording instead both swallowed a successful exit whose phrasing changed and — far worse —
+        # could return `verified=True` over a NON-ZERO exit whose stderr happened to quote a
+        # success line. The regex is now consulted for OPTIONAL provenance metadata only, and a
+        # verified result with no parsed block/date must render correctly in both consumers.
         return VerifyResult(
             verified=True,
             state="complete",
-            block_height=int(match.group(1)),
-            existed_by=match.group(2).strip(),
+            block_height=int(match.group(1)) if match else None,
+            existed_by=match.group(2).strip() if match else None,
             calendars=proof.calendars,
             message=combined.strip(),
         )
-    # No success line. `ots verify -d` reports an unanchored proof, a changed file and a dead
+    # Non-zero exit. `ots verify -d` reports an unanchored proof, a changed file and a dead
     # Bitcoin node identically, so this backend cannot say which happened: `inconclusive`, never a
     # guessed mismatch and never the old reassuring "pending" (design D1). Deliberately asymmetric
     # with `_verify_via_explorer`, which parses the proof locally and therefore *knows* whether the
     # digest matched and whether each attestation checks out — it sets the two mismatch flags
     # because it establishes them; classifying this exit by regexing the CLI's wording would be a
     # guess, and a false mismatch is a false alarm on the product's core signal.
+    # `block_height` here is what the proof *claims*, read offline from `ots info` — nothing
+    # confirmed it against the Bitcoin record, and on a changed file it belongs to the digest the
+    # proof was made from, not to the live one. Consumers MUST label it as proof-declared and
+    # unverified, and must never juxtapose it with the live fingerprint (design D1, BLOCKER 3).
     return VerifyResult(
         verified=False,
         state=proof.state,
@@ -575,12 +632,18 @@ def _verify_via_explorer(
     Parses the ``.ots`` with the OpenTimestamps library, checks the supplied ``digest`` is the file
     hash the proof commits to, then for each ``BitcoinBlockHeaderAttestation`` fetches the real
     block at that height and confirms the attestation's commitment equals the block's merkle root.
-    The earliest confirmed block time is the "existed by" date. A digest mismatch sets
-    ``digest_mismatch`` (the *file* changed); a merkle mismatch with no validated attestation sets
-    ``proof_mismatch`` (the proof or the explorer's block data is wrong — not evidence about the
-    file); every fetch failure is accumulated into ``transport_error`` and attached to whichever
-    terminal result is returned, so an unreachable explorer is never a false "verified" and never a
-    silent one either.
+    The earliest confirmed block time is the "existed by" date.
+
+    A disagreement between the supplied digest and the proof's committed digest sets
+    ``digest_mismatch`` — a NEUTRAL finding (design D1): the two disagree, and this function cannot
+    tell whether the file's bytes moved or the proof's serialized digest did, so it assigns no
+    blame and the callers do (they hold the file's recorded baseline). A merkle mismatch with no
+    validated attestation sets ``proof_mismatch`` (the proof or the explorer's block data is wrong —
+    not evidence about the file); a proof that cannot be parsed sets ``unreadable_proof`` (nothing
+    was established at all). Every fetch failure is accumulated into ``transport_error`` (counted in
+    ``transport_failures``) and attached to whichever terminal result is returned, so an unreachable
+    explorer is never a false "verified" and never a silent one either — and a *malformed* explorer
+    response is a fetch failure too, never a mismatch.
     """
     # Imported lazily so the module stays importable (and the node path / tests stay network-free)
     # without the OpenTimestamps library present.
@@ -598,7 +661,15 @@ def _verify_via_explorer(
         with ots_path.open("rb") as fh:
             detached = DetachedTimestampFile.deserialize(StreamDeserializationContext(fh))
     except Exception as exc:  # malformed / truncated / not a timestamp file
-        return VerifyResult(verified=False, state="none", message=f"unreadable proof: {exc}")
+        # Nothing was established — not about the file, not about the proof's content. Flagged so
+        # the consumers can say exactly that instead of falling through to copy that offers
+        # "the file may have changed, or the proof may not be confirmed yet" as possibilities.
+        return VerifyResult(
+            verified=False,
+            state="none",
+            unreadable_proof=True,
+            message=f"unreadable proof: {exc}",
+        )
 
     try:
         want = binascii.unhexlify(digest)
@@ -614,14 +685,22 @@ def _verify_via_explorer(
             pending.append(att.uri)
 
     if want != detached.file_digest:
-        # The file no longer hashes to what the proof stamped → the proof doesn't cover these bytes.
+        # The live digest and the digest this proof commits to DISAGREE. That is all this
+        # comparison establishes: a `.ots` whose serialized `file_digest` had one byte flipped
+        # deserializes perfectly and lands here just as a genuinely modified file does, and no
+        # attestation has been validated at this point either. Blame needs a third data point this
+        # module does not have — the file's recorded baseline digest — so it is assigned by the
+        # callers (design D1), and the message stays neutral about which artifact moved.
         state = "complete" if bitcoin else ("incomplete" if pending else "none")
         return VerifyResult(
             verified=False,
             state=state,
             calendars=pending,
             digest_mismatch=True,
-            message="file digest does not match the stamped proof (file changed since stamping)",
+            message=(
+                "the file's digest does not match the digest this proof commits to; "
+                "the proof alone cannot say which of the two changed"
+            ),
         )
 
     if not bitcoin:
@@ -653,6 +732,9 @@ def _verify_via_explorer(
     # failure is never dropped because another outcome was decided first, and a later edit cannot
     # reintroduce a return that silently discards it (design D2).
     transport_error = "; ".join(errors) or None
+    # The COUNT is carried structurally beside the joined text; recovering it by splitting the text
+    # miscounts any single error that itself contains the separator (design D2 / MINOR 7).
+    transport_failures = len(errors)
 
     # A validated attestation wins. OTS verification is *existential* — one attestation confirmed
     # against its real block IS the proof, and a proof may legitimately carry several. So a
@@ -674,6 +756,7 @@ def _verify_via_explorer(
             existed_by=existed_by,
             calendars=pending,
             transport_error=transport_error,
+            transport_failures=transport_failures,
             message=message,
         )
 
@@ -686,6 +769,7 @@ def _verify_via_explorer(
             calendars=pending,
             proof_mismatch=True,
             transport_error=transport_error,
+            transport_failures=transport_failures,
             message="Bitcoin merkle root does not match the proof — the proof or the explorer's block data may be wrong (this is not evidence the file changed)",
         )
 
@@ -694,6 +778,7 @@ def _verify_via_explorer(
         state="complete",
         calendars=pending,
         transport_error=transport_error,
+        transport_failures=transport_failures,
         message=transport_error or "could not reach the block explorer",
     )
 
@@ -704,17 +789,34 @@ def _fetch_block_merkleroot(api: str, height: int, timeout: int) -> tuple[bytes,
     Two esplora calls: the canonical block hash at the height, then that block's header. The
     explorer reports the merkle root in display (big-endian) hex; reverse it to the internal byte
     order an OTS ``BitcoinBlockHeaderAttestation`` commits to.
+
+    **Every field is validated to be a well-formed block header value before it is returned.** The
+    caller's only use for the merkle root is an equality test against an attestation's commitment,
+    and an inequality there is reported as a *proof mismatch* — a red "this proof does not check
+    out" over the operator's evidence. So a well-formed-but-wrong value and a malformed one must
+    never both reach that comparison: ``{"merkle_root": "00"}`` is not a merkle root that differs,
+    it is an explorer that answered badly. Anything malformed raises :class:`OtsError` and joins the
+    accumulated transport failures, where "nothing was established" is the honest verdict.
     """
     block_hash = _http_get_text(f"{api}/block-height/{height}", timeout)
     if not re.fullmatch(r"[0-9a-fA-F]{64}", block_hash):
         raise OtsError(f"explorer returned no block at height {height}")
     block = _http_get_json(f"{api}/block/{block_hash}", timeout)
-    try:
-        merkle_root = bytes.fromhex(block["merkle_root"])[::-1]
-        block_time = int(block["timestamp"])
-    except (KeyError, ValueError, TypeError) as exc:
-        raise OtsError(f"explorer returned a malformed block header: {exc}") from exc
-    return merkle_root, block_time
+    raw_root = block.get("merkle_root") if isinstance(block, dict) else None
+    if not isinstance(raw_root, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", raw_root):
+        raise OtsError(
+            f"explorer returned a malformed merkle root for block {height}: {raw_root!r}"
+        )
+    raw_time = block.get("timestamp")
+    if isinstance(raw_time, bool):  # bool is an int subclass; never a block time
+        raw_time = None
+    if isinstance(raw_time, str) and raw_time.strip().isdigit():
+        raw_time = int(raw_time)
+    if not isinstance(raw_time, int) or not (_MIN_BLOCK_TIME <= raw_time <= _MAX_BLOCK_TIME):
+        raise OtsError(
+            f"explorer returned a malformed timestamp for block {height}: {block.get('timestamp')!r}"
+        )
+    return bytes.fromhex(raw_root)[::-1], raw_time
 
 
 def _http_get(url: str, timeout: int) -> bytes:

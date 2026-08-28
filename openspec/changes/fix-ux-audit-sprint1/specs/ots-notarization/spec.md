@@ -11,16 +11,31 @@ when complete, the Bitcoin block and the "existed by" date.
 The result SHALL additionally distinguish, as separate reportable outcomes rather than one generic
 "not verified", each reason verification did not succeed that a caller must describe differently:
 
-- a **digest mismatch** — the supplied digest is not the one the proof commits to, i.e. the file's
-  bytes changed after it was stamped. This is the event this product exists to detect;
+- a **digest disagreement** — the supplied digest is not the digest the proof commits to. This
+  outcome SHALL be reported **neutrally**: it establishes that the two digests differ, and NOT which
+  of the two artifacts changed. A `.ots` whose serialized committed digest has a single flipped byte
+  still deserializes and reaches this comparison exactly as a modified file does, and no attestation
+  has been validated at that point either. The result SHALL therefore NOT assert that the file
+  changed, and SHALL NOT assert that the proof is intact or still attests an earlier version of the
+  file — neither is established by the comparison. Attributing the disagreement requires the file's
+  separately recorded baseline digest, which this operation is not given, so attribution is the
+  caller's (see the panel and command-line requirements);
 - a **proof mismatch** — **no** Bitcoin attestation in the proof commits to its real block's merkle
   root, and at least one commits to something else. The file's bytes may be exactly what was
   stamped; what failed is the proof or the block data used to check it, so it SHALL be reported as
   its own outcome and SHALL NOT be reported as a digest mismatch;
-- a **transport failure** — the verification backend could not be reached, so nothing about the file
-  or the proof was established. The reason SHALL be carried on the result;
+- a **transport failure** — the verification backend could not be reached **or answered with data
+  that is not a well-formed block header**, so nothing about the file or the proof was established.
+  The reason SHALL be carried on the result, together with **the number of failed lookups as a
+  structural value**. That count SHALL NOT be recovered by splitting the joined human-readable
+  reason, because a single reason may itself contain the separator used to join them, which
+  overstates how much of a proof went unchecked;
 - an **inconclusive** outcome — the backend cannot distinguish "not yet anchored" from "the digest
-  no longer matches" (or from its own unreachability).
+  no longer matches" (or from its own unreachability);
+- an **unreadable proof** — the stored `.ots` could not be parsed at all, so nothing was established
+  about the file *or* about the proof's content. This SHALL be its own reportable outcome, because
+  every other not-verified outcome presupposes a readable proof and describing this one in their
+  words offers the operator possibilities that were never established.
 
 Callers cannot otherwise tell these apart from a proof that is merely not yet anchored, which is the
 false-negative this requirement exists to prevent.
@@ -43,15 +58,39 @@ while still recording the transport failure. Dropping the transport reason becau
 was decided first hides the difference between "this proof is bad" and "this proof is bad as far as
 the part of it that could be checked".
 
+Block data fetched from an external explorer SHALL be **validated as well-formed before it is
+used**: a block hash and a merkle root SHALL each be exactly 64 hexadecimal characters, and a block
+time SHALL be an integer within the range a Bitcoin block time can occupy. Data failing that
+validation SHALL be reported as a transport failure and SHALL NOT reach the attestation comparison.
+The comparison's only possible outcome for a malformed value is inequality, which is reported as a
+**proof mismatch** — a categorical failure verdict over the operator's evidence. Manufacturing that
+verdict out of a badly-formed response would let an explorer bug, a truncated response or a hostile
+endpoint discredit an intact proof, and an out-of-range block time would likewise become an
+"existed by" date the operator is invited to rely on.
+
 The explorer backend parses the proof locally and therefore knows the file digest the proof commits
-to and the commitment each attestation makes; it SHALL set the digest-mismatch and proof-mismatch
-indicators at the points it establishes them, and SHALL NOT conflate the two. The node backend
-shells out to `ots verify -d`, whose output reports a mismatch as an ordinary non-success exit
-indistinguishable from an unanchored proof or an unreachable node; it SHALL NOT guess at a mismatch,
-because reporting one that was not established is a false alarm on the product's core signal.
-Instead it SHALL mark such a result **inconclusive**, so that no caller can present it as a proof
-that is merely young. That the node backend cannot separate these cases is an accepted, documented
-limitation of the non-default backend.
+to and the commitment each attestation makes; it SHALL set the digest-disagreement and
+proof-mismatch indicators at the points it establishes them, and SHALL NOT conflate the two. The
+node backend shells out to `ots verify -d`, whose output reports a mismatch as an ordinary
+non-success exit indistinguishable from an unanchored proof or an unreachable node; it SHALL NOT
+guess at a mismatch, because reporting one that was not established is a false alarm on the
+product's core signal. Instead it SHALL mark such a result **inconclusive**, so that no caller can
+present it as a proof that is merely young. That the node backend cannot separate these cases is an
+accepted, documented limitation of the non-default backend.
+
+For the node backend the **process exit status SHALL be the verification contract**: a zero exit is
+a verification, and a non-zero exit is not, regardless of what the tool printed. Any block height
+or date parsed out of its output is **optional metadata** on an already-decided verdict, and a
+verified result carrying none SHALL remain verified. Deciding the verdict by matching the tool's
+output text instead both discards a verification that actually happened (a successful exit whose
+wording the pattern does not recognise) and — the dangerous direction — can report a **failed** run
+as verified because its output quoted a success line.
+
+Every failure of the verification subprocess SHALL be reported as a typed transport failure rather
+than raised, **including failures of the preliminary offline classification of the proof**, which
+runs the same tool. A caller that verifies has no other way to distinguish an unusable tool from a
+verdict, and one of the two callers (`cairn verify`) has no error handling of its own, so an escaped
+exception aborts the command instead of reporting that nothing could be checked.
 
 #### Scenario: Verify a complete proof
 
@@ -67,9 +106,35 @@ limitation of the non-default backend.
 #### Scenario: A digest mismatch is reported as a digest mismatch
 
 - **WHEN** the explorer backend verifies a proof against a digest the proof does not commit to
-- **THEN** the result SHALL be not-verified **and** SHALL carry the digest-mismatch indicator, so a
-  caller can tell "these are not the bytes that were stamped" apart from "this proof is not
+- **THEN** the result SHALL be not-verified **and** SHALL carry the digest-disagreement indicator, so
+  a caller can tell "the file's digest and the proof's disagree" apart from "this proof is not
   confirmed yet"
+
+#### Scenario: A digest disagreement assigns no blame
+
+- **WHEN** a proof's own serialized committed digest has been corrupted while the file is unchanged,
+  so the proof still parses but its digest no longer equals the file's
+- **THEN** the result SHALL report the disagreement without stating that the file changed and
+  without stating that the proof is intact or still attests an earlier version of the file
+
+#### Scenario: A proof that cannot be parsed is its own outcome
+
+- **WHEN** the stored `.ots` is truncated, corrupt, or not a timestamp file at all
+- **THEN** the result SHALL carry the unreadable-proof indicator, SHALL NOT carry either mismatch
+  indicator, and SHALL NOT be described in the words used for a proof that is merely unconfirmed
+
+#### Scenario: Malformed block data from the explorer is a transport failure
+
+- **WHEN** the explorer returns a block whose merkle root is not 64 hexadecimal characters, or whose
+  timestamp is not an integer within the range a Bitcoin block time can occupy
+- **THEN** the result SHALL carry a transport failure naming the malformed field, and SHALL NOT
+  carry the proof-mismatch indicator and SHALL NOT report an "existed by" date
+
+#### Scenario: The failed-lookup count survives a reason containing the separator
+
+- **WHEN** a single lookup failure's reason itself contains the separator used to join several
+  reasons
+- **THEN** the number of failed lookups reported SHALL be one
 
 #### Scenario: A merkle-root mismatch is reported as a proof mismatch, not a file mismatch
 
@@ -105,6 +170,18 @@ limitation of the non-default backend.
   against its real block
 - **THEN** the result SHALL be verified, and SHALL still record the transport failure that occurred
 
+#### Scenario: The node backend verifies on the exit status, not on the output text
+
+- **WHEN** the node backend's verification tool exits zero but prints no line the implementation can
+  parse for a block and date
+- **THEN** the result SHALL be verified, with the block and date simply absent
+
+#### Scenario: The node backend never verifies on a failed exit
+
+- **WHEN** the node backend's verification tool exits non-zero while its output contains text that
+  reads like a success line
+- **THEN** the result SHALL NOT be verified, and SHALL be marked inconclusive
+
 #### Scenario: The node backend does not guess at a mismatch
 
 - **WHEN** the node backend verifies a proof and `ots verify -d` reports no success
@@ -119,6 +196,13 @@ limitation of the non-default backend.
 - **THEN** the result SHALL carry the transport failure with its reason, and SHALL NOT report the
   proof's stored state as the outcome
 
+#### Scenario: An unusable tool during the preliminary classification is also a transport failure
+
+- **WHEN** the node backend cannot run the tool for the offline classification it performs before
+  verifying
+- **THEN** the result SHALL carry the transport failure with its reason, and the operation SHALL NOT
+  raise, so a caller without error handling still reports that nothing could be checked
+
 ## ADDED Requirements
 
 ### Requirement: The command-line verify reports the reason, not the proof's stored state
@@ -129,10 +213,18 @@ transport failure or inconclusive outcome is present on the result. The command 
 are two readings of the same integrity claim; a fix applied to one and not the other leaves the
 false negative live wherever the operator happens to be looking.
 
-A digest mismatch SHALL be reported as a failure naming that the bytes no longer match what was
-stamped. A proof mismatch SHALL be reported as a failure of the proof, not of the file. A transport
-failure SHALL be reported as verification being unavailable, with its reason, and SHALL NOT be
-reported as a pending proof. An inconclusive result SHALL name every possibility it cannot separate,
+A **digest disagreement SHALL be attributed from the file's recorded baseline digest** before it is
+reported, and the command SHALL print a different line for each attribution. Where the live bytes no
+longer hash to the recorded baseline, the command SHALL report that the **file** changed, and SHALL
+NOT claim that the proof was validated or remains intact. Where the live bytes still hash to the
+recorded baseline, the command SHALL report that the **stored proof** does not match this file's
+recorded baseline and may be corrupted or misfiled, and SHALL state that this is not evidence the
+file changed. Where there is no recorded baseline, the command SHALL name both possibilities and
+attribute the disagreement to neither. A proof mismatch SHALL be reported as a failure of the proof,
+not of the file. An unreadable proof SHALL be reported as the proof being unreadable, stating that
+no conclusion was reached about the file, and SHALL NOT be reported in the words used for a file
+that may have changed or a proof that is merely unconfirmed. A transport failure SHALL be reported
+as verification being unavailable, with its reason, and SHALL NOT be reported as a pending proof. An inconclusive result SHALL name every possibility it cannot separate,
 including the backend's own unreachability. Every one of these SHALL exit non-zero.
 
 Where a transport failure is present on a result whose verdict was decided by something that
@@ -149,11 +241,39 @@ proof states in the same words the panel uses: a proof awaiting Bitcoin confirma
 merely queued for stamping. The queued state SHALL NOT be reported with awaiting-confirmation
 wording.
 
+#### Scenario: The command line blames the proof when the file matches its baseline
+
+- **WHEN** `cairn verify` receives a digest disagreement for a file whose live bytes still hash to
+  the digest Cairn recorded for it
+- **THEN** the command SHALL report the stored proof as what does not match, SHALL state that this
+  is not evidence the file changed, and SHALL NOT print its changed-file wording
+
+#### Scenario: The command line blames neither artifact with no recorded baseline
+
+- **WHEN** `cairn verify` receives a digest disagreement for a file that has no recorded baseline
+  digest
+- **THEN** the command SHALL name both possibilities and SHALL NOT attribute the disagreement to
+  either artifact
+
+#### Scenario: The command line reports an unreadable proof as such
+
+- **WHEN** `cairn verify` receives a result whose proof could not be parsed
+- **THEN** the command SHALL report the proof as unreadable and state that no conclusion was reached
+  about the file
+
+#### Scenario: A verified result with no parsed block details still reports verified
+
+- **WHEN** `cairn verify` receives a verified result carrying no block height or date
+- **THEN** the command SHALL report the verification and SHALL NOT print placeholder values in place
+  of the missing details
+
 #### Scenario: A changed file is not reported as pending on the command line
 
-- **WHEN** an operator runs `cairn verify` on a stamped file whose bytes have changed, and the
-  result carries a digest mismatch alongside a not-yet-anchored proof state
-- **THEN** the command SHALL report the mismatch and SHALL NOT print its pending wording
+- **WHEN** an operator runs `cairn verify` on a stamped file whose bytes have changed — the live
+  bytes hashing to neither the recorded baseline nor the proof's committed digest — and the result
+  carries a digest disagreement alongside a not-yet-anchored proof state
+- **THEN** the command SHALL report that the file changed and SHALL NOT print its pending wording,
+  and SHALL NOT claim the proof was checked
 
 #### Scenario: An unreachable backend is not reported as pending on the command line
 

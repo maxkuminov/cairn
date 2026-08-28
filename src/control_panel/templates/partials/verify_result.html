@@ -11,14 +11,24 @@
           <span class="mono">{{ filename }}</span> existed in this exact form, unaltered, on or before <strong>{{ existed_by }}</strong>, confirmed against the public Bitcoin record.
         {% elif verdict == "ok" %}
           <span class="mono">{{ filename }}</span> still matches its proof, confirmed against the public Bitcoin record.
-        {% elif digest_mismatch %}
-          <span class="mono">{{ filename }}</span>'s bytes are not the bytes this proof was made from &mdash; the file has changed since it was stamped. The proof itself is intact and still attests the <em>earlier</em> version of the file.
+        {% elif mismatch_blame == "file" %}
+          {# The live bytes no longer hash to the fingerprint Cairn recorded at the last scan, so
+             the FILE moved. No claim is made about the proof: nothing validated it in this check. #}
+          <span class="mono">{{ filename }}</span>'s bytes are not the bytes Cairn recorded for this file, and not the bytes this proof was made from &mdash; the file has changed since it was stamped. This check did not validate the proof itself, so it says nothing about whether the proof is still good.
+        {% elif mismatch_blame == "proof" %}
+          {# The live bytes still hash to the recorded baseline, so the disagreement is the proof's.
+             Blaming the file here would be a false alarm on the product's core signal. #}
+          The stored proof commits to a different fingerprint than the one Cairn recorded for <span class="mono">{{ filename }}</span> &mdash; the proof may be corrupted, or it may be another file's proof. <strong>This is not evidence that <span class="mono">{{ filename }}</span> changed</strong> &mdash; its fingerprint is exactly the one Cairn has on record for it. Re-stamp the file to make a fresh proof.
+        {% elif mismatch_blame == "unknown" %}
+          <span class="mono">{{ filename }}</span>'s fingerprint is not the digest this proof commits to. Cairn has no recorded baseline fingerprint for this file, so it cannot tell whether the file's bytes changed or the proof is the wrong one &mdash; both remain possible, and neither is established.
         {% elif proof_mismatch %}
           The proof's Bitcoin attestation does not match the block it points at, so the proof may be corrupt (or the explorer returned inconsistent block data). <strong>This is not evidence that <span class="mono">{{ filename }}</span> changed</strong> &mdash; its fingerprint is still exactly the one the proof records.
         {% elif transport_error %}
           Cairn could not reach the Bitcoin record to check this proof, so nothing was established either way. It says nothing about <span class="mono">{{ filename }}</span> &mdash; try again in a moment.
         {% elif inconclusive %}
           The Bitcoin-node backend reported a failure it cannot explain. Three things are possible: the proof is <em>not yet confirmed</em>, <em>or</em> <span class="mono">{{ filename }}</span> no longer matches it, <em>or</em> the Bitcoin node could not be reached. That backend cannot tell them apart.
+        {% elif unreadable_proof %}
+          The proof file for <span class="mono">{{ filename }}</span> could not be read or parsed &mdash; it is damaged, truncated, or not an OpenTimestamps proof. <strong>Nothing was concluded about the file</strong>: its bytes were never compared to anything. Re-stamp the file to make a fresh proof.
         {% elif verdict == "warn" and ots_state == "incomplete" %}
           <span class="mono">{{ filename }}</span>'s fingerprint has been submitted to Bitcoin but isn't confirmed yet. This usually settles within a few hours.
         {% elif verdict == "warn" and ots_state == "pending" %}
@@ -52,11 +62,19 @@
       </div>
       <button type="button" class="copy-btn" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('verify-sha').textContent.trim())">{{ m.icon("copy", size=15) }}</button>
     </div>
-    {% if existed_by %}
+    {# Confirmed provenance is rendered ONLY under a verified verdict. On every other branch the
+       block and the date are what the proof *declares* &mdash; read out of the proof file, confirmed
+       against nothing &mdash; and on a changed file they belong to the digest the proof was made
+       from, not to the live fingerprint printed directly above them. Presenting them here as
+       "where this fingerprint is permanently recorded" would be a stronger claim than the check
+       established, so the unverified case gets its own explicitly-labelled row. #}
+    {% if verified and existed_by %}
     <div class="detail-row"><div class="detail-row__label">{{ m.icon("calendar", size=15) }} Existed by</div><div class="detail-row__value"><strong>{{ existed_by }}</strong><div class="detail-row__hint">The file provably existed in this exact form on or before this date.</div></div><span></span></div>
     {% endif %}
-    {% if block_height %}
+    {% if verified and block_height %}
     <div class="detail-row"><div class="detail-row__label">{{ m.icon("bitcoin", size=15) }} Bitcoin block</div><div class="detail-row__value"><span class="mono">#{{ "{:,}".format(block_height) }}</span> {% if block_hash %}<span class="mono" style="color:var(--text-3);font-size:11.5px">{{ block_hash }}</span>{% endif %}<div class="detail-row__hint">The entry in the public Bitcoin ledger where this fingerprint is permanently recorded.</div></div><span></span></div>
+    {% elif block_height %}
+    <div class="detail-row"><div class="detail-row__label">{{ m.icon("bitcoin", size=15) }} Block in the proof</div><div class="detail-row__value"><span class="mono">#{{ "{:,}".format(block_height) }}</span> <span style="color:var(--text-3);font-size:11.5px">recorded in the proof (unverified)</span><div class="detail-row__hint">The block this proof <em>claims</em>, read from the proof file itself. This check did not confirm it against the Bitcoin record, and it does not describe the fingerprint above.</div></div><span></span></div>
     {% endif %}
     {% if calendars %}
     <div class="detail-row"><div class="detail-row__label">Timestamp servers</div><div class="detail-row__value"><div style="display:flex;flex-direction:column;gap:3px">{% for cal in calendars %}<span class="mono" style="font-size:11.5px;color:var(--text-2)">{{ cal }}</span>{% endfor %}</div><div class="detail-row__hint">The OpenTimestamps services that submitted the fingerprint to Bitcoin.</div></div><span></span></div>
@@ -68,9 +86,10 @@
 File:        {{ relpath }}
 Collection:      {{ collection }}
 SHA-256:     {{ sha256 }}
-Verdict:     {{ title }}{% if existed_by %}
-Existed by:  {{ existed_by }}{% endif %}{% if block_height %}
-Bitcoin block: #{{ "{:,}".format(block_height) }}{% endif %}
+Verdict:     {{ title }}{% if verified and existed_by %}
+Existed by:  {{ existed_by }}{% endif %}{% if verified and block_height %}
+Bitcoin block: #{{ "{:,}".format(block_height) }}{% elif block_height %}
+Block recorded in the proof (UNVERIFIED, not confirmed by this check): #{{ "{:,}".format(block_height) }}{% endif %}
 Verified via: {{ verified_via }}</pre>
   <div class="flex gap-10" style="margin-top:16px">
     {# Only offered when a proof actually exists on the row: the export route 409s without one, and

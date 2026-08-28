@@ -575,3 +575,81 @@ whose whole subject is not destroying records the operator never saw.
   were addressed and how, and ask it to attack the new mint path specifically — the union snapshot's
   atomicity, the event component's injectivity, and any remaining read that feeds a rendered claim
   but not the hash.
+
+## 8. Post-audit hardening of the verify path (adversarial Codex round 2)
+
+Round 2 attacked the reworked verify path and found three ways it made a claim stronger than its
+evidence (3 BLOCKER, 2 MAJOR, 3 MINOR). Every one is the same failure mode pointed at different
+artifacts: a verdict presented as established when only a weaker fact was. Fixed on the main tree.
+
+- [x] 8.1 (BLOCKER 1) **A digest disagreement no longer assigns blame at the source.**
+  `ots._verify_via_explorer` keeps `digest_mismatch` as the transport of the *neutral* finding
+  "these two digests disagree" and its message says so; the two consumers attribute it from the
+  file's recorded baseline (`files.sha256`) — `verify_run` computes `mismatch_blame ∈
+  {file, proof, unknown}` and `cli._cmd_verify` the same, with three distinct lines. Neither branch
+  claims the proof or its attestation was validated any more ("The proof itself is intact and still
+  attests the earlier version" is gone from both surfaces), because on that path nothing was.
+  Rationale + table in design D1.
+- [x] 8.2 (BLOCKER 2) **Malformed explorer data is a transport failure, never a mismatch.**
+  `_fetch_block_merkleroot` now requires the block hash and the merkle root to be exactly 64 hex
+  characters and the block time to be an int between the genesis block and 2100; anything else
+  raises `OtsError` and joins the accumulated fetch failures. `{"merkle_root": "00"}` used to become
+  a one-byte value that compared unequal and produced `proof_mismatch=True` over intact evidence.
+- [x] 8.3 (BLOCKER 3) **Confirmed provenance renders only under `verified`.** `verify_result.html`
+  gates the "Existed by" and "Bitcoin block" rows on `verified`; an unverified result's
+  proof-declared height renders in its own row labelled *recorded in the proof (unverified)*, with
+  the same qualification in the copyable report. The CLI's inconclusive line prints no block or date.
+  Juxtaposing the proof's block with the live fingerprint asserted a link nothing established.
+- [x] 8.4 (MAJOR 4) **The node backend's `info()` is inside the transport boundary.** A missing
+  binary or timeout during the preliminary classification returns a typed `transport_error` result
+  instead of escaping `verify()`; `_run_ots` also normalises other process-start `OSError`s to
+  `OtsError`. `cairn verify` prints COULD NOT CHECK where it previously died with a traceback.
+- [x] 8.5 (MAJOR 5) **`rc == 0` is the node backend's success contract.** `_VERIFY_SUCCESS_RE` is
+  consulted only for optional block/date metadata; a verified result with neither renders correctly
+  in both consumers. A non-zero exit is never verified, whatever its output says.
+- [x] 8.6 (MINOR 6) **An unreadable proof is a typed outcome** (`VerifyResult.unreadable_proof`) with
+  its own card and CLI line: the proof could not be read, and no conclusion was reached about the
+  file — not the generic "contents may have changed, or the proof isn't confirmed yet".
+- [x] 8.7 (MINOR 7) **The failed-lookup count is structural** (`VerifyResult.transport_failures`);
+  `failed_lookup_count` reads it instead of splitting the joined text on `"; "`, which reported one
+  error containing that separator as two failed lookups.
+- [x] 8.8 (MINOR 8) The `/verify` list heading is **"Recent proofs"** (the query includes
+  `incomplete` rows, whose own badges say "Pending confirmation"); the search placeholder follows.
+  Per-row badges untouched.
+- [x] 8.9 Regressions in `tests/test_ots.py` and `tests/test_ux_verify.py`, each verified to FAIL
+  against the pre-fix tree (`git stash push -- src/`): `test_explorer_tampered_proof_digest_is_a_
+  neutral_disagreement` (a real flipped byte inside a valid `.ots`),
+  `test_explorer_unreadable_proof_sets_the_typed_flag`,
+  `test_explorer_malformed_merkle_root_is_a_transport_error_not_a_mismatch`,
+  `test_explorer_malformed_block_timestamp_is_a_transport_error`,
+  `test_explorer_non_hash_at_height_is_a_transport_error`,
+  `test_node_backend_rc_zero_verifies_even_without_parseable_metadata`,
+  `test_node_backend_never_verifies_on_a_nonzero_exit`,
+  `test_node_backend_info_failure_is_a_transport_error_not_an_exception`,
+  `test_failed_lookup_count_reads_the_structural_counter`,
+  `test_failed_lookup_count_does_not_split_one_error_containing_the_separator`,
+  `test_failed_lookup_count_never_drops_a_reason_that_carries_no_count`;
+  panel/CLI: `test_a_disagreement_over_an_intact_file_blames_the_proof_not_the_file`,
+  `test_a_disagreement_over_a_changed_file_still_blames_the_file`,
+  `test_a_disagreement_with_no_baseline_names_both_possibilities`,
+  `test_an_inconclusive_card_never_presents_a_confirmed_block`,
+  `test_a_verified_card_still_presents_confirmed_provenance`,
+  `test_a_verified_card_without_block_metadata_renders`,
+  `test_an_unreadable_proof_reaches_no_conclusion_about_the_file`,
+  `test_the_proof_list_heading_covers_both_proof_states`,
+  `test_cli_disagreement_over_an_intact_file_blames_the_proof`,
+  `test_cli_disagreement_with_no_baseline_blames_neither`,
+  `test_cli_changed_file_line_no_longer_certifies_the_proof`,
+  `test_cli_unreadable_proof_prints_its_own_line`,
+  `test_cli_verified_without_block_metadata_still_reports_verified`,
+  `test_cli_node_backend_missing_binary_prints_could_not_check` (end-to-end, `ots.verify` not stubbed).
+- [x] 8.10 Spec + design updated: design D1 (neutral disagreement + the baseline tiebreak table,
+  proof-declared metadata, unreadable proof, the rc contract, the transport boundary), D2 (the two
+  new fields, the malformed-data rule, the revised 12-step verdict order); the `ots-notarization`
+  and `web-panel` deltas carry the matching requirement text and scenarios.
+- [x] 8.11 Gates re-run: full `PYTHONPATH=. pytest -q` green, `ruff check src tests` clean,
+  `openspec validate fix-ux-audit-sprint1 --strict` passes.
+- [ ] 8.12 Re-run the adversarial Codex pass (§6.8) against the reworked verify path: say which
+  findings were addressed and how, and ask it to attack the blame tiebreak specifically — whether a
+  stale or absent `files.sha256` can misattribute a disagreement, and whether any surface still
+  presents proof-declared metadata as confirmed.

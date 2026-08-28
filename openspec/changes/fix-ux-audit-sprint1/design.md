@@ -27,15 +27,55 @@ Everything else (`routes.py:1377`, `verify_results.html:15`, `_macros.html:141`,
 `_verify_via_explorer` parses the `.ots` locally, so it knows two distinct things the CLI never
 sees: whether the live digest is the one the proof commits to, and whether each Bitcoin
 attestation's commitment equals the real block's merkle root. Those are **different failures with
-different blame**, so they carry different flags (field list in D2): `digest_mismatch` blames the
-*file* (the `want != detached.file_digest` return); `proof_mismatch` blames the *proof or the
-explorer's block data* (the `if mismatch:` return after the merkle comparison) — a corrupted `.ots`
-or an inconsistent explorer response produces it while the file's bytes are still exactly what was
+different blame**, so they carry different flags (field list in D2): `digest_mismatch` is set at the
+`want != detached.file_digest` return; `proof_mismatch` blames the *proof or the explorer's block
+data* (the `if mismatch:` return after the merkle comparison) — a corrupted `.ots` or an
+inconsistent explorer response produces it while the file's bytes are still exactly what was
 stamped. Copy that blames the file for a `proof_mismatch` is a false alarm on the product's core
 signal, which is why the two are never collapsed into one flag or one sentence.
 
+**`digest_mismatch` is a neutral finding, and the blame is assigned by the callers.** *(Post-audit
+revision; the original draft of this decision had it blame the file at the source.)* The comparison
+establishes that the live digest and the digest the proof commits to **disagree** — nothing more.
+Flip one byte inside a valid `.ots`'s serialized `file_digest` and the file it belongs to is
+untouched: the proof still deserializes, the comparison still fails, and the pre-fix card told the
+operator *"the file has changed since it was stamped. The proof itself is intact and still attests
+the earlier version"* — both halves false, one of them a false alarm on the core signal and the
+other a false assurance about the evidence. And no attestation has been validated at that return
+either, so "the proof is intact" is unearned on **every** path through it, including the genuine
+file-change one.
+
+The tiebreaker is the third data point `ots.verify` is not given and both callers hold: **the file's
+recorded baseline digest** (`files.sha256`, written by the last scan).
+
+| live vs. recorded baseline | verdict | copy |
+|---|---|---|
+| differs | the **FILE** changed | names the change; says the proof itself was *not* checked here |
+| equal | the **PROOF** disagrees | "the stored proof does not match this file's recorded baseline — it may be corrupted or misfiled; this is **not** evidence the file changed" |
+| no baseline recorded | **neither** | names both possibilities, attributes to neither |
+
+So `ots.verify` keeps `digest_mismatch` as the transport of the disagreement and keeps its *message*
+neutral, `verify_run` computes `mismatch_blame ∈ {file, proof, unknown}` from `fe.sha256`, and
+`cli._cmd_verify` computes the same from `entry.sha256`. Neither branch claims the proof or its
+attestation was validated, because on this path nothing was.
+
+**Proof-declared metadata is not confirmed provenance.** `_verify_via_cli`'s inconclusive return
+carries `info()`'s `block_height` — read offline out of the proof, checked against nothing. The card
+shows the file's *live* fingerprint, so captioning that block as "where this fingerprint is
+permanently recorded" (which it did) is false exactly when it matters: on a changed file, that block
+belongs to the digest the proof was made from. The rule is therefore **render confirmed provenance —
+"Existed by", "Bitcoin block" — only under `verified`**; on any other verdict the same value is
+rendered, if at all, in its own row labelled *recorded in the proof (unverified)*, and the copyable
+report carries the same qualification. `existed_by` is only ever set on a verified return, so the
+gate costs nothing real.
+
+**An unreadable proof is its own outcome** (`unreadable_proof`). Every other not-verified outcome
+presupposes a parseable proof, so describing this one in their words ("its contents may have changed,
+or the proof isn't confirmed yet") offers the operator two possibilities neither of which was
+established, and hides the one that was: the proof is unusable and should be re-stamped.
+
 `_verify_via_cli` shells out to `ots verify -d`; a digest mismatch there produces a non-zero exit
-with no success line — indistinguishable from a proof that is not yet anchored, and equally
+— indistinguishable from a proof that is not yet anchored, and equally
 indistinguishable from a Bitcoin node that is down. Inventing a mismatch from stderr text would be a
 regex guess on the CLI's wording, and a *false* mismatch is a false alarm on the same core signal.
 
@@ -53,6 +93,22 @@ carries the ambiguity instead. No mismatch is invented and no false reassurance 
 operator is told exactly what that backend established, which is nothing. Teaching the node backend to distinguish the cases (verifying locally the way the explorer
 path does) is follow-up work for #24-adjacent verify hardening, not sprint 1 — recorded in the spec
 delta as a scoped, documented limitation of the non-default backend rather than left implicit.
+
+**The node backend's success contract is the process exit status, not a regex.** *(Post-audit
+addition.)* `ots verify -d` exits 0 only on a verification, so `rc == 0` decides `verified` and
+`_VERIFY_SUCCESS_RE` is consulted **only** for optional block/date metadata — a verified result with
+`block_height=None, existed_by=None` must render correctly in both consumers, and does. Classifying
+by the pattern instead failed in both directions: it swallowed a successful exit whose wording the
+pattern did not match (a verification thrown away), and — the direction that actually matters — it
+would return `verified=True` over a **non-zero** exit whose stderr happened to quote a success line.
+`rc != 0` stays inconclusive, exactly as above.
+
+**The whole node path sits inside the transport boundary.** `info()` runs `ots info`, so it fails
+the same ways the verification call does; left outside the `except OtsError`, a missing binary or a
+timeout there escaped `verify()` entirely. The panel's outer catch masked it, but `cairn verify` has
+no catch and died with a traceback instead of printing COULD NOT CHECK. `_run_ots` additionally
+normalises any other process-start `OSError` (EACCES, ENOEXEC…) to `OtsError`, so the boundary
+actually covers what it claims to.
 
 ## D2 — a transport failure gets its own verdict, and every swallow point sets it
 
@@ -82,11 +138,30 @@ on a transport failure.** It swallows it into an ordinary-looking `VerifyResult`
 enum, matching the existing style:
 
 ```python
-digest_mismatch: bool = False       # live digest != the digest the proof commits to   (explorer)
+digest_mismatch: bool = False       # live digest and the proof's committed digest DISAGREE (explorer)
 proof_mismatch: bool = False        # attestation commitment != the block merkle root  (explorer)
 transport_error: str | None = None  # the backend could not be reached; nothing was established
+transport_failures: int = 0         # how many lookups produced it (structural, not re-split text)
 inconclusive: bool = False          # this backend cannot tell pending/mismatch/unreachable apart
+unreadable_proof: bool = False      # the .ots would not parse; nothing was established at all
 ```
+
+`transport_failures` is *(post-audit)* carried structurally because the count was previously
+recovered by splitting the joined `transport_error` on `"; "` — and an ordinary explorer error
+contains that sequence (`HTTP Error 503: retry later; overloaded`), so one failed lookup was
+disclosed to the operator as two, overstating how much of a proof went unchecked. `failed_lookup_count`
+now reads the field (falling back to 1 when a hand-built result carries a reason but no count, so the
+disclosure is never silently dropped to zero), and the join remains a rendering concern only.
+
+*(Post-audit)* **Malformed explorer data is a transport failure, never a mismatch.**
+`_fetch_block_merkleroot` validates every field it returns — block hash and merkle root exactly 64
+hex characters, block time an integer between the genesis block and the year 2100 — and raises
+`OtsError` otherwise, so bad data joins the accumulated fetch failures. Without that, a response of
+`{"merkle_root": "00"}` became a one-byte value, compared unequal to the attestation's commitment
+and produced `proof_mismatch=True`: a red "this proof does not check out" over intact evidence,
+manufactured from an explorer bug (or a hostile endpoint). The comparison's *only* possible outcome
+for malformed input is inequality, and inequality is a verdict — so malformed input must never reach
+it.
 
 Every row of that table is populated at its source. `_verify_via_cli` catches `OtsError` from
 `_run_ots` and returns `transport_error=str(exc)` rather than letting it propagate, and sets
@@ -104,17 +179,25 @@ fallback survives as a belt-and-braces net and now constructs
 `VerifyResult(verified=False, state="none", transport_error=str(exc))`, dropping `fe.ots_state`
 entirely.
 
-**Verdict order** in `verify_run`, and the same order in `cli._cmd_verify`:
+**Verdict order** in `verify_run`, and the same order in `cli._cmd_verify` *(2–4 and 7 revised
+post-audit)*:
 
 1. `live_unavailable` — there are no bytes to check
-2. `digest_mismatch` → `danger`, "File no longer matches its proof"
-3. `result.verified` → `ok`
-4. `proof_mismatch` → `danger`, "This proof does not check out" (blames the proof, not the file)
-5. `transport_error` → `unavailable`, "Couldn't check right now"
-6. `inconclusive` → `unavailable`, "Couldn't confirm — pending, changed, or unreachable"
-7. `state == "incomplete"` → `warn`, "Pending confirmation"
-8. `state == "pending"` → `warn`, "Queued to stamp"
-9. otherwise → `danger`, "Could not verify"
+2. `mismatch_blame == "file"` → `danger`, "File no longer matches its proof"
+3. `mismatch_blame == "proof"` → `danger`, "This proof does not match this file" (proof-blame copy)
+4. `mismatch_blame == "unknown"` → `danger`, "Fingerprint and proof disagree" (names both, blames neither)
+5. `result.verified` → `ok`
+6. `proof_mismatch` → `danger`, "This proof does not check out" (blames the proof, not the file)
+7. `transport_error` → `unavailable`, "Couldn't check right now"
+8. `inconclusive` → `unavailable`, "Couldn't confirm — pending, changed, or unreachable"
+9. `unreadable_proof` → `unavailable`, "Proof file could not be read" (no conclusion about the file)
+10. `state == "incomplete"` → `warn`, "Pending confirmation"
+11. `state == "pending"` → `warn`, "Queued to stamp"
+12. otherwise → `danger`, "Could not verify"
+
+Steps 2–4 are the one place a `VerifyResult` flag does not map to a verdict on its own: they are
+computed from `digest_mismatch` **and** the caller's recorded baseline (D1). The template branches
+on the resulting `mismatch_blame` string and never re-derives it — it has no access to the baseline.
 
 **A verified result outranks `proof_mismatch` — and the flag is defined so that conflict cannot
 arise in the first place.** OpenTimestamps verification is *existential*: one Bitcoin attestation

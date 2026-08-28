@@ -56,12 +56,15 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
 ## What Changes
 
 ### Verify path (#13, #19, #23, #34-part, #32-part)
-- **`VerifyResult` gains four typed outcome fields** — `digest_mismatch` (the live digest is not the
-  one the proof commits to: *the file changed*), `proof_mismatch` (a Bitcoin attestation's
-  commitment is not the block's merkle root: *the proof or the block data is wrong*, which is not
-  evidence about the file), `transport_error` (the backend could not be reached: nothing was
-  established) and `inconclusive` (this backend cannot tell those apart). Reason and blame are
-  separate signals, so they are separate fields with separate copy.
+- **`VerifyResult` gains typed outcome fields** — `digest_mismatch` (the live digest and the digest
+  the proof commits to *disagree* — a **neutral** finding: which of the two moved is not established
+  here, and is attributed by the callers from the file's recorded baseline; see design D1),
+  `proof_mismatch` (a Bitcoin attestation's commitment is not the block's merkle root: *the proof or
+  the block data is wrong*, which is not evidence about the file), `transport_error` +
+  `transport_failures` (the backend could not be reached or answered with malformed block data:
+  nothing was established, and how many lookups that covers), `inconclusive` (this backend cannot
+  tell those apart) and `unreadable_proof` (the `.ots` would not parse: no conclusion at all).
+  Reason and blame are separate signals, so they are separate fields with separate copy.
 - **Every point where a backend swallows a network or subprocess failure now populates
   `transport_error`.** The route's `except OtsError` was never the main path: `_verify_via_explorer`
   returns an unreachable explorer as `verified=False, state="complete"`, and `_verify_via_cli`
@@ -74,9 +77,10 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
   only when *no* attestation validated and at least one mismatched; today's aggregation tests
   `if mismatch:` first, so one bad sibling renders a red "this proof does not check out" over a
   genuinely anchored proof.
-- **`verify_run` chooses the verdict by reason, in order**: live file unavailable → digest mismatch
-  → verified → proof mismatch → transport failure → inconclusive → awaiting confirmation → queued to
-  stamp → other. Mismatch is tested *before* transport, so a mismatch established before the network
+- **`verify_run` chooses the verdict by reason, in order**: live file unavailable → digest
+  disagreement (split three ways by blame: file / proof / unattributed) → verified → proof mismatch
+  → transport failure → inconclusive → unreadable proof → awaiting confirmation → queued to stamp →
+  other. Mismatch is tested *before* transport, so a mismatch established before the network
   failed is not thrown away; `verified` sits above `proof_mismatch` as belt-and-braces on the
   source-level rule; and the two not-yet-confirmed states get two branches, never one.
 - **A transport failure gets a fourth, neutral verdict style** ("Couldn't check right now"), not
@@ -89,7 +93,9 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
 - **`src/cli.py`'s `verify` command branches in the same order.** `VerifyResult` has two consumers;
   fixing only the panel leaves the identical false negative live on the command line.
 - **`partials/verify_results.html` renders `m.ots_badge(f.state, "sm")`** instead of the literal
-  `"complete"`. (`state` is already in the row dict from `_anchored_view`.)
+  `"complete"`. (`state` is already in the row dict from `_anchored_view`.) Its heading becomes
+  **"Recent proofs"**: the query deliberately includes `incomplete` rows, so "Recently anchored" was
+  the container contradicting the very badges beneath it.
 - **The two not-yet-confirmed proof states get two names**: `pending` (queued locally, not yet
   submitted) becomes **"Queued to stamp"** and `incomplete` (submitted, waiting on Bitcoin) becomes
   **"Pending confirmation"**. Today the badge calls them "Pending" and "Incomplete" while every tile

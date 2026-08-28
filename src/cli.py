@@ -283,7 +283,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             # Branch by *reason*, in the same order as the panel's verdict chain (design D2).
             # `VerifyResult` has two consumers; reading the proof's lifecycle state before asking
             # why verification failed is what printed "pending" for a file whose bytes had changed.
-            n = ots.failed_lookup_count(result.transport_error)
+            n = ots.failed_lookup_count(result)
             note = (
                 f"  {n} attestation lookup{'' if n == 1 else 's'} failed; "
                 f"the verdict is based on the attestations reached"
@@ -291,18 +291,54 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                 else None
             )
 
+            # A digest disagreement establishes only that the live digest and the digest the proof
+            # commits to DIFFER (design D1). The tiebreaker is the baseline recorded for this file
+            # at its last scan: live bytes that no longer hash to it mean the FILE changed; live
+            # bytes that still do mean the proof is not this file's proof. Blaming the file for a
+            # corrupted `.ots` is a false alarm on the product's core signal, so the two get
+            # different lines — and neither claims the proof or its attestation was validated,
+            # because at this point nothing validated either.
+            stored_sha = (entry.sha256 or "").strip().lower()
+            live_sha = (digest or "").strip().lower()
+            if result.digest_mismatch and live_sha and stored_sha and live_sha != stored_sha:
+                print(
+                    f"[{args.relpath}] CHANGED — the live bytes differ from the fingerprint Cairn "
+                    f"recorded for this file AND from the digest this proof commits to; the file "
+                    f"has changed since it was stamped. The proof itself was not checked here",
+                    file=sys.stderr,
+                )
+                return 1
+            if result.digest_mismatch and live_sha and stored_sha:
+                print(
+                    f"[{args.relpath}] PROOF DOES NOT MATCH THIS FILE — the stored proof commits "
+                    f"to a different digest than this file's recorded baseline; the proof may be "
+                    f"corrupted or misfiled. This is NOT evidence the file changed — its "
+                    f"fingerprint is exactly the one Cairn recorded",
+                    file=sys.stderr,
+                )
+                return 1
             if result.digest_mismatch:
                 print(
-                    f"[{args.relpath}] CHANGED — the live bytes are not the bytes this proof was "
-                    f"made from; the proof still attests the earlier version of the file",
+                    f"[{args.relpath}] FINGERPRINT AND PROOF DISAGREE — the file's fingerprint is "
+                    f"not the digest this proof commits to, and Cairn has no recorded baseline for "
+                    f"this file to tell which of the two moved",
                     file=sys.stderr,
                 )
                 return 1
             if result.verified:
-                print(
-                    f"[{args.relpath}] VERIFIED — Bitcoin block {result.block_height}, "
-                    f"existed by {result.existed_by}"
-                )
+                # The block/date are OPTIONAL metadata: the node backend verifies on the process
+                # exit status, and a successful exit whose output could not be parsed is still a
+                # verification. Print what is known, claim nothing that is not.
+                if result.block_height is not None and result.existed_by:
+                    print(
+                        f"[{args.relpath}] VERIFIED — Bitcoin block {result.block_height}, "
+                        f"existed by {result.existed_by}"
+                    )
+                else:
+                    print(
+                        f"[{args.relpath}] VERIFIED — confirmed against the Bitcoin record "
+                        f"(the backend reported no block details)"
+                    )
                 # Disclosure survives losing the verdict: a transport failure under a verdict that
                 # outranks it is still printed, and never changes the exit status.
                 if note:
@@ -327,10 +363,21 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                 )
                 return 1
             if result.inconclusive:
+                # Deliberately prints no block height or date. The proof declares one, but nothing
+                # confirmed it, and printing it beside the live fingerprint would assert that this
+                # fingerprint is recorded in that block — the exact false claim design D1 forbids.
                 print(
                     f"[{args.relpath}] INCONCLUSIVE — the proof is not yet confirmed, OR the file "
                     f"no longer matches it, OR the Bitcoin node could not be reached; the "
                     f"bitcoin-node backend cannot tell these apart",
+                    file=sys.stderr,
+                )
+                return 1
+            if result.unreadable_proof:
+                print(
+                    f"[{args.relpath}] UNREADABLE PROOF — the stored .ots could not be read or "
+                    f"parsed ({result.message}); no conclusion was reached about the file. "
+                    f"Re-stamp it to make a fresh proof",
                     file=sys.stderr,
                 )
                 return 1

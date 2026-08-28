@@ -6,9 +6,18 @@
 
 The verify page SHALL let the user search files Cairn already tracks (no file upload) and verify a
 selected file by re-hashing it from the read-only store and checking the stored `.ots` proof. The
-result SHALL present the verdict and, when complete, the SHA-256, the existed-by date, and the
-Bitcoin block, plus an option to export the portable bundle. A complete "Anchored" badge elsewhere
-SHALL deep-link here and verify immediately.
+result SHALL present the verdict and, when verification succeeded, the SHA-256, the existed-by date,
+and the Bitcoin block, plus an option to export the portable bundle. A complete "Anchored" badge
+elsewhere SHALL deep-link here and verify immediately.
+
+**Confirmed provenance SHALL be presented only on a verified verdict.** On any other verdict the
+block height and date available to the panel are what the *proof declares*, read out of the proof
+file and confirmed against nothing; the page displays the file's live fingerprint, so presenting
+them together as the record of "this fingerprint" asserts a link that was not established, and is
+simply false where the file has changed — that block belongs to the digest the proof was made from.
+Where such proof-declared metadata is shown at all it SHALL be explicitly labelled as recorded in
+the proof and unverified, SHALL NOT be captioned as where the displayed fingerprint is recorded, and
+SHALL carry the same qualification into any copyable report the page offers.
 
 The verdict SHALL be chosen by *why* verification did not succeed, not by the proof's stored state.
 The panel SHALL evaluate the outcomes in this order: the live file being unavailable, then a
@@ -26,10 +35,28 @@ failure. It MAY be reported as diagnostic detail alongside the verified verdict.
 a digest mismatch reports truthfully, and false alarms are what teach an operator to dismiss the
 real one.
 
-A file whose bytes no longer match the digest its proof commits to SHALL be rendered as a failure
+A file whose digest disagrees with the digest its proof commits to SHALL be rendered as a failure
 that names that fact — it SHALL NOT be rendered as a proof awaiting confirmation, and SHALL NOT be
 accompanied by copy telling the operator to wait. This is the product's core detection; presenting
 it as a young proof is a false negative on the one claim Cairn exists to make.
+
+**The panel SHALL attribute such a disagreement using the file's recorded baseline digest**, and
+SHALL NOT attribute it from the disagreement alone. Where the live bytes no longer hash to the
+baseline Cairn recorded at its last scan, the *file* changed and the panel SHALL say so. Where the
+live bytes still hash to that baseline, the *proof* is the artifact that disagrees — it may be
+corrupted or be another file's proof — and the panel SHALL render it in the same shape as a proof
+mismatch: a failure of the proof, explicitly stating that this is not evidence the file changed.
+Where no baseline digest is recorded, the panel SHALL name both possibilities and blame neither. In
+no case SHALL the panel state that the proof is intact or still attests an earlier version of the
+file, because no verdict on this path validated the proof. Accusing an intact file of changing is a
+false alarm on the product's core signal, and certifying an unvalidated proof is a false assurance
+about the evidence itself.
+
+A result whose stored proof **could not be parsed** SHALL be rendered in its own words: the proof
+file could not be read, and no conclusion was reached about the file. It SHALL NOT be rendered with
+the generic wording that offers a possible file change or an unconfirmed proof as explanations —
+neither was established, and the one thing that *was* established (the proof is unusable) is the
+part the operator can act on.
 
 A **proof mismatch** SHALL be rendered as a failure of the *proof*, with copy stating that the
 proof's chain attestation does not check out and that this is not evidence the file changed. It
@@ -78,11 +105,14 @@ blames the file for an absence of evidence nobody has created, and teaches the o
 the red card that means a real mismatch. The panel SHALL NOT offer a proof download for a file that
 has no stored proof.
 
-Every list of already-anchored files SHALL render each row's **actual** notarization state. A row
+Every list of files with proofs SHALL render each row's **actual** notarization state. A row
 SHALL NOT be given a fixed "Anchored" badge: the badge is what an operator reads to decide whether a
 proof is usable as evidence, and the list is ordered newest-first, so a hardcoded badge shows the
-least-confirmed proofs as the most confirmed. The page SHALL render a distinct empty state when
-nothing is anchored yet, separate from the empty state for a search that matched nothing.
+least-confirmed proofs as the most confirmed. **The list's own heading SHALL use vocabulary that
+covers every proof state the list contains**: the list deliberately includes submitted-but-unconfirmed
+proofs, so a heading claiming they are anchored contradicts the very badges beneath it, and a
+container read as a summary of its rows overrides them. The page SHALL render a distinct empty state
+when nothing has been stamped yet, separate from the empty state for a search that matched nothing.
 
 The result page SHALL describe how the proof was checked from the backend actually used, rather than
 asserting a fixed backend.
@@ -168,8 +198,47 @@ asserting a fixed backend.
 
 #### Scenario: The anchored list shows real proof states
 
-- **WHEN** the verify page lists recently anchored files that include a not-yet-confirmed proof
+- **WHEN** the verify page lists recent proofs that include a not-yet-confirmed one
 - **THEN** that row SHALL show the not-yet-confirmed badge, not "Anchored"
+
+#### Scenario: The list heading does not overclaim its rows
+
+- **WHEN** the verify page's list contains a submitted-but-unconfirmed proof
+- **THEN** the list heading SHALL NOT describe its contents as anchored, while each row's badge
+  SHALL continue to name that row's own state
+
+#### Scenario: A digest disagreement over an unchanged file blames the proof
+
+- **WHEN** the panel verifies a file whose live bytes still hash to the digest Cairn recorded for it,
+  and the proof commits to a different digest
+- **THEN** the panel SHALL render a failure of the proof, stating that this is not evidence the file
+  changed, and SHALL NOT state that the file's bytes changed or that the proof is intact
+
+#### Scenario: A digest disagreement with no recorded baseline blames neither
+
+- **WHEN** the panel verifies a file that has no recorded baseline digest and the digests disagree
+- **THEN** the panel SHALL name both possibilities and SHALL NOT attribute the disagreement to the
+  file or to the proof
+
+#### Scenario: An inconclusive verdict shows no confirmed block
+
+- **WHEN** the panel renders an inconclusive or otherwise unverified result for a proof that
+  declares a Bitcoin block
+- **THEN** the page SHALL NOT present that block as where the displayed fingerprint is recorded; if
+  it is shown at all it SHALL be labelled as recorded in the proof and unverified, in the card and
+  in any copyable report
+
+#### Scenario: An unreadable proof reaches no conclusion about the file
+
+- **WHEN** the panel verifies a file whose stored proof cannot be parsed
+- **THEN** the card SHALL say the proof could not be read and that no conclusion was reached about
+  the file, and SHALL NOT say the file's contents may have changed or that the proof is not
+  confirmed yet
+
+#### Scenario: A verified result with no parsed block details still renders
+
+- **WHEN** the configured backend returns a verified result carrying no block height or date
+- **THEN** the card SHALL render the verified verdict without claiming provenance it does not have
 
 #### Scenario: Nothing anchored yet
 

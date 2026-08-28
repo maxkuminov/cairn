@@ -26,7 +26,7 @@
           <div class="verify-search">
             {{ m.icon("search", size=18) }}
             <input type="search" name="q" autofocus
-                   placeholder="Search {{ '{:,}'.format(total_anchored) }} anchored files by path or collection…"
+                   placeholder="Search {{ '{:,}'.format(total_anchored) }} files with proofs by path or collection…"
                    hx-get="/verify/search" hx-trigger="keyup changed delay:200ms, search"
                    hx-target="#verify-results" hx-swap="outerHTML" />
           </div>

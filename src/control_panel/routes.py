@@ -1865,15 +1865,40 @@ async def verify_run(
         host = settings.explorer_url.replace("https://", "").replace("http://", "").rstrip("/")
         verified_via = f"{host} (explorer lookup)"
 
+    # A digest disagreement establishes only that the live digest and the proof's committed digest
+    # DIFFER — not which of the two moved (design D1). The tiebreaker is the baseline Cairn recorded
+    # for this file at its last scan: if the live bytes no longer hash to it, the FILE changed; if
+    # they still do, the proof is not this file's proof (corrupted or misfiled) and blaming the file
+    # would be a false alarm on the product's core signal. With no recorded baseline neither can be
+    # blamed, so the card names both possibilities.
+    stored_sha = (fe.sha256 or "").strip().lower()
+    live_sha = (digest or "").strip().lower()
+    mismatch_blame = None
+    if result is not None and result.digest_mismatch and live_sha:
+        if not stored_sha:
+            mismatch_blame = "unknown"
+        elif live_sha != stored_sha:
+            mismatch_blame = "file"
+        else:
+            mismatch_blame = "proof"
+
     # Verdict by *reason*, in the order of design D2. Branching on the proof's lifecycle state
     # before asking why verification failed is what let a changed file read "pending confirmation".
     if live_unavailable is not None:
         # No live bytes to verify against — distinct danger state, never a green VERIFIED.
         verdict = "danger"
         title = "File unavailable — cannot verify"
-    elif result is not None and result.digest_mismatch:
+    elif mismatch_blame == "file":
         verdict = "danger"
         title = "File no longer matches its proof"
+    elif mismatch_blame == "proof":
+        # The live bytes still hash to the recorded baseline, so the disagreement is the proof's.
+        # Same shape of copy as `proof_mismatch`: a failure OF THE PROOF, never of the file.
+        verdict = "danger"
+        title = "This proof does not match this file"
+    elif mismatch_blame == "unknown":
+        verdict = "danger"
+        title = "Fingerprint and proof disagree"
     elif result is not None and result.verified:
         # Above `proof_mismatch` as belt-and-braces on the source-level rule: one attestation
         # confirmed against its real block is proof, and no caller may turn a bad sibling into a
@@ -1892,6 +1917,11 @@ async def verify_run(
     elif result is not None and result.inconclusive:
         verdict = "unavailable"
         title = "Couldn't confirm — pending, changed, or unreachable"
+    elif result is not None and result.unreadable_proof:
+        # The `.ots` could not be parsed, so nothing was established about anything. Neutral, never
+        # red: the generic "could not verify" fallback below reads as a finding about the FILE.
+        verdict = "unavailable"
+        title = "Proof file could not be read"
     elif result is not None and result.state == "incomplete":
         verdict = "warn"
         title = "Pending confirmation"
@@ -1940,11 +1970,19 @@ async def verify_run(
         # Reason flags travel on every branch, not only the one that won: a transport failure under
         # a verdict that outranks it is still disclosed as a diagnostic line (design D2).
         "digest_mismatch": bool(result and result.digest_mismatch),
+        # Which artifact the digest disagreement is attributed to: "file" | "proof" | "unknown".
+        # Never derived in the template — the template has no access to the recorded baseline.
+        "mismatch_blame": mismatch_blame,
         "proof_mismatch": bool(result and result.proof_mismatch),
+        "unreadable_proof": bool(result and result.unreadable_proof),
         "transport_error": (result.transport_error if result else None),
-        "failed_lookups": ots_svc.failed_lookup_count(result.transport_error if result else None),
+        "failed_lookups": ots_svc.failed_lookup_count(result),
         "inconclusive": bool(result and result.inconclusive),
         "existed_by": result.existed_by if result else None,
+        # Provenance the card may present as CONFIRMED only when `verified` is true. On any other
+        # branch this is what the proof *claims* (read offline from the proof itself), unconfirmed
+        # against the Bitcoin record — and on a changed file it belongs to the digest the proof was
+        # made from, not to the live fingerprint shown beside it (design D1, BLOCKER 3).
         "block_height": result.block_height if result else None,
         "block_hash": block_hash,
         "calendars": result.calendars if result else [],

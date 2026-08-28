@@ -1729,8 +1729,10 @@ def test_explorer_digest_mismatch_sets_only_digest_mismatch(tmp_path, monkeypatc
 
     result = ots.verify(proof, "cd" * 32)
     assert result.verified is False
-    assert result.digest_mismatch is True   # the FILE changed
-    assert result.proof_mismatch is False   # ...and that says nothing about the proof
+    # The neutral "the live digest and the proof's committed digest disagree" signal. Which of the
+    # two moved is NOT established here — the callers decide that from the recorded baseline.
+    assert result.digest_mismatch is True
+    assert result.proof_mismatch is False   # ...and it says nothing about the attestations
     assert result.transport_error is None
     assert result.inconclusive is False
 
@@ -1817,7 +1819,8 @@ def test_explorer_all_fetches_failing_sets_transport_error_and_is_not_verified(
     result = ots.verify(proof, digest_hex)
     assert result.verified is False
     assert result.transport_error is not None
-    assert ots.failed_lookup_count(result.transport_error) == 2
+    assert ots.failed_lookup_count(result) == 2
+    assert result.transport_failures == 2  # carried structurally, not re-split out of the text
     assert result.digest_mismatch is False and result.proof_mismatch is False
 
 
@@ -1840,7 +1843,8 @@ def test_explorer_verified_result_still_carries_a_swallowed_fetch_error(tmp_path
     # operator is told the verdict rests on the attestations that could be reached.
     assert result.verified is True
     assert result.transport_error == "explorer request failed at 822222"
-    assert ots.failed_lookup_count(result.transport_error) == 1
+    assert ots.failed_lookup_count(result) == 1
+    assert result.transport_failures == 1
 
 
 def test_explorer_proof_mismatch_still_carries_a_swallowed_fetch_error(tmp_path, monkeypatch):
@@ -1901,10 +1905,231 @@ def test_node_backend_unrunnable_binary_is_a_transport_error(tmp_path, monkeypat
     assert result.inconclusive is False
 
 
-def test_failed_lookup_count_reads_the_joined_transport_error():
+def test_failed_lookup_count_reads_the_structural_counter():
+    from src.services.ots import VerifyResult, failed_lookup_count
+
+    assert failed_lookup_count(None) == 0
+    assert failed_lookup_count(VerifyResult(verified=True, state="complete")) == 0
+    assert failed_lookup_count(
+        VerifyResult(verified=False, state="complete", transport_error="one failure",
+                     transport_failures=1)
+    ) == 1
+    assert failed_lookup_count(
+        VerifyResult(verified=False, state="complete", transport_error="a; b",
+                     transport_failures=2)
+    ) == 2
+
+
+def test_failed_lookup_count_does_not_split_one_error_containing_the_separator():
+    """MINOR 7: the count is structural, so a separator INSIDE one error cannot inflate it.
+
+    The joined form uses "; ", and a perfectly ordinary explorer error contains that sequence
+    (``HTTP Error 503: retry later; overloaded``). Recovering the count by splitting the display
+    text reported one failed lookup as two — telling the operator that twice as much of their
+    proof went unchecked as actually did.
+    """
+    from src.services.ots import VerifyResult, failed_lookup_count
+
+    one = VerifyResult(
+        verified=False,
+        state="complete",
+        transport_error="HTTP Error 503: retry later; overloaded",
+        transport_failures=1,
+    )
+    assert failed_lookup_count(one) == 1
+
+
+def test_failed_lookup_count_never_drops_a_reason_that_carries_no_count():
+    """A hand-built fallback result (route/CLI) sets the reason but no count: report one, not zero.
+
+    Zero would silently drop the disclosure the count exists to make.
+    """
+    from src.services.ots import VerifyResult, failed_lookup_count
+
+    assert failed_lookup_count(
+        VerifyResult(verified=False, state="none", transport_error="ots binary not found")
+    ) == 1
+
+
+# --- post-audit hardening of the verify path (fix-ux-audit-sprint1, §8) ---------------------
+#
+# The adversarial pass found three ways this module made a claim stronger than its evidence:
+# a proof whose own digest was corrupted was reported as a changed FILE; a malformed explorer
+# response was reported as a proof mismatch; and the node backend read success out of a regex
+# rather than out of the process exit status. Each one manufactures a false verdict on the signal
+# the product exists to make trustworthy, so each gets a regression here.
+
+
+def test_explorer_tampered_proof_digest_is_a_neutral_disagreement(tmp_path, monkeypatch):
+    """A flipped byte INSIDE a structurally valid `.ots` must not be blamed on the file.
+
+    The proof still deserializes, so the only thing established is that the live digest and the
+    digest the proof commits to DISAGREE. `ots.verify` therefore reports the disagreement and
+    nothing else: no attestation was validated at this point either, so any claim that "the proof
+    is intact and still attests the earlier version" would be invented. Blame is the callers' job,
+    using the file's recorded baseline (design D1).
+    """
     from src.services import ots
 
-    assert ots.failed_lookup_count(None) == 0
-    assert ots.failed_lookup_count("") == 0
-    assert ots.failed_lookup_count("one failure") == 1
-    assert ots.failed_lookup_count("one failure; another failure") == 2
+    digest_hex = "ab" * 32
+    file_digest = bytes.fromhex(digest_hex)
+    proof = tmp_path / "x.ots"
+    _write_btc_proof(proof, file_digest, height=811111)
+
+    raw = proof.read_bytes()
+    assert raw.count(file_digest) == 1, "expected exactly one serialized copy of the file digest"
+    at = raw.index(file_digest)
+    proof.write_bytes(raw[:at] + b"\xcd" + raw[at + 1:])  # one flipped byte, still parseable
+
+    def boom(*a, **k):
+        raise AssertionError("explorer must not be queried on a digest disagreement")
+    monkeypatch.setattr(ots, "_fetch_block_merkleroot", boom)
+
+    result = ots.verify(proof, digest_hex)  # the FILE is untouched: this is the original digest
+    assert result.verified is False
+    assert result.digest_mismatch is True        # the neutral "these two disagree" signal
+    assert result.unreadable_proof is False      # it parsed fine — that is the whole problem
+    assert result.proof_mismatch is False
+    # The message must not assign blame this comparison cannot establish.
+    low = result.message.lower()
+    assert "file changed" not in low and "changed since" not in low
+    assert "cannot say which of the two changed" in low
+
+
+def test_explorer_unreadable_proof_sets_the_typed_flag(tmp_path):
+    """A proof that will not parse is its own outcome: nothing about the file was established."""
+    from src.services import ots
+
+    proof = tmp_path / "x.ots"
+    proof.write_bytes(b"not a timestamp file at all")
+
+    result = ots.verify(proof, "ab" * 32)
+    assert result.verified is False
+    assert result.unreadable_proof is True
+    assert result.digest_mismatch is False and result.proof_mismatch is False
+    assert result.message.startswith("unreadable proof:")
+
+
+def _stub_explorer(monkeypatch, block_json, *, block_hash="ee" * 32):
+    """Point `_fetch_block_merkleroot`'s HTTP helpers at canned responses (the real parser runs)."""
+    from src.services import ots
+
+    monkeypatch.setattr(ots, "_http_get_text", lambda url, timeout: block_hash)
+    monkeypatch.setattr(ots, "_http_get_json", lambda url, timeout: block_json)
+
+
+def test_explorer_malformed_merkle_root_is_a_transport_error_not_a_mismatch(tmp_path, monkeypatch):
+    """`{"merkle_root": "00"}` is an explorer answering badly, not a proof that disagrees.
+
+    A short hex string used to be accepted, compared unequal to the attestation's commitment and
+    turned into `proof_mismatch=True` — a red "this proof does not check out" over intact evidence,
+    manufactured out of a malformed response.
+    """
+    from src.services import ots
+
+    digest_hex = "ab" * 32
+    proof = tmp_path / "x.ots"
+    _write_btc_proof(proof, bytes.fromhex(digest_hex), height=811111)
+    _stub_explorer(monkeypatch, {"merkle_root": "00", "timestamp": 1707935720})
+
+    result = ots.verify(proof, digest_hex)
+    assert result.proof_mismatch is False, "malformed block data must never become a mismatch"
+    assert result.verified is False
+    assert result.transport_error is not None and "malformed merkle root" in result.transport_error
+    assert result.transport_failures == 1
+
+
+def test_explorer_malformed_block_timestamp_is_a_transport_error(tmp_path, monkeypatch):
+    """An out-of-range block time cannot become an "existed by" date the operator relies on."""
+    from src.services import ots
+
+    digest_hex = "ab" * 32
+    file_digest = bytes.fromhex(digest_hex)
+    proof = tmp_path / "x.ots"
+    _write_btc_proof(proof, file_digest, height=811111)
+    # The merkle root MATCHES the commitment, so only the timestamp check stands between a bogus
+    # response and a verified result carrying a year-33658 date.
+    _stub_explorer(
+        monkeypatch, {"merkle_root": file_digest[::-1].hex(), "timestamp": 999999999999}
+    )
+
+    result = ots.verify(proof, digest_hex)
+    assert result.verified is False
+    assert result.existed_by is None
+    assert result.transport_error is not None and "malformed timestamp" in result.transport_error
+
+
+def test_explorer_non_hash_at_height_is_a_transport_error(tmp_path, monkeypatch):
+    from src.services import ots
+
+    digest_hex = "ab" * 32
+    proof = tmp_path / "x.ots"
+    _write_btc_proof(proof, bytes.fromhex(digest_hex), height=811111)
+    _stub_explorer(monkeypatch, {}, block_hash="00")
+
+    result = ots.verify(proof, digest_hex)
+    assert result.verified is False and result.proof_mismatch is False
+    assert result.transport_error is not None and "no block at height" in result.transport_error
+
+
+def test_node_backend_rc_zero_verifies_even_without_parseable_metadata(tmp_path, monkeypatch):
+    """The exit status is the success contract; the block/date line is optional metadata.
+
+    A successful `ots verify -d` whose wording the regex does not recognise used to be swallowed
+    into an inconclusive verdict — throwing away a verification that actually happened.
+    """
+    from src.services import ots
+
+    proof = tmp_path / "x.ots"
+    proof.write_bytes(b"stub")
+
+    def fake_run(args, timeout=ots.DEFAULT_TIMEOUT):
+        if args[0] == "info":
+            return 0, INFO_COMPLETE, ""
+        return 0, "", ""  # success, no recognisable line
+    monkeypatch.setattr(ots, "_run_ots", fake_run)
+
+    result = ots.verify(proof, "ab" * 32, backend="node")
+    assert result.verified is True
+    assert result.block_height is None and result.existed_by is None
+    assert result.inconclusive is False
+
+
+def test_node_backend_never_verifies_on_a_nonzero_exit(tmp_path, monkeypatch):
+    """The mirror direction, and the dangerous one: success-looking text under a failed exit."""
+    from src.services import ots
+
+    proof = tmp_path / "x.ots"
+    proof.write_bytes(b"stub")
+
+    def fake_run(args, timeout=ots.DEFAULT_TIMEOUT):
+        if args[0] == "info":
+            return 0, INFO_COMPLETE, ""
+        return 1, "", VERIFY_SUCCESS  # the tool FAILED while echoing a success line
+    monkeypatch.setattr(ots, "_run_ots", fake_run)
+
+    result = ots.verify(proof, "ab" * 32, backend="node")
+    assert result.verified is False, "a non-zero exit must never read as verified"
+    assert result.inconclusive is True
+
+
+def test_node_backend_info_failure_is_a_transport_error_not_an_exception(tmp_path, monkeypatch):
+    """`info` shells out too, so it must sit inside the same transport boundary.
+
+    Outside it, a missing binary raised out of `verify()` — which `cairn verify` does not catch, so
+    the command aborted with a traceback instead of printing COULD NOT CHECK.
+    """
+    from src.services import ots
+
+    proof = tmp_path / "x.ots"
+    proof.write_bytes(b"stub")
+
+    def fake_run(args, timeout=ots.DEFAULT_TIMEOUT):
+        raise ots.OtsError("ots binary not found")
+    monkeypatch.setattr(ots, "_run_ots", fake_run)
+
+    result = ots.verify(proof, "ab" * 32, backend="node")  # must not raise
+    assert result.verified is False
+    assert result.transport_error == "ots binary not found"
+    assert result.transport_failures == 1
+    assert result.state == "none" and result.inconclusive is False
