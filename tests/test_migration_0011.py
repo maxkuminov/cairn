@@ -24,6 +24,10 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+# Pinned to this revision rather than `head`: a later revision's own downgrade step runs (and
+# commits) before 0011's refusal fires, so upgrading past 0011 here would make the
+# "a refused downgrade changed nothing" snapshot compare across another revision's schema change.
+REV = "0011_proof_provenance_and_restored_changed"
 PREV = "0010_auto_baseline_new"
 
 
@@ -80,7 +84,7 @@ def test_migration_0011_round_trip_and_refusing_downgrade(tmp_path):
     seeded = _snapshot(db)
 
     # --- upgrade: additive column, widened CHECK, existing rows untouched --------------------
-    alembic("upgrade", "head")
+    alembic("upgrade", REV)
     con = sqlite3.connect(db)
     cols = {row[1]: row for row in con.execute("PRAGMA table_info(files)")}
     assert "ots_digest" in cols

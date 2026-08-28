@@ -28,14 +28,14 @@ Standing guardrails for every slice:
 
 ## 1. Shared prep (once, on the base branch, before fan-out)
 
-- [ ] 1.1 Confirm the working tree is on the intended base: `src/control_panel/routes.py` contains
+- [x] 1.1 Confirm the working tree is on the intended base: `src/control_panel/routes.py` contains
   `_read_population`, `_review_item` and `mismatch_blame`; `src/services/collections.py` contains
   `reclaim_stale_claim`; `openspec/changes/archive/2026-08-27-add-alert-deep-links/` exists. If any
   is missing, the branch is stale — stop.
-- [ ] 1.2 Confirm the Alembic head is `0011_proof_provenance_and_restored_changed`
+- [x] 1.2 Confirm the Alembic head is `0011_proof_provenance_and_restored_changed`
   (`ls alembic/versions/`). This change's revision is **0012**; if the head has moved, renumber
   before writing it.
-- [ ] 1.3 Write `alembic/versions/0012_run_error_visibility.py`, purely additive — **no table
+- [x] 1.3 Write `alembic/versions/0012_run_error_visibility.py`, purely additive — **no table
   rebuild, no CHECK change**:
   - `runs.errors` — `op.add_column("runs", sa.Column("errors", sa.Integer(), nullable=False,
     server_default="0"))`.
@@ -45,17 +45,17 @@ Standing guardrails for every slice:
     3.9's finalize WARNING**, which is what makes that sentence true for all three skip causes (two
     are silent today). So the downgrade does **not** need `0011`'s refusal guard. If 3.9's log line
     is dropped, this claim must be dropped with it.
-- [ ] 1.4 `src/models/db.py`: add `Run.errors: Mapped[int]` (default 0, not nullable) and
+- [x] 1.4 `src/models/db.py`: add `Run.errors: Mapped[int]` (default 0, not nullable) and
   `Run.error_sample: Mapped[str | None]`, each with a comment stating (a) that `errors` is the count
   that already decides `partial` and (b) that `error_sample` is a **bounded JSON array of ASCII-safe
   diagnostic renderings, not paths** (20 entries / 256 B per entry / 4096 B serialized — see design
   D6) and must never be fed to a filesystem call.
-- [ ] 1.5 Apply `0012` against a **populated** scratch DB: assert existing `runs` rows survive with
+- [x] 1.5 Apply `0012` against a **populated** scratch DB: assert existing `runs` rows survive with
   `errors = 0` / `error_sample = NULL`, then `alembic downgrade` and assert both columns are gone
   with every other row intact.
-- [ ] 1.6 Baseline the gates so slice failures are attributable: `PYTHONPATH=. pytest -q` and
+- [x] 1.6 Baseline the gates so slice failures are attributable: `PYTHONPATH=. pytest -q` and
   `ruff check .` green, `alembic upgrade head` clean.
-- [ ] 1.7 Commit shared prep on the base branch **before** creating any worktree.
+- [x] 1.7 Commit shared prep on the base branch **before** creating any worktree.
 
 ## 2. Slice A — the fleet review page, the tile's destination, the feed ordering (#27 / #18 / #25)
 

@@ -178,6 +178,21 @@ class Run(Base):
     moved: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     stamped: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     upgraded: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Files this run could not process and skipped (un-storable name, `stat` OSError, hash
+    # OSError). This is the count that already decides a run's `partial` result — the scanner's
+    # RunSummary.errors — persisted so a `partial` says how many files it skipped rather than only
+    # that it skipped some. 0 on rows written before 0012.
+    errors: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # A bounded JSON array of ASCII-safe **diagnostic renderings, not paths**, one per skipped file,
+    # each prefixed with its cause (`unstorable-name: …`, `stat: …`, `hash: …`). Bounded at write
+    # time on three axes — 20 entries, 256 bytes per entry, 4096 bytes serialized (design D6) — so a
+    # pathological tree cannot write an unbounded value into a column read on every collection card
+    # render; whichever bound bites, the last element is a `"+N more skipped …"` marker so dropped
+    # entries are counted, not silent. The entries are renderings because the headline skip cause is
+    # a name that cannot be stored as TEXT at all (a lone surrogate), so storing the raw name would
+    # reproduce the very UnicodeEncodeError this column exists to report. It MUST never be fed to a
+    # filesystem call or offered as a copyable path list. NULL = no sample recorded.
+    error_sample: Mapped[str | None] = mapped_column(Text)
     # True when this run re-hashed every tracked file (deep verify) rather than fast-pathing.
     deep: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     result: Mapped[str] = mapped_column(String(16), default="running", nullable=False)
