@@ -504,8 +504,52 @@ SHALL NOT attribute it from the disagreement alone. Where the live bytes no long
 baseline Cairn recorded at its last scan, the *file* changed and the panel SHALL say so.
 
 Where the live bytes still hash to that baseline, the file is not what moved, and the panel SHALL
-NOT say the file changed. It SHALL NOT state as established that the proof is corrupted or misfiled
-either: the recorded baseline is **not** the digest the stored proof was made from — a scan
+NOT say the file changed. What it may say about the **proof** depends on whether the file records
+the digest its stored proof was placed committing to.
+
+**Where that provenance is recorded, the attribution is established, not inferred.** The recorded
+provenance is what the system itself wrote when it placed the proof. These readings SHALL be
+evaluated **in the order given**, and the panel SHALL reach the "not the proof recorded for this
+file" reading **before** any reading that describes the stored proof as merely older than the file.
+Where the recorded provenance is one digest, the live and baseline bytes are a second, and the stored
+proof commits to a third, the proof is not an earlier proof of this file at all — it is a proof of
+something else sitting at this file's path — and describing it as an old proof of this file is a
+false reassurance on the very page an operator opens to ask whether their evidence is sound:
+
+- where the digest the stored proof commits to is known and **differs** from the recorded
+  provenance, the proof at that path is not the one the system recorded placing there: the panel
+  SHALL report as established that the stored proof is not the proof recorded for this file —
+  corrupted, swapped or misfiled — and SHALL NOT offer the proof-predates-this-version explanation.
+  This SHALL hold whether or not the recorded provenance also differs from the live digest;
+- where the recorded provenance **equals** the live digest, the panel SHALL report that same
+  established finding even where the digest the stored proof commits to is unavailable: the system
+  recorded placing a proof for exactly these bytes and the proof at that path disagrees with them;
+- where the recorded provenance **differs** from the live digest **and** the stored proof is known
+  to commit to exactly that recorded provenance, the panel SHALL report **only what that comparison
+  established**: that the proof stored at this path commits to the fingerprint previously recorded
+  for this file rather than to its current one, that this is not evidence against the current file,
+  and — explicitly — that the proof's Bitcoin attestations were **not** validated in this check.
+  It SHALL NOT report that artifact as the proof the system placed, nor that it still covers,
+  attests or is good evidence for the earlier version. A committed digest identifies bytes, not an
+  artifact: any `.ots` built over the same earlier bytes commits to the same digest, so a
+  fabricated, unanchored or substituted proof dropped at that path satisfies the comparison exactly
+  as the real one does, and verification exits on the digest disagreement before any attestation is
+  checked. Asserting identity or continued good standing there would launder a swapped proof into a
+  reassurance on the one page an operator opens to ask whether their evidence is sound. It SHALL
+  claim a re-stamp is pending only where the file record's **proof state** says one is queued —
+  never from the file's status, which stays `modified` forever in a collection whose stamping has
+  since been turned off;
+- where the recorded provenance differs from the live digest but the digest the stored proof commits
+  to is **not** available, neither finding is established: the panel SHALL fall back to the wording
+  it uses where no provenance is recorded, and SHALL NOT report the proof as predating this version
+  on the strength of the recorded provenance alone.
+
+Neither of those readings SHALL say anything against the file, whose bytes still match their
+recorded baseline.
+
+**Where no such provenance is recorded** — a proof stored before the system began recording it — the
+panel SHALL NOT state as established that the proof is corrupted or misfiled: the recorded baseline
+is **not** the digest the stored proof was made from — a scan
 overwrites it with the newly observed bytes before any replacement proof exists — so during the
 window between a modification and its re-stamp a perfectly good proof legitimately commits to
 different bytes. The panel SHALL therefore distinguish two readings of that case from the file
@@ -518,7 +562,7 @@ record's own state:
   file;
 - otherwise the panel SHALL report the disagreement and attribute it to **neither** artifact,
   stating that the proof may be from an earlier version of the file or may be corrupted and that
-  Cairn cannot tell which without a record of the digest each proof was made from.
+  Cairn cannot tell which without a record of the digest that proof was made from.
 
 Where no baseline digest is recorded, the panel SHALL name both possibilities and blame neither. In
 no case SHALL the panel state that the proof is intact or still attests an earlier version of the
@@ -743,11 +787,47 @@ asserting a fixed backend.
 
 #### Scenario: A digest disagreement over an unchanged file blames neither artifact
 
-- **WHEN** the panel verifies a file whose live bytes still hash to the digest Cairn recorded for it
-  and whose record indicates no re-stamp is owed, and the proof commits to a different digest
+- **WHEN** the panel verifies a file whose live bytes still hash to the digest Cairn recorded for it,
+  which records no provenance for its stored proof, and whose record indicates no re-stamp is owed,
+  and the proof commits to a different digest
 - **THEN** the panel SHALL state that Cairn cannot tell whether the proof predates the file's current
   version or is corrupted, and SHALL NOT state that the file's bytes changed, that the proof is
   intact, or that the proof is corrupted or misfiled
+
+#### Scenario: Recorded provenance establishes that the stored proof is not this file's proof
+
+- **WHEN** the panel verifies a file whose live bytes still hash to the digest Cairn recorded for it,
+  whose recorded proof provenance equals that same digest, and whose stored proof commits to a
+  different digest
+- **THEN** the panel SHALL report as established that the stored proof is not the proof recorded for
+  this file, SHALL NOT say the file's bytes changed, and SHALL NOT offer the
+  proof-predates-this-version explanation
+
+#### Scenario: Recorded provenance establishes which fingerprint the stored proof commits to
+
+- **WHEN** the panel verifies a file whose live bytes still hash to the digest Cairn recorded for it,
+  whose recorded proof provenance differs from that digest, and whose stored proof commits to exactly
+  that recorded provenance
+- **THEN** the panel SHALL report that the stored proof commits to the fingerprint previously
+  recorded for this file rather than to its current one, SHALL state that its Bitcoin attestations
+  were not validated in this check, SHALL state that this is not evidence against the current file,
+  and SHALL NOT describe that artifact as the proof Cairn placed or as still covering the earlier
+  version
+
+#### Scenario: An established staleness reading claims no re-stamp that is not queued
+
+- **WHEN** the panel verifies such a file whose record carries a stamping-complete proof state and a
+  modified status — a collection whose per-file stamping was turned off after the modification
+- **THEN** the panel SHALL NOT state that a re-stamp is pending or queued, and SHALL claim one only
+  where the file record's proof state says one is queued
+
+#### Scenario: A proof matching neither the file nor the record is not shown as merely old
+
+- **WHEN** the panel verifies a file whose live bytes still hash to the digest Cairn recorded for it,
+  whose recorded proof provenance is a **different, earlier** digest, and whose stored proof commits
+  to a **third** digest matching neither
+- **THEN** the panel SHALL report as established that the stored proof is not the proof recorded for
+  this file, and SHALL NOT report that the proof merely predates this version of the file
 
 #### Scenario: A digest disagreement while a re-stamp is owed reads as a proof that predates the file
 
@@ -1017,6 +1097,34 @@ the copied list by the control that produced it rather than by its position on t
 The view's introduction, which describes files that went missing or changed and how to recover them,
 SHALL be rendered only where there is something to review. On a view with no issues and no open
 alerts it describes a situation the page itself then contradicts.
+
+**Recovery guidance SHALL describe the check the scan actually performs, and both of its outcomes.**
+A restored file is compared against the digest recorded for it, so the guidance SHALL say that a
+rescan returns a file to a healthy state **only where the restored bytes match what was recorded**,
+and that a file which comes back different **closes the now-obsolete missing alert and replaces it
+with a new "came back changed" alert**. It SHALL NOT say that the new alert is raised *instead of*
+clearing the old one: the scan acknowledges the missing event in the same transaction, so an
+operator sent looking for a still-open missing alert is sent after something the scan already
+closed.
+It SHALL NOT tell the operator that restoring a file and rescanning returns it to a healthy state
+unconditionally, and SHALL NOT describe a set of restored files as matching what was recorded unless
+that comparison established it. Promising a verification the product does not perform is the failure
+class this page exists to close; promising one it does perform, without its negative outcome, is the
+same failure with a smaller blast radius.
+
+#### Scenario: Recovery guidance names both outcomes of a rescan
+
+- **WHEN** the review view renders its recovery guidance
+- **THEN** it SHALL state that a restored file returns to a healthy state only where its bytes match
+  the digest recorded for it, and that a file restored with different bytes closes its obsolete
+  missing alert and raises a new "came back changed" alert in its place
+
+#### Scenario: The restored-alerts card does not assert an unperformed match
+
+- **WHEN** the review view renders the card for alerts left open by files that have since been
+  restored
+- **THEN** its copy SHALL NOT assert that the restored files match what was recorded beyond what the
+  scan established
 
 #### Scenario: Dashboard issue count links to the review view
 
@@ -1386,4 +1494,33 @@ container it sits in.
 
 - **WHEN** the collection detail page is rendered on a viewport narrower than the mobile breakpoint
 - **THEN** the status metadata cell SHALL reflow to fit its value rather than truncating it
+
+### Requirement: A file that came back different is rendered as an alarm, not as an arrival
+
+The panel SHALL render a `restored_changed` event — a file that was recorded missing and reappeared
+with bytes that do not match the digest recorded for it — with its own label and with the visual
+weight of the alarming kinds, never with the muted styling used for the informational kinds
+(`added`, `restored`, `moved`). It SHALL show that event's recorded detail, which carries both
+digests, **in full and at any viewport width** — the detail line is the only surviving record of
+the digest the file had before it came back, so it SHALL NOT be truncated, clipped or ellipsized.
+The event is the one surface that distinguishes "your file came back" from "something else came
+back in its place"; rendering it as an arrival would restore the false reassurance the underlying
+fix removes.
+
+The affected file SHALL appear in the collection's review view and count toward its issue count and
+status like any other `modified` file, so the collection SHALL NOT read as all clear while it is
+unresolved.
+
+#### Scenario: The event feed names a changed reappearance as such
+
+- **WHEN** a scan writes a `restored_changed` event and the operator views the event feed
+- **THEN** the row SHALL carry a label distinct from `restored`, SHALL be styled as an alarming
+  kind, and SHALL show the recorded detail carrying both digests, with both digests fully visible
+  (the detail line wraps rather than truncating)
+
+#### Scenario: A collection with an unresolved changed reappearance does not read as all clear
+
+- **WHEN** a collection's only non-`ok` file is one that reappeared with different bytes
+- **THEN** the collection SHALL NOT be presented as all clear, and the file SHALL appear in its
+  review view
 

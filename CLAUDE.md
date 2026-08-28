@@ -329,6 +329,32 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > ticketed: #36 inert global search, #37 detail-page new count, #38 scan-all labelling; fleet-wide
 > `/review` is #27 (later change flips the multi-collection tile href).
 
+> Integrity guards (guard-proof-and-restore-integrity): the audit's two real-loss paths (#15, #21)
+> + the sprint-1 provenance IOU. **A stamp never destroys a proof**: `_place_proof` inspects an
+> occupied canonical path and archives the displaced proof content-addressed under
+> `<proof_store>/.superseded/<cid>/<dd>/<digest>[.N].ots` (never-discard suffixed family, link-free
+> O_EXCL create, full-write loop, fsync file → directory chain to the store root → only then unlink;
+> dir-fsync/flock-unsupported filesystems warn once and degrade). Same-digest anchored re-stamps are
+> **adopted** only after a live anchor confirmation (recorded provenance never substitutes);
+> unestablished verdicts **defer** with no state change. **A restored file is compared before it is
+> believed** (#21): the scanner hashes first — different bytes ⇒ `status=modified` in both modes +
+> an unacknowledged **`restored_changed`** event (both digests in `events.detail`, rendered fully on
+> a wrapping line) + `pending` re-stamp; the obsolete missing alert still closes; alerts fire like a
+> WORM modified. **Provenance**: `files.ots_digest` (migration **0011**, also `runs.heartbeat_at`;
+> downgrade refuses while restored_changed rows exist) records what each placed proof commits to —
+> written only at placement/adoption/corroborated-upgrade-backfill, never from an uncorroborated
+> read; the verify blame ladder checks parsed-vs-recorded FIRST (swapped proof detectable), and the
+> proof-stale reading claims only the committed-digest fact. **Proof mutation is single-writer by
+> construction**: every entry point (scheduler, panel, `cairn stamp/upgrade/scan`) claims the
+> collection's run slot; the claim is a full lease — heartbeat on progress + an async keepalive
+> (5 min) independent of work, in-band stale reclamation at every gate + the tick (guarded UPDATEs,
+> a concurrent heartbeat always wins), lease fencing before every batch commit/stamp tail/
+> finalization, and a per-collection flock around placement with post-acquisition re-check. CLI ops
+> refuse (never wait) when the slot is held; `cairn scan` exits non-zero only if everything was
+> refused. Known deferred: #39 (moved file's ots_path points at the old relpath's proof), #40/#41
+> (coverage-bar labelling, unstamped verify card reachability). Gates: 5-round spec review, 2-scope
+> adversarial implementation review to PASS-zero, verifier 21/21 requirements, live user-rep pass.
+
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
   Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).

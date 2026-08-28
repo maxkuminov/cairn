@@ -6,7 +6,10 @@ TBD - created by archiving change add-notifiers. Update Purpose after archive.
 ### Requirement: Alert on newly-detected alarming changes, per-corpus routing
 
 The system SHALL dispatch a single batched alert for a corpus to the channels enabled in its
-`alert_json` when a scan newly detects an alarming change: a `missing` file (in any mode) or a
+`alert_json` when a scan newly detects an alarming change: a `missing` file (in any mode), a file
+that reappeared with **different bytes** than the digest recorded for it (a `restored_changed` file,
+in any mode — see the `integrity-scanning` requirement "A file that reappears with different bytes
+is not reported as restored"), or a
 `modified` file in a WORM corpus. Informational `added`, `restored`, and `moved` events, and churn
 re-baselines, SHALL NOT trigger an alert. A file that the scan reconciles as a move (see the
 `integrity-scanning` move/rename requirement) is not a `missing` change and SHALL NOT trigger an
@@ -22,6 +25,20 @@ backlog, so the operator is not re-nagged on every scan.
 
 - **WHEN** a scan newly marks a file `modified` in a WORM corpus with an enabled channel
 - **THEN** an alert SHALL be dispatched summarizing the modification
+
+#### Scenario: A file that came back different triggers an alert in either mode
+
+- **WHEN** a scan finds a file recorded `missing` back on disk with bytes that do not match the
+  digest recorded for it, in a corpus with an enabled channel
+- **THEN** an alert SHALL be dispatched for that corpus naming that file, in **worm and in churn
+  mode alike**, because the operator restored something and what came back is not what left
+
+#### Scenario: An identical restore does not alert
+
+- **WHEN** a scan finds a file recorded `missing` back on disk with bytes matching the digest
+  recorded for it
+- **THEN** no alert SHALL be dispatched — this is the benign direction and its `restored` event is
+  informational
 
 #### Scenario: Churn modification does not alert
 
