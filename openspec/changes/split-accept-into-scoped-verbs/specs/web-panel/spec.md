@@ -169,6 +169,18 @@ derived from that same snapshot rather than from an earlier count, so that a con
 committed between the two reads cannot leave the page reporting a healthy "all clear" for a
 collection it has just emptied.
 
+That single-read derivation SHALL hold for a row **re-rendered on its own** as well as for a whole
+page. Where marking a file reviewed swaps that row back in with its accept control, the state the
+row **displays** — its file status, and therefore the verb its control names — its open-event state
+and the fingerprint that control carries SHALL all be derived from one read taken after the
+acknowledgement is committed. A row rendered from a record read before that read can name one verb
+while its fingerprint authorizes the other: a scan committing a change of status in between leaves
+the swapped row offering to adopt a change while its fingerprint validates the removal of the
+record, and the operator submits, unchanged, a form that performs a consequence the row never
+displayed. Where that one read shows the row is in **no** action's population any more, the row
+SHALL be rendered with no accept control and no fingerprint, rather than with a fingerprint for a
+verb it does not show.
+
 The fingerprint SHALL additionally cover a set of open (unreviewed) events **by identity** — each
 event's identifier, its kind and the time it was detected — recomputed inside the same guarded
 transaction as the file records. Covering that set by **count** is not sufficient: an open alert may
@@ -334,6 +346,17 @@ one.
   per-file address, including where the two rows share a status, a content digest and a size
 - **THEN** the endpoint SHALL refuse, SHALL mutate neither row, and SHALL redirect to the review
   view with the staleness marker
+
+#### Scenario: A row swapped in after being marked reviewed states the verb it authorizes
+
+- **WHEN** a file is marked reviewed from the review view and a scan changes that file's status
+  between the point its record would have been read and the read the row's fingerprint is minted
+  from
+- **THEN** the verb the swapped-in row names and the fingerprint it carries SHALL describe the same
+  state, so that submitting that row's form unchanged can perform no consequence other than the one
+  the row displayed — and where the row is no longer in any action's population, it SHALL be
+  rendered with no accept control and no fingerprint, and a submission at its address SHALL be
+  refused
 
 #### Scenario: A refused submission is explained on the review view
 

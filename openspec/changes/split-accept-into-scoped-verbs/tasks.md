@@ -47,7 +47,9 @@ Standing guardrails for both slices:
   change adds nothing after it.
 - [x] 0.3 Baseline the gates so slice failures are attributable: `PYTHONPATH=. pytest -q` and
   `ruff check .` green.
-- [ ] 0.4 Open the coordination issue referencing #16, #30, #35 and link it from all three.
+- [x] 0.4 Coordination: the audit issues #16/#30/#35 themselves serve as the open coordination
+  record for this change (each carries the full contract and is closed by the archive commit);
+  no separate umbrella issue was opened. Supervisor decision, recorded here.
 
 ## 1. Slice A — service + CLI (`src/services/scanner.py`, `src/cli.py`, tests)
 
@@ -199,3 +201,26 @@ Standing guardrails for both slices:
   and that a refusal is legible.
 - [ ] 3.7 Update CLAUDE.md's accept/review notes, `/openspec-archive-change`, push, close #16, #30,
   #35 and the coordination issue.
+
+## 4. Post-audit fixes
+
+- [x] 4.1 **BLOCKER (adversarial Codex, `routes.py:685`) — the acknowledgement row swap rendered
+  and hashed two different snapshots.** `POST /events/{id}/ack?view=review` built the swapped-in
+  row from a `session.get(FileEntry, …)` and minted its per-file fingerprint from a *later*
+  `_read_population`; with `expire_on_commit=False` and sqlite3's legacy transaction mode, a scan
+  committing `modified -> missing` between the two left the row offering "Adopt this change" while
+  its fingerprint validated `accept_file` **deleting** the now-`missing` record — the named-verb
+  violation this change exists to remove, inside the guard's own re-mint. The swap now takes ONE
+  post-ack narrowed population read and derives the rendered row's status (and so its verb), its
+  open-event state and its fingerprint from that single result; a row the read shows in no
+  actionable population is rendered with no accept control and no fingerprint (the endpoint fails
+  closed on the absent field). `_review_item` accepts a `_PopEvent`, which is open by construction.
+  Web-panel delta gains the agreement clause + its scenario; deterministic interleaving regressions
+  in `tests/test_ux_dashboard.py`
+  (`test_the_acknowledged_row_shows_the_verb_its_own_fingerprint_authorizes`,
+  `test_an_acknowledged_row_that_left_the_population_carries_no_accept_control`), both verified to
+  fail on the pre-fix route.
+
+- [x] 4.2 Verifier concern 1: the baseline button now carries the required kept-vs-lost hint
+  (title attribute with the #16 copy verbatim) on `collection_detail.html`; asserted in
+  `tests/test_ux_review.py::test_the_baseline_button_states_what_it_keeps_and_loses`.

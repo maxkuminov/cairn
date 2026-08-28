@@ -682,23 +682,50 @@ async def ack_event(
     if view == "review":
         # Acknowledged from the review page: swap that row in place and refresh the collection's
         # "unreviewed" pill (#review-open-pill) plus the global sidebar badge.
-        fe = await session.get(FileEntry, event.file_id) if event.file_id else None
         # The swapped-in row carries its own accept form again, so marking a file reviewed does not
-        # quietly cost it the control beside it. The fingerprint is re-minted from a fresh read
-        # because the ack just committed: publishing the pre-ack one would hand back a form that
-        # its own endpoint refuses.
-        row_fp = ""
-        if fe is not None:
-            row_fp = _population_fingerprint(
-                collection,
-                _narrow(
-                    await _read_population(session, collection, "review", file_id=fe.id),
-                    "accept-file",
-                    _FP_FORMS["accept-file"][1],
-                    file_id=fe.id,
-                ),
+        # quietly cost it the control beside it — and BOTH halves of that row come from ONE post-ack
+        # `_read_population`, exactly as the page's own render does (design D2/D9): the state it
+        # DISPLAYS (its status, so the verb its control names, and its open-event state) and the
+        # fingerprint that control AUTHORIZES are slices of the same snapshot.
+        #
+        # Rendering the row from a `session.get` and minting the fingerprint from a later read is
+        # two snapshots: sessions are `expire_on_commit=False` and sqlite3 runs in legacy
+        # transaction mode, so a scan committing `modified -> missing` between them left the row
+        # showing "Adopt this change" while its fingerprint described the now-`missing` record — an
+        # unchanged submit would then validate and DELETE the tracking record, the named-verb
+        # violation this change exists to remove, performed inside the guard's own re-mint.
+        item = None
+        if event.file_id is not None:
+            narrowed = _narrow(
+                await _read_population(session, collection, "review", file_id=event.file_id),
+                "accept-file",
+                _FP_FORMS["accept-file"][1],
+                file_id=event.file_id,
             )
-        item = _review_item(fe, collection.root, event, fp=row_fp) if fe is not None else None
+            if narrowed.files:
+                # A population's events are open by definition (the read selects
+                # `acknowledged_at IS NULL`), and the event just acknowledged is no longer among
+                # them — so a survivor here is a LATER alert on the same row, and the row correctly
+                # re-offers Mark reviewed for it. Highest id = newest (the list is id-ordered);
+                # ordering on `detected_at` would compare against whatever the row happens to
+                # carry, which is not what identifies the generation.
+                open_ev = narrowed.open_events[-1] if narrowed.open_events else None
+                item = _review_item(
+                    narrowed.files[0],
+                    collection.root,
+                    # Falling back to the just-acknowledged event keeps the row's "detected" time;
+                    # it is acknowledged, so it can never make the row claim an open alert.
+                    open_ev or event,
+                    fp=_population_fingerprint(collection, narrowed),
+                )
+            else:
+                # The same read says the row is in no actionable population any more — restored to
+                # `ok`, or its record already accepted away. Render it (if it still exists) with NO
+                # fingerprint: a row that is shown no verb must not carry an authorization for one,
+                # and the endpoint fails closed on an empty field.
+                fe = await session.get(FileEntry, event.file_id)
+                if fe is not None:
+                    item = _review_item(fe, collection.root, event)
         review_open = await session.scalar(
             select(func.count())
             .select_from(Event)
@@ -1625,16 +1652,22 @@ REVIEW_COPY_LIMIT = 2000
 
 
 def _review_item(
-    fe: FileEntry | _PopFile, root: str, event: Event | None, fp: str = ""
+    fe: FileEntry | _PopFile, root: str, event: Event | _PopEvent | None, fp: str = ""
 ) -> dict[str, Any]:
     """One review row: the file, what happened to it, its open event, and its own accept form.
 
     ``fp`` is the row's per-file fingerprint (design D6/D9), sliced by :func:`_narrow` out of the
     very snapshot the row was rendered from — never a second read. Empty means the row renders no
     accept control, which fails closed: the endpoint refuses an absent fingerprint.
+
+    ``event`` may be an ORM :class:`~src.models.db.Event` or a :class:`_PopEvent` out of that same
+    snapshot. A ``_PopEvent`` carries no ``acknowledged_at`` because it cannot have one: the
+    population read selects ``acknowledged_at IS NULL``, so it is open by construction.
     """
     rel_dir = fe.relpath.rsplit("/", 1)[0] if "/" in fe.relpath else ""
-    open_event = event if (event is not None and event.acknowledged_at is None) else None
+    open_event = (
+        event if (event is not None and getattr(event, "acknowledged_at", None) is None) else None
+    )
     detected_src = event.detected_at if event is not None else fe.last_changed
     return {
         "id": fe.id,

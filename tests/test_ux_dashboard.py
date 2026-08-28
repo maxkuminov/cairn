@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import event as sa_event
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
@@ -1520,6 +1520,125 @@ def test_the_detail_baseline_form_hashes_the_population_that_gated_it(cairn_env,
     rows = _aside(lambda s: _statuses(s, 1))
     assert ("new", "fresh") in rows and ("missing", "gone") in rows
 
+
+def _drift_before_the_population_read(monkeypatch, drift):
+    """Patch `_read_population` into a barrier that lets ``drift`` commit BEFORE the real read.
+
+    The mirror of :func:`_drift_after_the_population_read`, aimed at the acknowledgement row swap.
+    The window that swap has to survive opens where the row's own record is read and closes at the
+    population read its fingerprint is minted from: a commit landing in there is seen by one and
+    not the other, so a row rendered from one read and hashed from another disagrees by
+    construction — the swapped row naming one verb while its fingerprint authorizes the other.
+    """
+    from src.control_panel import routes
+
+    seen: list[str] = []
+    real = routes._read_population
+
+    async def spy(session, collection, scope, file_id=None):
+        if not seen:
+            await _with_session(drift)
+        seen.append(scope)
+        return await real(session, collection, scope, file_id=file_id)
+
+    monkeypatch.setattr(routes, "_read_population", spy)
+    return seen
+
+
+def test_the_acknowledged_row_shows_the_verb_its_own_fingerprint_authorizes(
+    cairn_env, monkeypatch
+):
+    """The row swapped in after a Mark-reviewed states one thing, and authorizes exactly that.
+
+    The swap used to render the row from a `session.get` and then mint its per-file fingerprint
+    from a *later* population read. Sessions are `expire_on_commit=False` and sqlite3 runs in
+    legacy transaction mode, so a scan committing `modified -> missing` between the two was invisible
+    to the first read and visible to the second: the row came back offering "Adopt this change"
+    while carrying a fingerprint for the now-`missing` record, and submitting that unchanged form
+    validated and DELETED the tracking record. Both halves now come from one read, so the verb the
+    row displays and the consequence its form can validate cannot disagree.
+    """
+    root = cairn_env / "ackswap"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(
+            lambda s: _mk_files(s, cid, [("edited", "modified", "complete", {"id": SUBJECT_ID})])
+        )
+        await _with_session(lambda s: _mk_event(s, cid, SUBJECT_ID, "modified"))
+
+    async def the_file_vanishes(s):
+        """The scan that lands inside the window: the row is now missing, with a fresh alert."""
+        from src.models.db import FileEntry
+
+        await s.execute(
+            update(FileEntry).where(FileEntry.id == SUBJECT_ID).values(status="missing")
+        )
+        await s.commit()
+        await _mk_event(s, 1, SUBJECT_ID, "missing")
+
+    with _make_client(cairn_env, seed) as client:
+        token = _csrf(client)
+        _drift_before_the_population_read(monkeypatch, the_file_vanishes)
+        body = client.post("/events/1/ack?view=review", headers={"X-CSRF-Token": token}).text
+
+        # The row names the verb its population is actually in — never the one it left.
+        assert "Adopt this change" not in body
+        assert "Stop tracking this file" in body
+        m = re.search(r'name="population_fp" value="([0-9a-f]{64})"', body)
+        assert m, body
+        # ...and the fingerprint beside it describes that same `missing` population.
+        assert m.group(1) == _fp_for("accept-file")
+        # The open-event half comes from the same snapshot too: the acknowledged alert is gone from
+        # it and the newer one is what the row now offers to mark reviewed.
+        assert 'hx-post="/events/2/ack?view=review"' in body
+
+        # Submitting the swapped form unchanged is accepted (it is current) and performs exactly
+        # the consequence the row displayed.
+        _assert_performed(_post(client, _target("accept-file"), m.group(1), token), "accept-file")
+
+    # Stop tracking, which is what the row said: the record is removed, not re-baselined.
+    assert _aside(lambda s: _statuses(s, 1)) == []
+
+
+def test_an_acknowledged_row_that_left_the_population_carries_no_accept_control(
+    cairn_env, monkeypatch
+):
+    """Drift the other way: the row is no longer actionable, so it is shown no verb and carries none.
+
+    A restore committed inside the same window takes the row out of every accept population. The
+    swap must not publish a fingerprint it can show no verb for — an authorization with no stated
+    consequence is the same defect from the other side — and the endpoint fails closed on the
+    absent field.
+    """
+    root = cairn_env / "ackgone"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(
+            lambda s: _mk_files(s, cid, [("gone", "missing", "complete", {"id": SUBJECT_ID})])
+        )
+        await _with_session(lambda s: _mk_event(s, cid, SUBJECT_ID, "missing"))
+
+    async def the_file_comes_back(s):
+        from src.models.db import FileEntry
+
+        await s.execute(update(FileEntry).where(FileEntry.id == SUBJECT_ID).values(status="ok"))
+        await s.commit()
+
+    with _make_client(cairn_env, seed) as client:
+        token = _csrf(client)
+        _drift_before_the_population_read(monkeypatch, the_file_comes_back)
+        body = client.post("/events/1/ack?view=review", headers={"X-CSRF-Token": token}).text
+
+        assert "Stop tracking this file" not in body and "Adopt this change" not in body
+        assert 'name="population_fp"' not in body
+        assert "Reviewed" in body  # the row is still swapped in, just with nothing to act on
+        _assert_refused(_post(client, _target("accept-file"), "", token))
+
+    assert _aside(lambda s: _statuses(s, 1)) == [("ok", "gone")]
 
 # --- #21 coverage completion: a changed restore is never "All clear" --------------------------
 

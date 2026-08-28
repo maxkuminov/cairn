@@ -691,3 +691,36 @@ def test_event_feed_draws_a_changed_restore_as_an_alarm_with_both_digests(cairn_
     assert "deed.pdf" in row, "an alarm is useless without the file it names"
     # It alarms, so it is not born acknowledged: the row still offers the reading-log control.
     assert "Mark reviewed" in row
+
+
+def test_the_baseline_button_states_what_it_keeps_and_loses(cairn_env):
+    """Verifier concern 1: the baseline action's SHALL-carry-a-hint requirement (web-panel delta).
+
+    The hint rides the button's title (the form is on the detail page, not the review card
+    stack); it must state the kept/lost terms and the no-un-baseline fact.
+    """
+    from tests.conftest import seed_collection
+
+    cid_box: dict = {}
+
+    async def seed():
+        from src.database import get_sessionmaker
+        from src.models.db import FileEntry
+
+        root = cairn_env / "root"
+        root.mkdir(exist_ok=True)
+        cid = await seed_collection(root)
+        async with get_sessionmaker()() as session:
+            session.add(
+                FileEntry(
+                    collection_id=cid, relpath="a.txt", size=1, sha256="0" * 64,
+                    status="new",
+                )
+            )
+            await session.commit()
+        cid_box["cid"] = cid
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get(f"/collection/{cid_box['cid']}").text
+    assert "There&#39;s no un-baseline." in body or "There's no un-baseline." in body
+    assert "only clears the New label" in body
