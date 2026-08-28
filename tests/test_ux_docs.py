@@ -379,3 +379,11 @@ def test_single_mode_chrome_offers_no_log_out(cairn_env):
     assert 'aria-label="Switch to light mode"' in body or (
         'aria-label="Switch to dark mode"' in body
     ), "the icon-only theme toggle needs a label a screen reader can announce"
+
+
+def test_the_fleet_group_header_wraps_rather_than_clipping_on_a_phone():
+    """Live-pass W1 on add-fleet-review-and-run-health: at 390px the legend row measured 452px
+    inside an overflow-hidden card, cutting the per-group CTA mid-label."""
+    joined = "\n".join(_media_blocks(640))
+    assert ".review-list__legend" in joined
+    assert "flex-wrap: wrap" in joined

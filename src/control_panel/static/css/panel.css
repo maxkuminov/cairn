@@ -1029,3 +1029,11 @@
   line-height: 1.5;
   margin-top: 2px;
 }
+
+/* --- fleet review: the group header wraps at phone width (live-pass W1) ------------------- */
+@media (max-width: 640px) {
+  /* At 390px the legend row (counts + unreviewed pill + "Review all in X ->") measured 452px
+     inside the overflow-hidden card, clipping the CTA mid-label. Stack instead of clip. */
+  .review-list__legend { flex-wrap: wrap; row-gap: 6px; }
+  .review-list__legend .btn { flex-basis: 100%; }
+}
