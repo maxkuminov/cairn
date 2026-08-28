@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import func, select, update
+from sqlalchemy import exists, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import Settings, get_settings
@@ -40,6 +42,134 @@ def proof_path(settings: Settings, collection_id: int, relpath: str) -> Path:
 def staging_dir(settings: Settings) -> Path:
     """Return the transient stamp symlink directory: ``<proof_store>/.staging``."""
     return Path(settings.proof_store_path) / ".staging"
+
+
+# --- The referenced-slot guard: a stamp never displaces another row's proof (design D1, #39) ---
+#
+# A move reconciliation repoints a row's `relpath` and keeps its `ots_path`, which then names the
+# OLD relpath's canonical slot — truthfully, but claimably: a different file appearing at that old
+# path and being stamped there used to displace the moved file's proof into `.superseded/`, after
+# which the moved row's pointer resolved to a stranger's proof. That reads at verify time as a proof
+# mismatch on a perfectly healthy file: a false alarm on the product's core signal.
+#
+# The fix is not a race won by relocation — it is a refusal. Nothing may be stamped into a slot any
+# row currently records as its proof. The stamp waits (the member stays `pending` and is warned);
+# the healing sweep converges the blocker; the next pass stamps normally.
+
+# How many candidate paths ride in one guard query. Two IN lists per query, so this keeps the bound
+# parameter count far below SQLite's limit no matter how large an operator sets the stamp batch.
+_SLOT_QUERY_CHUNK = 400
+
+
+async def _slot_references(
+    session: AsyncSession, collection_id: int, paths: list[Path]
+) -> list[tuple[int, str, str]]:
+    """Rows in the collection whose recorded ``ots_path`` is one of ``paths`` — or an alias of one.
+
+    One bounded query over the candidate paths, returning ``(id, relpath, ots_path)``. Two legs:
+
+    * an EXACT spelling match, which is authoritative on its own — the recorded pointer *is* that
+      slot, whether or not anything is on disk there;
+    * a spelling differing only in case, which is merely a CANDIDATE: on a case-insensitive store
+      the two names are one directory entry, on a case-sensitive one they are two distinct slots,
+      and only the filesystem can say which. :func:`_blocking_reference` confirms these by on-disk
+      identity before they defer anything.
+
+    The case leg's SQL folds ASCII case (SQLite's ``lower()``), which is what a case-insensitive
+    store's own folding covers for every path Cairn writes in practice; the Python confirmation
+    below is strictly narrower, never wider, so the pair can only ever under-defer, never
+    over-displace.
+    """
+    wanted = sorted({str(p) for p in paths})
+    if not wanted:
+        return []
+    found: list[tuple[int, str, str]] = []
+    # Chunked so the bound-parameter count stays well inside SQLite's limit whatever
+    # `ots_stamp_batch_size` is set to: two IN lists per chunk, and a batch is otherwise free to be
+    # as large as the operator likes.
+    for start in range(0, len(wanted), _SLOT_QUERY_CHUNK):
+        group = wanted[start : start + _SLOT_QUERY_CHUNK]
+        lowered = sorted({p.lower() for p in group})
+        rows = await session.execute(
+            select(FileEntry.id, FileEntry.relpath, FileEntry.ots_path).where(
+                FileEntry.collection_id == collection_id,
+                FileEntry.ots_path.is_not(None),
+                or_(
+                    FileEntry.ots_path.in_(group),
+                    func.lower(FileEntry.ots_path).in_(lowered),
+                ),
+            )
+        )
+        found.extend((rid, relpath, recorded) for rid, relpath, recorded in rows)
+    return found
+
+
+def _blocking_reference(
+    candidates: list[tuple[int, str, str]], out: Path, *, own_id: int | None
+) -> tuple[int, str, str] | None:
+    """The row (if any) that records ``out`` as its proof — never the member's own row.
+
+    The exclusion is per member, not per batch: a row can be `pending` AND still carry a pointer at
+    another member's canonical slot (a file that was moved and then modified), so excluding the
+    whole batch up front would let exactly the #39 case through. Only a row's own pointer at its own
+    canonical path is uninteresting, and that is what ``own_id`` skips.
+    """
+    out_s = str(out)
+    out_lower = out_s.lower()
+    for rid, relpath, recorded in candidates:
+        if rid == own_id:
+            continue
+        if recorded == out_s:
+            return rid, relpath, recorded
+        if recorded.lower() == out_lower and ots.same_directory_entry(recorded, out_s):
+            return rid, relpath, recorded
+    return None
+
+
+async def _defer_referenced_slots(
+    session: AsyncSession,
+    collection_id: int,
+    chunk: list[tuple[FileEntry, Path, Path]],
+) -> tuple[list[tuple[FileEntry, Path, Path]], int]:
+    """Drop from ``chunk`` every member whose output slot is another row's proof; return the rest.
+
+    **This is the first canonical-slot decision made about any member**, and the position is
+    load-bearing (design D1). It runs under the collection's proof-store lock, after the operation's
+    claim has been re-confirmed, and before the adoption pass, before the output-writability
+    classification, before any staging symlink exists and before any calendar submission. A member
+    dropped here therefore never produces a proof at all, so the batch teardown has nothing of its
+    to dispose of — and, critically, it is never offered to :func:`_adopt_or_verdict`, which for a
+    byte-identical newcomer would happily adopt the BLOCKING row's proof and put two rows on one
+    artifact.
+
+    A deferral is never a failure: the member stays `pending` with its row untouched, the rest of
+    the batch stamps normally, and the next pass retries it — succeeding once the healing sweep has
+    relocated the blocker's proof to its own current relpath's canonical location.
+    """
+    candidates = await _slot_references(session, collection_id, [out for _e, _r, out in chunk])
+    if not candidates:
+        return chunk, 0
+    keep: list[tuple[FileEntry, Path, Path]] = []
+    blocked = 0
+    for entry, real, out in chunk:
+        blocker = _blocking_reference(candidates, out, own_id=entry.id)
+        if blocker is None:
+            keep.append((entry, real, out))
+            continue
+        blocked += 1
+        blocker_id, blocker_relpath, blocker_path = blocker
+        log.warning(
+            "collection %s: deferring the stamp of %s — its proof would go to %s, which file row "
+            "%s (%s) currently records as its own proof. Nothing was placed and the file stays "
+            "queued; `cairn upgrade` relocates that proof to its file's current path, after which "
+            "the next stamp pass proceeds",
+            collection_id,
+            entry.relpath,
+            blocker_path,
+            blocker_id,
+            blocker_relpath,
+        )
+    return keep, blocked
 
 
 def _anchor_verdict(result: ots.VerifyResult) -> str | None:
@@ -126,6 +256,33 @@ async def _adopt_or_verdict(
         )
         return True, "confirmed"
     return False, verdict
+
+
+async def _adoption_pass(
+    chunk: list[tuple[FileEntry, Path, Path]], settings: Settings
+) -> tuple[list[tuple[FileEntry, Path, Path]], list[str | None], int]:
+    """Offer each member's existing canonical proof to :func:`_adopt_or_verdict` (design D1a).
+
+    Returns ``(members still to stamp, their verdicts, adopted count)``. Extracted from
+    :func:`stamp_pending` unchanged so it can run per BATCH, inside the proof-store lock and after
+    the referenced-slot guard — the guard has to be the first canonical-slot decision, and adoption
+    is a canonical-slot decision.
+    """
+    keep: list[tuple[FileEntry, Path, Path]] = []
+    verdicts: list[str | None] = []
+    adopted = 0
+    for entry, real, out in chunk:
+        try:
+            was_adopted, verdict = await _adopt_or_verdict(entry, out, settings)
+        except Exception:  # pragma: no cover - adoption is an optimisation, never a failure path
+            log.exception("adoption check failed for %s; falling back to a normal stamp", out)
+            was_adopted, verdict = False, None
+        if was_adopted:
+            adopted += 1
+            continue
+        keep.append((entry, real, out))
+        verdicts.append(verdict)
+    return keep, verdicts, adopted
 
 
 async def _stamp_one_batch(
@@ -238,12 +395,20 @@ async def stamp_pending(
     ``progress`` (when given) is awaited after each batch with the cumulative stamped count, so an
     on-demand backfill can persist live progress onto its ``kind='stamp'`` run.
 
-    Before any staging symlink or calendar traffic, a pending file whose canonical path already
-    holds a proof is offered to :func:`_adopt_or_verdict`: a proof that parses, commits to the row's
-    own ``sha256`` AND whose anchor verifies right now is ADOPTED (recorded, no submission), and the
-    backend's answer about any other existing proof is carried into placement as a verdict so a
-    forged attestation cannot hold the canonical path (design D1/D1a). Whatever is on disk is
-    preserved either way — :func:`ots._place_proof` never destroys a proof.
+    Each batch's first canonical-slot decision is the **referenced-slot guard**
+    (:func:`_defer_referenced_slots`, design D1): a member whose canonical output path is currently
+    recorded as ``ots_path`` by a DIFFERENT row leaves the batch before anything else looks at that
+    path. It stays ``pending``, is warned with the blocking row named, never fails the batch, and
+    stamps normally on a later pass once the healing sweep has relocated the blocker's proof. This
+    is what makes it impossible for a new file at a moved file's former path to displace the moved
+    file's proof (GitHub #39) — at every entry point, and in the same scan that reconciled the move.
+
+    Then, still before any staging symlink or calendar traffic, a pending file whose canonical path
+    already holds a proof is offered to :func:`_adopt_or_verdict`: a proof that parses, commits to
+    the row's own ``sha256`` AND whose anchor verifies right now is ADOPTED (recorded, no
+    submission), and the backend's answer about any other existing proof is carried into placement
+    as a verdict so a forged attestation cannot hold the canonical path (design D1/D1a). Whatever is
+    on disk is preserved either way — :func:`ots._place_proof` never destroys a proof.
 
     The caller must hold the collection's single-operation claim (design D10). Inspect -> preserve ->
     place -> record is check-then-act, so two writers would be a lost-update machine; the claim is
@@ -269,6 +434,12 @@ async def stamp_pending(
     re-read and raises before touching anything (design D10). The lock is taken per BATCH, never
     across the whole pass, so a stale holder can delay a live one by one calendar round-trip at
     most rather than by hours.
+
+    That same fence is what closes the window between the guard and placement, and no re-query
+    substitutes for it: a move reconciliation that would newly reference one of this batch's output
+    slots can only commit under the collection's operation claim — the claim this pass holds — so
+    such a reconciliation implies this pass's claim was reclaimed, and the fence then refuses the
+    batch's placements entirely with its members left ``pending``.
     """
     settings = settings or get_settings()
     # Read the identity up front, as a plain local: the fence below rolls the session back, which
@@ -303,29 +474,12 @@ async def stamp_pending(
             continue
         work.append((entry, real, proof_path(settings, collection.id, entry.relpath)))
 
-    # Adoption pass (design D1a): drop from `work` every pending file whose existing canonical
-    # proof Cairn may stand behind, and remember the backend's verdict about the ones it may not.
-    adopted = 0
-    verdicts: list[str | None] = []
-    keep: list[tuple[FileEntry, Path, Path]] = []
-    for entry, real, out in work:
-        try:
-            was_adopted, verdict = await _adopt_or_verdict(entry, out, settings)
-        except Exception:  # pragma: no cover - adoption is an optimisation, never a failure path
-            log.exception("adoption check failed for %s; falling back to a normal stamp", out)
-            was_adopted, verdict = False, None
-        if was_adopted:
-            adopted += 1
-            continue
-        keep.append((entry, real, out))
-        verdicts.append(verdict)
-    work = keep
-
     batch_size = max(1, settings.ots_stamp_batch_size)
     now = _utcnow()
-    stamped = adopted
+    stamped = 0
     skipped = 0  # files whose proof path can never be written (e.g. name past the FS byte limit)
     deferred = 0  # same-digest anchored proofs nothing could confirm; nothing recorded, still pending
+    blocked = 0  # members whose output slot is another row's recorded proof (design D1)
     batches = (len(work) + batch_size - 1) // batch_size
 
     async def _fence(batch_no: int, stage: str) -> None:
@@ -360,7 +514,6 @@ async def stamp_pending(
 
     for start in range(0, len(work), batch_size):
         chunk = work[start : start + batch_size]
-        chunk_verdicts = verdicts[start : start + batch_size]
         batch_no = start // batch_size + 1
         # The fence, immediately before this chunk mutates the proof store (design D10). A caller
         # that named its claim gets it checked; one that did not (a direct test call) is unchanged.
@@ -387,18 +540,38 @@ async def stamp_pending(
             break
         try:
             await _fence(batch_no, "after taking the proof-store lock for")
-            stamped, skipped, deferred = await _stamp_one_batch(
-                chunk,
-                chunk_verdicts,
-                collection_id=collection_id,
-                calendars=calendars,
-                staging=staging,
-                store_root=store_root,
-                now=now,
-                stamped=stamped,
-                skipped=skipped,
-                deferred=deferred,
-            )
+            # THE FIRST canonical-slot decision, under the lock and after the claim was
+            # re-confirmed: nothing may be stamped into a slot another row records as its proof
+            # (design D1). Deferred members leave the batch here — before adoption, before staging,
+            # before the calendar sees them.
+            chunk, blocked_now = await _defer_referenced_slots(session, collection_id, chunk)
+            blocked += blocked_now
+            # Adoption pass (design D1a): drop from the batch every pending file whose existing
+            # canonical proof Cairn may stand behind, and remember the backend's verdict about the
+            # ones it may not. It runs INSIDE the lock, after the guard, so it can never be offered
+            # a slot the guard has already ruled out.
+            chunk, chunk_verdicts, adopted_now = await _adoption_pass(chunk, settings)
+            stamped += adopted_now
+            if chunk:
+                # The placement fence. The guard's answer is only as good as the claim it was read
+                # under: a move reconciliation that would newly reference one of this batch's
+                # output slots can only be committed by an operation holding this collection's
+                # claim, so it implies this pass's claim was reclaimed. Re-reading the claim here
+                # refuses the WHOLE batch on that — no re-query of the slots themselves, which the
+                # design forbids as a substitute for exactly this check.
+                await _fence(batch_no, "at the placement fence of")
+                stamped, skipped, deferred = await _stamp_one_batch(
+                    chunk,
+                    chunk_verdicts,
+                    collection_id=collection_id,
+                    calendars=calendars,
+                    staging=staging,
+                    store_root=store_root,
+                    now=now,
+                    stamped=stamped,
+                    skipped=skipped,
+                    deferred=deferred,
+                )
         finally:
             # Releasing is a non-blocking syscall on a descriptor the process owns, so it needs no
             # worker thread — and the lock lives on the file description, not on the thread that
@@ -420,6 +593,14 @@ async def stamp_pending(
             "be checked, so both proofs were kept and the files stay pending for the next pass",
             collection_id,
             deferred,
+        )
+    if blocked:
+        log.warning(
+            "collection %s: deferred %d stamp(s) whose proof slot is still recorded by another "
+            "file row (design D1) — those files stay queued and nothing was displaced; run "
+            "`cairn upgrade` to relocate the blocking proofs to their files' current paths",
+            collection_id,
+            blocked,
         )
     await session.commit()
     return stamped
@@ -597,6 +778,641 @@ def _backfill_provenance(entry: FileEntry, facts: ots.StoredProofFacts) -> None:
     )
 
 
+# --- The healing sweep: a proof's location follows its file (design D2-D5/D4b, #39) ------------
+#
+# The ONLY code path in Cairn that relocates a stored proof. It runs inside the daily upgrade pass
+# and `cairn upgrade`, under the collection's single-operation claim, and it converges the pointers
+# the stamp guard above protects: a move-reconciled row whose `ots_path` still names its FORMER
+# relpath's canonical slot is brought to its current relpath's canonical slot.
+#
+# Three properties govern every branch:
+#
+#   * **corroborate before believing** — the proof at the recorded path must commit to what the row
+#     records (`ots_digest`, or `sha256` for a row predating provenance). An already-misfiled
+#     pointer is DETECTED and warned about, never laundered into a new location;
+#   * **the pointer invariant** — at every moment, across a crash at any phase boundary, `ots_path`
+#     names a location actually holding this row's proof. Hence: publish durably, THEN commit the
+#     pointer with a fenced compare-and-set, THEN remove the source loss-proof;
+#   * **never destroy** — a destination another row records defers, a byte-identical occupant is
+#     adopted, anything else is archived. No input reaches a branch that discards proof bytes.
+
+
+@dataclass(frozen=True)
+class PointerWork:
+    """The rows one sweep will operate on, surveyed before the run is claimed.
+
+    ``stale`` — the recorded ``ots_path`` is not the canonical location for the row's current
+    relpath. ``absent`` — the recorded ``ots_path`` names nothing on disk (design D4b).
+
+    The two are DISJOINT by construction, and that is deliberate accounting rather than tidiness: a
+    row whose recorded entry is absent receives exactly one operation this pass (the restore), so
+    counting it once in each list would give the run a ``total`` its ``processed`` could never
+    reach. Such a row is surveyed as ``absent``; if it is also stale, the next sweep relocates it.
+    """
+
+    stale: tuple[int, ...] = ()
+    absent: tuple[int, ...] = ()
+
+    @property
+    def items(self) -> int:
+        """Work items — one per operation the sweep will perform (the run's share of ``total``)."""
+        return len(self.stale) + len(self.absent)
+
+
+@dataclass
+class SweepOutcome:
+    """What one sweep did. ``items`` is the number of work items completed, one per admitted row."""
+
+    items: int = 0
+    relocated: int = 0  # proof brought to its file's current canonical location
+    parked: int = 0  # cycle broken by relocating a proof to the holding location
+    deferred: int = 0  # destination is another row's proof; retried on a later sweep
+    refused: int = 0  # corroboration or the filesystem refused; nothing changed, warned
+    restored: int = 0  # an absent recorded entry republished from the superseded archive
+
+
+def _absent_recorded_entries(rows: list[tuple[int, str]]) -> set[int]:
+    """Ids among ``(id, ots_path)`` whose recorded proof entry does not exist (one lstat each).
+
+    ``os.path.lexists`` rather than ``exists``: a dangling symlink IS an entry, and removing or
+    republishing over one is a decision for the destination rules, not for admission.
+    """
+    return {rid for rid, recorded in rows if not os.path.lexists(recorded)}
+
+
+async def survey_pointer_work(
+    session: AsyncSession, collection_id: int, settings: Settings | None = None
+) -> PointerWork:
+    """Survey the sweep's work for one collection: stale pointers + absent recorded entries.
+
+    Called BEFORE the operation claims its run, because the existence of either shape is an
+    independent admission reason: a collection with no incomplete proofs — a tripwire collection
+    carrying historical proofs included — still claims, sweeps, and counts this work in its run's
+    ``total``.
+
+    Staleness is decided by :func:`proof_path` and nothing else (design D6). SQL computes the same
+    comparison as a pre-filter, but only the helper's verdict admits a row, so the two can never
+    disagree about what gets relocated. The SQL form is a concatenation, never a ``LIKE``: a relpath
+    containing ``%``, ``_`` or a quote is compared literally, exactly as the helper compares it.
+    Every proof-bearing row is read anyway for the restore leg's one ``lstat``, which is trivial
+    beside the pass's per-proof subprocess work.
+    """
+    settings = settings or get_settings()
+    # `proof_path` builds `<store>/<collection_id>/<relpath>.ots`; this is the same expression in
+    # SQL, so the column comparison below is the helper's comparison, spelled for the datastore.
+    prefix = str(Path(settings.proof_store_path) / str(collection_id)) + os.sep
+    canonical_sql = literal(prefix) + FileEntry.relpath + literal(".ots")
+    rows = list(
+        await session.execute(
+            select(
+                FileEntry.id,
+                FileEntry.relpath,
+                FileEntry.ots_path,
+                (FileEntry.ots_path != canonical_sql).label("sql_stale"),
+            ).where(
+                FileEntry.collection_id == collection_id,
+                FileEntry.ots_path.is_not(None),
+            )
+        )
+    )
+    absent = await asyncio.to_thread(
+        _absent_recorded_entries, [(rid, recorded) for rid, _rel, recorded, _flag in rows]
+    )
+    stale = [
+        rid
+        for rid, relpath, recorded, sql_stale in rows
+        if sql_stale
+        and rid not in absent
+        and Path(recorded) != proof_path(settings, collection_id, relpath)
+    ]
+    return PointerWork(stale=tuple(stale), absent=tuple(sorted(absent)))
+
+
+def _corroborate_source(entry: FileEntry, facts: ots.StoredProofFacts) -> str:
+    """Does the proof at ``entry.ots_path`` provably belong to this row? (design D3)
+
+    Returns ``'ok'`` or the reason it does not. The distinction between the two failure reasons is
+    the whole point, because they license completely different sentences to the operator:
+
+    * ``'provenance_mismatch'`` — the row RECORDS which digest the proof Cairn placed there commits
+      to, and the proof on disk commits to something else. That is a detected misfiled pointer, and
+      may be reported as one.
+    * ``'legacy_ambiguous'`` — the row predates provenance (``ots_digest`` NULL), so the only
+      witness is its last-scanned ``sha256``. Disagreement is NOT evidence of misfiling: a file
+      legitimately modified after it was stamped, and then moved, has exactly this shape. It may
+      only ever be reported as un-corroborated.
+
+    Either way the sweep touches nothing — no relocation, no archiving, no row change. Believing an
+    uncorroborated source would let the sweep carry a stranger's proof into the moved file's
+    canonical slot, which is the one thing worse than leaving the pointer where it is.
+    """
+    if not facts.readable or not facts.digest:
+        return "unreadable"
+    recorded = (entry.ots_digest or "").strip().lower()
+    if recorded:
+        return "ok" if facts.digest == recorded else "provenance_mismatch"
+    baseline = (entry.sha256 or "").strip().lower()
+    if not baseline:
+        return "no_baseline"
+    return "ok" if facts.digest == baseline else "legacy_ambiguous"
+
+
+@dataclass
+class _SweepContext:
+    """Everything one row's relocation needs, so the per-row helpers stay readable."""
+
+    session: AsyncSession
+    collection_id: int
+    settings: Settings
+    store_root: Path
+    run_id: int | None
+
+
+async def _sweep_fence(ctx: _SweepContext, stage: str) -> None:
+    """Stop the sweep unless the operation's claim is still held (design D2/D10)."""
+    if ctx.run_id is None or await collections.lease_held(ctx.run_id):
+        return
+    log.warning(
+        "collection %s: the operation claim (run %s) was RECLAIMED mid-sweep — stopping %s; "
+        "every pointer already committed is truthful and the rest are re-evaluated next sweep",
+        ctx.collection_id,
+        ctx.run_id,
+        stage,
+    )
+    await ctx.session.rollback()  # nothing commits after the fence fires
+    raise collections.LeaseLost(
+        f"the operation claim for collection {ctx.collection_id} (run {ctx.run_id}) was reclaimed "
+        f"mid-sweep"
+    )
+
+
+@asynccontextmanager
+async def _sweep_lock(ctx: _SweepContext, stage: str) -> AsyncIterator[None]:
+    """Hold the collection's proof-store lock across ALL phases of one relocation (design D2).
+
+    The claim is re-confirmed AFTER the lock is taken, not before: a reclamation landing while this
+    sweep waited for the lock would otherwise put it and the replacement claimant on one canonical
+    path at once. Same discipline as the stamp and upgrade passes, at the same resource.
+    """
+    lock = ots.CollectionProofLock(ctx.store_root, ctx.collection_id)
+    await asyncio.to_thread(lock.acquire)  # OtsError when someone else holds it
+    try:
+        await _sweep_fence(ctx, stage)
+        yield
+    finally:
+        lock.release()
+
+
+async def _commit_pointer(ctx: _SweepContext, entry: FileEntry, new_path: str) -> None:
+    """Move ``entry.ots_path`` to ``new_path`` with a fenced compare-and-set (design D4 phase 4).
+
+    One guarded UPDATE requiring every value the sweep corroborated to still be there — the row's
+    ``relpath``, its current ``ots_path``, and (where recorded) its ``ots_digest`` — with the
+    operation's run still ``running``. A single post-lock lease check does not cover a whole
+    relocation: a keepalive can fail mid-copy on a slow store, so the commit re-establishes the
+    claim at the instant it writes.
+
+    Zero rows means the row changed beneath the sweep or the claim was reclaimed. Nothing may be
+    committed on either reading: roll back, treat the claim as lost, stop. The proof published at
+    the destination is inert — no row names it — and a later sweep re-evaluates from scratch.
+
+    ``ots_path`` is the only column written, here or anywhere in the sweep. Note the NULL handling:
+    ``ots_digest = NULL`` is never true in SQL, so a legacy row is fenced with ``IS NULL``.
+    """
+    # Read the identity up front as plain locals: the rollback below expires every ORM object in
+    # the session, and an attribute read after that raises `MissingGreenlet` from async code — a
+    # message about a lost claim must never be the thing that crashes.
+    entry_id, relpath = entry.id, entry.relpath
+    conditions = [
+        FileEntry.id == entry_id,
+        FileEntry.relpath == relpath,
+        FileEntry.ots_path == entry.ots_path,
+    ]
+    if entry.ots_digest is None:
+        conditions.append(FileEntry.ots_digest.is_(None))
+    else:
+        conditions.append(FileEntry.ots_digest == entry.ots_digest)
+    if ctx.run_id is not None:
+        conditions.append(exists().where(Run.id == ctx.run_id, Run.result == "running"))
+    result = await ctx.session.execute(
+        # `synchronize_session=False`: the guard values above are read off the ORM object, and
+        # letting the UPDATE write back into the identity map would make a later statement's guard
+        # read a value this statement invented. The explicit refresh below is the one place the
+        # object learns its new pointer.
+        update(FileEntry)
+        .where(*conditions)
+        .values(ots_path=new_path)
+        .execution_options(synchronize_session=False)
+    )
+    if not result.rowcount:
+        await ctx.session.rollback()
+        raise collections.LeaseLost(
+            f"collection {ctx.collection_id}: the pointer commit for file row {entry_id} "
+            f"({relpath}) matched no row — the row changed beneath the sweep or the operation "
+            f"claim (run {ctx.run_id}) was reclaimed; nothing was committed"
+        )
+    await ctx.session.commit()
+    # The sessionmaker keeps objects alive across a commit, and a Core UPDATE does not touch the
+    # identity map — so without this refresh the upgrade pass that runs next in the SAME session
+    # would upgrade the proof at the row's OLD path.
+    await ctx.session.refresh(entry, ["ots_path"])
+
+
+async def _sweep_relocate(
+    ctx: _SweepContext, entry_id: int, *, destination: Path | None = None
+) -> str:
+    """Converge one row's proof onto ``destination`` (default: its current canonical location).
+
+    Returns the outcome kind: ``'relocated'``, ``'parked'`` (a cycle-breaking move to the holding
+    location), ``'deferred'``, ``'refused'`` or ``'skipped'``. Only ``LeaseLost`` escapes; every
+    filesystem and precondition failure is a per-row warning that leaves the row exactly as it was,
+    pointer still truthful, and re-warns on the next sweep.
+    """
+    session = ctx.session
+    entry = await session.get(FileEntry, entry_id)
+    if entry is None or not entry.ots_path:
+        return "skipped"
+    src = Path(entry.ots_path)
+    parking = destination is not None
+    dst = destination or proof_path(ctx.settings, ctx.collection_id, entry.relpath)
+    if not parking and src == dst:
+        return "skipped"  # already converged (a concurrent pass, or a survey that raced a rescan)
+
+    facts = await asyncio.to_thread(ots.read_proof_facts, src)
+    reason = _corroborate_source(entry, facts)
+    if reason != "ok":
+        _warn_uncorroborated(ctx, entry, facts, reason)
+        return "refused"
+
+    # Rule (a) of the destination rules, read from the datastore because only the datastore knows
+    # what a row records. The answer is captured as a predicate over a snapshot rather than a live
+    # query: the relocation runs under this collection's operation claim AND its proof-store lock,
+    # so no other Cairn writer can create a pointer at the destination while it is in flight, and
+    # the predicate stays correct for the publication's EEXIST re-classification.
+    candidates = await _slot_references(session, ctx.collection_id, [dst])
+    blocker = _blocking_reference(candidates, dst, own_id=entry.id)
+    blocked = {str(dst)} if blocker is not None else set()
+
+    try:
+        publication = await asyncio.to_thread(
+            ots.publish_relocation,
+            src,
+            dst,
+            store_root=ctx.store_root,
+            collection_id=ctx.collection_id,
+            referenced=lambda path: str(path) in blocked,
+        )
+    except ots.OtsPathError as exc:
+        # A destination the filesystem refuses permanently. Deliberately NOT the stamp path's
+        # drop-to-`none`: that would discard a placed proof's state, provenance and pointer to tidy
+        # up a location problem. The proof stays where it is and the operator keeps hearing about it.
+        log.warning(
+            "collection %s: cannot relocate the proof for %s to %s — the filesystem refuses that "
+            "name permanently (%s). The proof stays at %s with its state and provenance intact",
+            ctx.collection_id,
+            entry.relpath,
+            dst,
+            exc,
+            src,
+        )
+        return "refused"
+    except ots.OtsError as exc:
+        log.warning(
+            "collection %s: could not relocate the proof for %s from %s to %s (%s) — nothing was "
+            "changed; the recorded pointer still names the proof and the next sweep retries",
+            ctx.collection_id,
+            entry.relpath,
+            src,
+            dst,
+            exc,
+        )
+        return "refused"
+
+    if publication.kind == "deferred":
+        log.warning(
+            "collection %s: deferring the relocation of %s's proof — %s is recorded as the proof "
+            "of file row %s (%s), and no branch may place over, unlink or re-point another row's "
+            "proof. The old pointer stays truthful and this is retried once that row's proof has "
+            "moved on (later in this sweep, or on the next one)",
+            ctx.collection_id,
+            entry.relpath,
+            dst,
+            blocker[0] if blocker else "?",
+            blocker[1] if blocker else "?",
+        )
+        return "deferred"
+
+    # The proof is durably at the destination and still at the source. This is the only moment the
+    # pointer may move, and it moves under a fence.
+    await _commit_pointer(ctx, entry, str(dst))
+
+    if publication.kind == "aliased":
+        log.info(
+            "collection %s: %s's proof was already in place at %s (the store treats it and %s as "
+            "one entry); recorded the canonical spelling and removed nothing",
+            ctx.collection_id,
+            entry.relpath,
+            dst,
+            src,
+        )
+        return "parked" if parking else "relocated"
+
+    try:
+        await asyncio.to_thread(
+            ots.finish_relocation,
+            src,
+            dst,
+            store_root=ctx.store_root,
+            collection_id=ctx.collection_id,
+        )
+    except ots.OtsError as exc:
+        # Post-commit. The committed pointer is truthful and is NOT rolled back to a location the
+        # proof may be about to leave; a surviving source copy sits in an unreferenced slot, which a
+        # future stamp there archives under the never-destroy rules.
+        log.warning(
+            "collection %s: %s's proof is now recorded at %s, but its old copy at %s could not be "
+            "cleared away (%s). Nothing was lost — the pointer is correct and the leftover copy is "
+            "preserved rather than overwritten",
+            ctx.collection_id,
+            entry.relpath,
+            dst,
+            src,
+            exc,
+        )
+
+    log.info(
+        "collection %s: relocated %s's proof %s -> %s",
+        ctx.collection_id,
+        entry.relpath,
+        src,
+        dst,
+    )
+    return "parked" if parking else "relocated"
+
+
+def _warn_uncorroborated(
+    ctx: _SweepContext, entry: FileEntry, facts: ots.StoredProofFacts, reason: str
+) -> None:
+    """Say exactly what the evidence supports about an uncorroborated source, and no more (D3)."""
+    if reason == "provenance_mismatch":
+        log.warning(
+            "collection %s: NOT relocating %s's proof — Cairn recorded placing a proof committing "
+            "to %s at %s, but the proof there commits to %s. That pointer is misfiled: some other "
+            "stamp took the location over. Nothing was moved, archived or changed. The proof Cairn "
+            "placed, if it was displaced, is preserved under the store's .superseded/%s/ archive",
+            ctx.collection_id,
+            entry.relpath,
+            entry.ots_digest,
+            entry.ots_path,
+            facts.digest,
+            ctx.collection_id,
+        )
+        return
+    if reason == "legacy_ambiguous":
+        log.warning(
+            "collection %s: NOT relocating %s's proof — this row predates recorded proof "
+            "provenance, and the proof at %s commits to %s while the file's last scanned digest is "
+            "%s. That cannot be corroborated without historical provenance (a file modified after "
+            "it was stamped, and then moved, looks exactly like this), so the proof is left where "
+            "it is and nothing is claimed about it",
+            ctx.collection_id,
+            entry.relpath,
+            entry.ots_path,
+            facts.digest,
+            entry.sha256,
+        )
+        return
+    log.warning(
+        "collection %s: NOT relocating %s's proof — %s, so nothing about the proof at %s is "
+        "established and every byte is left exactly where it is",
+        ctx.collection_id,
+        entry.relpath,
+        (
+            "the row records neither proof provenance nor a scanned digest to corroborate against"
+            if reason == "no_baseline"
+            else "the proof could not be read, or carries no file digest"
+        ),
+        entry.ots_path,
+    )
+
+
+async def _sweep_restore(ctx: _SweepContext, entry_id: int) -> str:
+    """Republish a row's proof at its recorded path when that entry has gone missing (design D4b).
+
+    The shape a crash inside loss-proof removal leaves behind — pointer committed to the canonical
+    path, an aliased unlink took the destination with it, the process died before restoration — and,
+    generally, the shape of any proof file lost to the store. Because such a pointer is canonical by
+    spelling, staleness would never select it again: without this leg the break is silent until an
+    operator happens to verify that one file.
+
+    The archive copy must pass the row's OWN corroboration rules before it is republished; without
+    one, the sweep warns loudly and changes nothing. No row field is written on either path — the
+    pointer already names the path being repaired.
+    """
+    session = ctx.session
+    entry = await session.get(FileEntry, entry_id)
+    if entry is None or not entry.ots_path:
+        return "skipped"
+    recorded = Path(entry.ots_path)
+    if await asyncio.to_thread(os.path.lexists, str(recorded)):
+        return "skipped"  # it came back (a concurrent pass, or a survey that raced a placement)
+
+    digest = (entry.ots_digest or entry.sha256 or "").strip().lower()
+    copy = (
+        await asyncio.to_thread(
+            ots.find_archived_proof, ctx.store_root, ctx.collection_id, digest
+        )
+        if digest
+        else None
+    )
+    if copy is None:
+        log.warning(
+            "collection %s: the proof recorded for %s at %s is MISSING from the store, and the "
+            "superseded archive holds no copy this row's own records corroborate. Nothing was "
+            "changed. The file's notarization cannot be verified until the proof is restored from "
+            "a backup or the file is re-stamped",
+            ctx.collection_id,
+            entry.relpath,
+            recorded,
+        )
+        return "refused"
+    try:
+        await asyncio.to_thread(
+            ots.republish_proof,
+            copy,
+            recorded,
+            store_root=ctx.store_root,
+            collection_id=ctx.collection_id,
+        )
+    except ots.OtsError as exc:
+        log.warning(
+            "collection %s: the proof recorded for %s at %s is missing and the corroborated copy "
+            "%s could not be republished (%s) — nothing was changed",
+            ctx.collection_id,
+            entry.relpath,
+            recorded,
+            copy,
+            exc,
+        )
+        return "refused"
+    log.warning(
+        "collection %s: RESTORED the missing proof for %s at %s from the corroborated archive copy "
+        "%s (digest %s)",
+        ctx.collection_id,
+        entry.relpath,
+        recorded,
+        copy,
+        digest,
+    )
+    return "restored"
+
+
+async def _cycle_victim(ctx: _SweepContext, deferred_ids: list[int]) -> int | None:
+    """Pick the ONE row whose proof is parked to break a cycle, or ``None`` if none is eligible.
+
+    Every id here was deferred **solely by the reference rule**: corroboration passed (a row that
+    failed it never reached the destination rules) and no other rule refused it (a permanently
+    refused destination is reported as ``refused``, never as ``deferred``, exactly so this selection
+    can read the outcome and be right). The one further exclusion is a row already sitting in the
+    holding location — parking it again would be a no-op that never frees a canonical slot.
+    """
+    for entry_id in deferred_ids:
+        entry = await ctx.session.get(FileEntry, entry_id)
+        if entry is None or not entry.ots_path:
+            continue
+        if Path(entry.ots_path) == ots.holding_slot(ctx.store_root, entry_id):
+            continue
+        return entry_id
+    return None
+
+
+async def heal_pointers(
+    session: AsyncSession,
+    collection: Collection,
+    settings: Settings | None = None,
+    *,
+    work: PointerWork | None = None,
+    progress: ProgressCb | None = None,
+    run_id: int | None = None,
+) -> SweepOutcome:
+    """Relocate this collection's stored proofs to their files' current canonical locations.
+
+    The restore leg runs first (a pointer naming nothing is repaired before anything is moved), then
+    the stale set is worked until it converges. Deferrals are re-tried within the pass as earlier
+    relocations vacate slots, so a chain (A→B and C→A in one scan) converges in one sweep. A CYCLE —
+    two files whose paths were swapped, each row's destination being the other's recorded proof —
+    cannot converge by deferral at all: when a full pass makes no progress and reference-deferred
+    rows remain, one eligible member's proof is parked in the holding location with a truthful
+    committed pointer, which frees a canonical slot for the rest; the parked proof reaches its own
+    canonical slot on a later sweep.
+
+    Each admitted row is counted exactly once, whatever its outcome — relocated, parked, deferred or
+    refused — so the run's ``processed`` can reach its ``total`` without double- or under-counting.
+    """
+    settings = settings or get_settings()
+    ctx = _SweepContext(
+        session=session,
+        collection_id=collection.id,
+        settings=settings,
+        store_root=Path(settings.proof_store_path),
+        run_id=run_id,
+    )
+    if work is None:
+        work = await survey_pointer_work(session, ctx.collection_id, settings)
+    outcome = SweepOutcome()
+    if not work.items:
+        return outcome
+
+    async def _completed(kind: str) -> None:
+        outcome.items += 1
+        if kind in ("relocated", "parked", "deferred", "restored"):
+            setattr(outcome, kind, getattr(outcome, kind) + 1)
+        elif kind == "refused":
+            outcome.refused += 1
+        if progress is not None:
+            await progress(outcome.items)
+
+    try:
+        for entry_id in work.absent:
+            await _sweep_fence(ctx, "before the next proof restore")
+            async with _sweep_lock(ctx, "after taking the proof-store lock to restore a proof"):
+                kind = await _sweep_restore(ctx, entry_id)
+            await _completed(kind)
+
+        remaining = list(work.stale)
+        while remaining:
+            progressed = False
+            deferred_ids: list[int] = []
+            for entry_id in remaining:
+                await _sweep_fence(ctx, "before the next proof relocation")
+                async with _sweep_lock(
+                    ctx, "after taking the proof-store lock to relocate a proof"
+                ):
+                    kind = await _sweep_relocate(ctx, entry_id)
+                if kind == "deferred":
+                    deferred_ids.append(entry_id)
+                    continue
+                progressed = True
+                await _completed(kind)
+            if not deferred_ids:
+                break
+            if progressed:
+                # Slots were vacated this round; the deferred rows may now have somewhere to go.
+                remaining = deferred_ids
+                continue
+            victim = await _cycle_victim(ctx, deferred_ids)
+            if victim is None:
+                # Nothing eligible to park (every deferred row is itself refused by another rule, or
+                # already parked). Leave the cycle deferred, warned, and re-tried by the next sweep.
+                log.warning(
+                    "collection %s: %d proof relocation(s) are blocked in a cycle no member may "
+                    "safely break — each destination is another row's recorded proof and every "
+                    "member is refused by another rule. Nothing was changed",
+                    ctx.collection_id,
+                    len(deferred_ids),
+                )
+                for _ in deferred_ids:
+                    await _completed("deferred")
+                break
+            async with _sweep_lock(ctx, "after taking the proof-store lock to break a cycle"):
+                kind = await _sweep_relocate(
+                    ctx, victim, destination=ots.holding_slot(ctx.store_root, victim)
+                )
+            log.warning(
+                "collection %s: breaking a proof-relocation cycle by parking file row %s's proof "
+                "at %s — its canonical slot is freed for the rest of the cycle and the parked "
+                "proof reaches its own canonical location on a later sweep",
+                ctx.collection_id,
+                victim,
+                ots.holding_slot(ctx.store_root, victim),
+            )
+            await _completed(kind)
+            remaining = [entry_id for entry_id in deferred_ids if entry_id != victim]
+    except ots.OtsError as exc:
+        # The proof-store lock is held elsewhere (or cannot be taken at all). Transient by
+        # construction: nothing was placed and every remaining row keeps its truthful pointer. Stop
+        # rather than paying one lock timeout per row for a resource someone else holds.
+        log.warning(
+            "collection %s: stopping the proof relocation sweep after %d item(s) — %s",
+            ctx.collection_id,
+            outcome.items,
+            exc,
+        )
+
+    if outcome.relocated or outcome.parked or outcome.restored:
+        log.info(
+            "collection %s: healing sweep relocated %d proof(s), parked %d, restored %d, deferred "
+            "%d, refused %d",
+            ctx.collection_id,
+            outcome.relocated,
+            outcome.parked,
+            outcome.restored,
+            outcome.deferred,
+            outcome.refused,
+        )
+    return outcome
+
+
 async def upgrade_incomplete(
     session: AsyncSession,
     collection: Collection | None = None,
@@ -715,7 +1531,8 @@ class UpgradePass:
     upgraded: int = 0
     still_incomplete: int = 0
     refused: bool = False  # the collection's single-operation slot was already held
-    idle: bool = False  # nothing incomplete to upgrade; no run recorded
+    idle: bool = False  # no work of any kind (nothing incomplete, no pointers to heal); no run
+    sweep: SweepOutcome = field(default_factory=SweepOutcome)  # what the healing sweep did
 
 
 async def upgrade_collection(
@@ -730,8 +1547,14 @@ async def upgrade_collection(
     ``cairn upgrade`` into an unbounded stall behind a multi-hour deep scan, and the work is
     idempotent, so the next invocation picks it up.
 
-    A collection with nothing incomplete records no run at all (no empty daily rows). ``kind='upgrade'``
-    runs never feed scan freshness, so this can never refresh the dead-man's switch.
+    The pass has THREE independent admission reasons, each of which claims the collection on its
+    own: incomplete proofs to upgrade, stale pointers to heal, and rows whose recorded proof entry
+    is absent from the store. A collection with none of the three records no run at all (no empty
+    daily rows); a tripwire collection carrying historical proofs is admitted by the last two
+    exactly like any other. ``total`` is one work item per operation the pass will perform, and the
+    healing sweep runs BEFORE the proof upgrades so a relocated proof is upgraded at its new
+    canonical location in the same pass. ``kind='upgrade'`` runs never feed scan freshness, so this
+    can never refresh the dead-man's switch.
     """
     settings = settings or get_settings()
     # Identity read up front: a lost claim rolls back and expires the ORM object, and a lazy
@@ -743,12 +1566,19 @@ async def upgrade_collection(
     if await collections.blocking_run(session, collection_id) is not None:
         result.refused = True
         return result
-    incomplete = await session.scalar(
-        select(func.count())
-        .select_from(FileEntry)
-        .where(FileEntry.collection_id == collection_id, FileEntry.ots_state == "incomplete")
+    incomplete = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(FileEntry)
+            .where(FileEntry.collection_id == collection_id, FileEntry.ots_state == "incomplete")
+        )
+        or 0
     )
-    if not incomplete:
+    # Surveyed BEFORE the claim, because either shape admits the collection on its own and the run's
+    # `total` must be known when the run is created. The sweep re-reads every row it acts on under
+    # the claim, and its fenced compare-and-set refuses anything that moved in between.
+    pointer_work = await survey_pointer_work(session, collection_id, settings)
+    if not incomplete and not pointer_work.items:
         result.idle = True
         return result
 
@@ -757,7 +1587,7 @@ async def upgrade_collection(
         kind="upgrade",
         started=_utcnow(),
         result="running",
-        total=int(incomplete),
+        total=incomplete + pointer_work.items,
     )
     # The `blocking_run` pre-check above is only advisory; this commit (guarded by the partial unique
     # index) is the race-free claim.
@@ -786,8 +1616,25 @@ async def upgrade_collection(
     # inside `upgrade_incomplete`, before each proof is rewritten.
     async with collections.run_keepalive(run_id):
         try:
+            # The healing sweep FIRST, so a proof relocated this pass is upgraded at its new
+            # canonical location rather than at the one it is about to leave.
+            result.sweep = await heal_pointers(
+                session,
+                collection,
+                settings,
+                work=pointer_work,
+                progress=_progress,
+                run_id=run_id,
+            )
+            swept = result.sweep.items
+
+            async def _upgrade_progress(done: int) -> None:
+                # One counter across both halves of the run: the sweep's items come first, so
+                # `processed` advances by exactly one per completed work item throughout.
+                await _progress(swept + done)
+
             outcome = await upgrade_incomplete(
-                session, collection, settings, progress=_progress, run_id=run_id
+                session, collection, settings, progress=_upgrade_progress, run_id=run_id
             )
             result.upgraded = outcome.get("upgraded", 0)
             result.still_incomplete = outcome.get("still_incomplete", 0)
@@ -810,7 +1657,7 @@ async def upgrade_collection(
         run_id,
         result=run_result,
         upgraded=upgraded_count,
-        processed=int(incomplete) if run_result == "ok" else processed_count,
+        processed=(incomplete + pointer_work.items) if run_result == "ok" else processed_count,
         finished=_utcnow(),
     )
     if not finalized:

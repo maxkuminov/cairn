@@ -448,9 +448,12 @@ async def run_daily_upgrade(session: AsyncSession) -> int:
 
     Because :func:`compute_health` keys freshness on ``kind='scan'`` runs only, an ``upgrade`` run
     never refreshes the dead-man's switch — which is why we can record a real run instead of the old
-    "amend the latest scan run" workaround. A collection with no incomplete proofs records nothing
-    (no empty daily runs), and a collection that already has an operation in flight is skipped so we
-    never start a second writer on it.
+    "amend the latest scan run" workaround. A collection with NO work of any kind records nothing
+    (no empty daily runs) — and "work" now means incomplete proofs *or* the proof-location healing
+    sweep's two shapes (a pointer that is not canonical for its file's current relpath, a recorded
+    proof entry absent from the store), so this is also the daily convergence of moved files' proofs
+    (GitHub #39). A collection that already has an operation in flight is skipped so we never start
+    a second writer on it.
     """
     total = 0
     for collection in await list_collections(session):

@@ -8,11 +8,11 @@ Three things live here because they belong to neither slice:
   destroys the original bytes' proof. Only together do both proofs survive — and only the merged
   tree can be asked. Nothing on the placement path is stubbed: the only fake is the `ots` binary
   itself.
-* **The accepted #39 limitation (task 4.2a).** A moved file keeps `ots_path` pointing at its OLD
-  relpath's canonical proof, so a later file stamped at that path takes it over. #15 means the
-  moved file's proof is PRESERVED rather than destroyed, and the provenance ladder means `/verify`
-  now SAYS so — but every consumer still resolves the recorded path, i.e. the other file's proof.
-  The limitation is asserted here rather than assumed.
+* **#39, end to end.** A moved file keeps `ots_path` pointing at its OLD relpath's canonical
+  proof. The referenced-slot stamp guard now refuses to let a later file at that path take the slot
+  over, and the upgrade pass's healing sweep relocates the moved file's proof to its current path,
+  after which the newcomer stamps normally. Asserted through the real scan -> stamp -> upgrade
+  path, because the guard and the sweep only close the loss path together.
 * **The refusal path (task 1a).** ``claim_run``'s rollback expires every ORM object in the session,
   so a `collection.id` read after a lost claim raised ``MissingGreenlet`` from the very log line
   meant to report the refusal — turning "another operation is in progress" into a crash.
@@ -169,18 +169,23 @@ async def test_a_changed_restore_restamps_and_the_original_proof_survives(cairn_
 
 
 # ==============================================================================================
-# 4.2a — the accepted #39 limitation, pinned
+# #39 — the moved file's proof is protected where it is, then relocated to where it belongs
 # ==============================================================================================
 
 
-def test_a_moved_file_keeps_pointing_at_its_old_paths_proof(cairn_env, monkeypatch, capsys):
-    """#39: `ots_path` is not repointed by a move, so a later file at the old path takes it over.
+def test_a_moved_files_proof_is_guarded_then_relocated(cairn_env, monkeypatch, capsys):
+    """The whole of #39, end to end, with nothing on the placement path stubbed but the `ots` binary.
 
-    What this change fixes is that the takeover no longer DESTROYS the moved file's proof (#15
-    preserves it) and is no longer invisible (`/verify` now blames the proof, with provenance,
-    instead of passing green or reading as harmless staleness). What it does NOT fix — deliberately,
-    it is Phase-2 work filed as #39 — is the pointer: verification, download, export and the upgrade
-    pass all still resolve `ots_path`, which now names the OTHER file's proof.
+    A move keeps `ots_path` on the OLD relpath's canonical slot. That used to make the slot
+    claimable: a different file appearing at the old path was stamped there, displacing the moved
+    file's proof into `.superseded/` (preserved since #15, but the moved row's pointer then resolved
+    to a stranger's proof, which `/verify` correctly reported as a proof mismatch — a false alarm on
+    a perfectly healthy file).
+
+    Now the newcomer's stamp is DEFERRED while any row records that slot, and the daily upgrade
+    pass's healing sweep relocates the moved file's proof to its current path — after which the
+    newcomer stamps normally. Nothing is displaced at any point, and both files end up with their
+    own proof at their own canonical location.
     """
     from fastapi.testclient import TestClient
 
@@ -188,7 +193,7 @@ def test_a_moved_file_keeps_pointing_at_its_old_paths_proof(cairn_env, monkeypat
     from src.config import get_settings
     from src.database import get_sessionmaker
     from src.main import app
-    from src.models.db import Collection, FileEntry
+    from src.models.db import Collection
     from src.services import ots, proofs
 
     x, y = b"the moved file's bytes", b"an unrelated newcomer at the vacated path"
@@ -198,59 +203,78 @@ def test_a_moved_file_keeps_pointing_at_its_old_paths_proof(cairn_env, monkeypat
 
     monkeypatch.setattr(ots, "_run_ots", _stamp_fake())
 
-    async def setup() -> tuple[int, Path, bytes]:
+    async def setup() -> tuple[int, Path, Path, bytes]:
         cid = await seed_collection(root)
         await _scan(cid)  # a.txt added + stamped
-        canonical = proofs.proof_path(get_settings(), cid, "a.txt")
-        proof_for_x = canonical.read_bytes()
-        assert ots.read_proof_facts(canonical).digest == _sha(x)
+        old_slot = proofs.proof_path(get_settings(), cid, "a.txt")
+        new_slot = proofs.proof_path(get_settings(), cid, "b.txt")
+        proof_for_x = old_slot.read_bytes()
+        assert ots.read_proof_facts(old_slot).digest == _sha(x)
 
         # The move. `_reconcile_moves` repoints the row's relpath and keeps its identity — including
         # `ots_path`, which still names `a.txt.ots`.
         (root / "a.txt").rename(root / "b.txt")
         assert (await _scan(cid)).moved == 1
         moved = await _entry(cid, "b.txt")
-        assert moved.ots_path == str(canonical), "the move left the proof pointer on the old path"
+        assert moved.ots_path == str(old_slot), "the move left the proof pointer on the old path"
 
-        # A brand-new, unrelated file takes the vacated path and is stamped there.
+        # A brand-new, unrelated file takes the vacated path. Its stamp must NOT take the slot.
         (root / "a.txt").write_bytes(y)
         assert (await _scan(cid)).added == 1
-        return cid, canonical, proof_for_x
+        return cid, old_slot, new_slot, proof_for_x
 
-    cid, canonical, proof_for_x = asyncio.run(setup())
+    cid, old_slot, new_slot, proof_for_x = asyncio.run(setup())
     _dispose_engine()
 
-    async def inspect():
-        moved = await _entry(cid, "b.txt")
-        newcomer = await _entry(cid, "a.txt")
-        return moved, newcomer
+    async def rows():
+        return await _entry(cid, "b.txt"), await _entry(cid, "a.txt")
 
-    moved, newcomer = asyncio.run(inspect())
+    moved, newcomer = asyncio.run(rows())
     _dispose_engine()
 
-    # 1. The moved file's proof was PRESERVED, not destroyed — #15 doing its job under #39.
+    # 1. The guard deferred the newcomer rather than displacing the moved file's proof. Nothing was
+    #    archived, because nothing was displaced — the loss path is closed by refusal, not by
+    #    preservation cleaning up after it.
+    assert newcomer.ots_state == "pending"
+    assert newcomer.ots_path is None
+    assert old_slot.read_bytes() == proof_for_x
+    assert _archive_files(cairn_env / "proofs", cid) == []
+    assert moved.ots_path == str(old_slot)
+
+    # 2. The upgrade pass's healing sweep relocates the moved file's proof to its current path.
+    async def upgrade():
+        async with get_sessionmaker()() as s:
+            return await proofs.upgrade_collection(s, await s.get(Collection, cid))
+
+    outcome = asyncio.run(upgrade())
+    _dispose_engine()
+    assert outcome.sweep.relocated == 1
+    assert new_slot.read_bytes() == proof_for_x
+    assert not old_slot.exists(), "the vacated slot is free for the newcomer"
+
+    moved, newcomer = asyncio.run(rows())
+    _dispose_engine()
+    assert moved.ots_path == str(new_slot)
+    assert moved.ots_digest == _sha(x), "the sweep writes ots_path and nothing else"
+
+    # 3. …after which the newcomer stamps normally, into the slot nothing records any more.
+    asyncio.run(_scan(cid))
+    _dispose_engine()
+    moved, newcomer = asyncio.run(rows())
+    _dispose_engine()
+    assert newcomer.ots_path == str(old_slot)
+    assert newcomer.ots_digest == _sha(y)
+    assert ots.read_proof_facts(old_slot).digest == _sha(y)
+    assert moved.ots_path == str(new_slot)
+    assert ots.read_proof_facts(new_slot).digest == _sha(x)
+    # The only thing in the archive is the relocation's own loss-proof copy of the moved file's
+    # proof (design D4 phase 5 archives a source before removing it). Nothing was DISPLACED: no
+    # stamp ever wrote over a proof another row recorded.
     archived = _archive_files(cairn_env / "proofs", cid)
-    assert [p.name for p in archived] == [f"{_sha(x)}.ots"]
-    assert archived[0].read_bytes() == proof_for_x
-    # …at exactly the address design D8 tells an operator to recover it from by hand:
-    # `.superseded/<collection_id>/<dd>/<digest>.ots`.
-    assert archived[0].relative_to(cairn_env / "proofs").parts == (
-        ".superseded",
-        str(cid),
-        _sha(x)[:2],
-        f"{_sha(x)}.ots",
-    )
+    assert [p.read_bytes() for p in archived] == [proof_for_x]
 
-    # 2. …but the moved row still resolves the old path, which now holds the newcomer's proof.
-    assert moved.ots_path == str(canonical)
-    assert moved.ots_digest == _sha(x), "provenance still records what Cairn placed for these bytes"
-    assert newcomer.ots_path == str(canonical), "two rows, one canonical proof path (#39)"
-    assert ots.read_proof_facts(canonical).digest == _sha(y)
-
-    # 3. `/verify` on the moved row now says so. Not green, and not `proof-stale`: the on-disk proof
-    #    is not the proof Cairn recorded placing, which is an established finding, not a guess.
-    #    (`ots.verify` is NOT stubbed — a digest disagreement is settled from the local parse alone,
-    #    before any explorer lookup.)
+    # 4. `/verify` on the moved row no longer reads as a takeover: the proof at the recorded path
+    #    IS the proof Cairn placed for these bytes.
     database.reset_engine()
     with TestClient(app) as client:
         import re
@@ -258,46 +282,15 @@ def test_a_moved_file_keeps_pointing_at_its_old_paths_proof(cairn_env, monkeypat
         token = re.search(r'name="csrf-token" content="([^"]+)"', client.get("/").text).group(1)
         r = client.post("/verify", data={"csrf_token": token, "file_id": moved.id})
         assert r.status_code == 200, r.text
-        html = r.text
-        assert "not the proof Cairn placed" in html
-        assert "predates" not in html, "a staleness reading here would be a false reassurance"
-        assert "verdict--danger" in html, "a takeover must not render as a pass"
+        assert "not the proof Cairn placed" not in r.text
+        assert "verdict--danger" not in r.text
 
-        # 4. Download serves the recorded path's bytes — the newcomer's proof, under the moved
-        #    file's name. This is the limitation, asserted rather than assumed.
+        # …and the download serves the moved file's own proof.
         dl = client.get(f"/verify/export/{moved.id}")
         assert dl.status_code == 200
-        assert dl.content == canonical.read_bytes()
+        assert dl.content == proof_for_x
         assert dl.headers["content-disposition"].endswith('filename="b.txt.ots"')
     database.reset_engine()
-
-    # 5. `cairn export`'s bundle resolves the same path.
-    async def export():
-        async with get_sessionmaker()() as s:
-            fe = await s.get(FileEntry, moved.id)
-            return proofs.export_bundle(fe, cairn_env / "out", root)
-
-    dest = asyncio.run(export())
-    _dispose_engine()
-    assert dest.name == "b.txt"  # export_bundle returns the copied FILE
-    assert dest.with_name("b.txt.ots").read_bytes() == canonical.read_bytes()
-
-    # 6. …and so does the upgrade pass.
-    upgraded_paths: list[str] = []
-
-    async def upgrade():
-        async with get_sessionmaker()() as s:
-            fe = await s.get(FileEntry, moved.id)
-            fe.ots_state = "incomplete"
-            await s.commit()
-            monkeypatch.setattr(
-                ots, "upgrade", lambda path: upgraded_paths.append(str(path)) or False
-            )
-            await proofs.upgrade_incomplete(s, await s.get(Collection, cid))
-
-    asyncio.run(upgrade())
-    _dispose_engine()
-    assert str(canonical) in upgraded_paths
     capsys.readouterr()
 
 

@@ -211,13 +211,23 @@ async def _reconcile_moves(
     A file newly classified ``missing`` whose stored ``(sha256, size)`` matches **exactly one**
     newly-``added`` file — a key shared by no other missing or added row in this run — is the same
     file relocated, not an independent deletion + addition. Such a pair is reconciled into a single
-    surviving row that keeps its identity (``first_seen``, ``sha256``, OTS proof) and is repointed
-    to the new path with status ``ok``; the added row is dropped and one informational ``moved``
-    event records the old → new path. Ambiguous keys (matching >1 candidate on either side) and
-    zero-byte files never reconcile — they fall back to plain ``missing`` + ``added`` (logged).
+    surviving row that keeps its identity (``first_seen``, ``sha256``, and the whole OTS proof
+    record — ``ots_path``, ``ots_state``, ``ots_stamped_at`` and the recorded provenance
+    ``ots_digest``, all unchanged) and is repointed to the new path with status ``ok``; the added
+    row is dropped and one informational ``moved`` event records the old → new path. Ambiguous keys
+    (matching >1 candidate on either side) and zero-byte files never reconcile — they fall back to
+    plain ``missing`` + ``added`` (logged).
 
-    Mutates the index only (never collection bytes / proof files) and never re-queues a move for OTS
-    stamping (the surviving row stays ``ok``, not ``pending``).
+    Mutates the index only (never collection bytes, and never the proof store) and never re-queues a
+    move for OTS stamping (the surviving row stays ``ok``, not ``pending``).
+
+    The retained ``ots_path`` therefore names the OLD relpath's canonical proof location — still the
+    true location of the proof. What happens next belongs entirely to the notarization capability
+    (:mod:`src.services.proofs`), which owns both halves: its referenced-slot stamp guard keeps any
+    stamp from displacing that proof while a row records it, and its healing sweep — the one code
+    path that relocates proofs — later brings it to the new relpath's canonical location. A scan
+    must not do either; relocating from here would add a second proof-mutation path with its own
+    crash windows and its own ordering hazard against this same scan's stamp pass (GitHub #39).
     """
     log = logging.getLogger("cairn.scanner")
     if not newly_missing or not new_rows:
@@ -275,8 +285,10 @@ async def _reconcile_moves(
         m.mtime = new_mtime  # adopt the new file's mtime so the next fast-path scan skips re-hash
         m.status = "ok"
         m.last_checked = now
-        # Preserve first_seen / sha256 / ots_path / ots_state / ots_stamped_at — identity, proof,
-        # and notarization history follow the file to its new path.
+        # Preserve first_seen / sha256 / ots_path / ots_state / ots_stamped_at / ots_digest —
+        # identity, proof, provenance and notarization history follow the file to its new path. The
+        # proof FILE is not touched here (see the docstring): the notarization capability's guard
+        # protects it where it is, and its healing sweep moves it.
         session.add(
             Event(
                 collection_id=collection.id,

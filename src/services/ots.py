@@ -48,6 +48,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -534,6 +535,58 @@ def _claim_archive_slot(directory: Path, stem: str) -> tuple[int, Path]:
         return fd, candidate
 
 
+def _archive_copy(
+    source: Path,
+    archive_root: Path,
+    facts: StoredProofFacts,
+    *,
+    store_key: str,
+    sync_root: Path | None = None,
+) -> Path:
+    """COPY ``source`` into the content-addressed archive durably; leave ``source`` in place.
+
+    The whole of :func:`_preserve_proof` except its final ``unlink`` — split out because the
+    relocation sequence (design D4 phase 5) needs the archive copy to exist *before* it removes a
+    source that is already published elsewhere, and needs to keep deciding for itself when (and
+    whether) the removal happens. Every durability property documented on :func:`_preserve_proof`
+    is established here; that function is this one plus the removal.
+
+    Returns the archive path the copy now occupies.
+    """
+    directory, stem = _archive_dir_for(archive_root, facts)
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = source.read_bytes()
+
+    fd, candidate = _claim_archive_slot(directory, stem)
+    try:
+        try:
+            _write_all(fd, payload)
+            # The complete payload is on the descriptor before anything is made durable and long
+            # before the source is unlinked: a short write must never be fsynced and named as if it
+            # were the proof.
+            if os.fstat(fd).st_size != len(payload):  # pragma: no cover - defensive
+                raise OSError(
+                    errno.EIO,
+                    f"archived proof is {os.fstat(fd).st_size} bytes, expected {len(payload)}",
+                )
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        # This name was created by THIS call's exclusive create, so the partial file is ours and
+        # nothing else's proof: remove it so a doomed retry loop cannot leave a trail of truncated
+        # archive slots. Best-effort — the source is untouched either way, which is what matters.
+        with contextlib.suppress(OSError):
+            os.unlink(candidate)
+        raise
+    # The file's BYTES are durable; its NAME is not until every directory on the chain holding it is
+    # synced — including any created by an earlier failed attempt, hence the chain to the store root.
+    _sync_dir_chain(
+        directory, sync_root if sync_root is not None else archive_root, store_key=store_key
+    )
+    return candidate
+
+
 def _preserve_proof(
     source: Path,
     archive_root: Path,
@@ -568,35 +621,9 @@ def _preserve_proof(
 
     Returns the archive path the proof now occupies.
     """
-    directory, stem = _archive_dir_for(archive_root, facts)
-    directory.mkdir(parents=True, exist_ok=True)
-    payload = source.read_bytes()
-
-    fd, candidate = _claim_archive_slot(directory, stem)
-    try:
-        try:
-            _write_all(fd, payload)
-            # The complete payload is on the descriptor before anything is made durable and long
-            # before the source is unlinked: a short write must never be fsynced and named as if it
-            # were the proof.
-            if os.fstat(fd).st_size != len(payload):  # pragma: no cover - defensive
-                raise OSError(
-                    errno.EIO,
-                    f"archived proof is {os.fstat(fd).st_size} bytes, expected {len(payload)}",
-                )
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-    except BaseException:
-        # This name was created by THIS call's exclusive create, so the partial file is ours and
-        # nothing else's proof: remove it so a doomed retry loop cannot leave a trail of truncated
-        # archive slots. Best-effort — the source is untouched either way, which is what matters.
-        with contextlib.suppress(OSError):
-            os.unlink(candidate)
-        raise
-    # The file's BYTES are durable; its NAME is not until every directory on the chain holding it is
-    # synced — including any created by an earlier failed attempt, hence the chain to the store root.
-    _sync_dir_chain(directory, sync_root if sync_root is not None else archive_root, store_key=store_key)
+    candidate = _archive_copy(
+        source, archive_root, facts, store_key=store_key, sync_root=sync_root
+    )
     # Only now may the only other copy go away.
     os.unlink(source)
     return candidate
@@ -792,6 +819,56 @@ def _path_occupied(path: Path) -> bool:
         return False
 
 
+@dataclass(frozen=True)
+class _StoreContext:
+    """The four proof-store coordinates every write into the store needs, derived once.
+
+    ``store`` is the proof-store root (``None`` only for a direct call that named none),
+    ``store_key`` keys the per-store degrade sets, ``sync_root`` bounds the directory-sync chain,
+    and ``archive_root`` is where a displaced proof is preserved.
+    """
+
+    store: Path | None
+    store_key: str
+    sync_root: Path
+    archive_root: Path
+
+
+def _store_context(
+    target: Path, store_root: str | os.PathLike[str] | None, collection_id: str | int | None = None
+) -> _StoreContext:
+    """Derive the store coordinates for a write at ``target``.
+
+    ``collection_id`` names the archive subtree explicitly. Without it the id is read from
+    ``target``'s first component below the store root, which is right for a canonical proof path
+    (``<store>/<collection_id>/<relpath>.ots``) and wrong for anything else — the relocation
+    holding slot (``<store>/.relocating/…``) is under the store but under no collection, so its
+    callers always pass the id rather than letting it be inferred as ``.relocating``.
+    """
+    store = Path(store_root) if store_root is not None else None
+    # Keyed per proof store: the directory-sync degrade is a property of the store's filesystem.
+    store_key = str(store if store is not None else target.parent)
+    # Everything made durable is flushed up to (and including) the proof-store root: anchoring on a
+    # directory whose name predates every proof is what makes durability independent of which
+    # attempt created the intermediate directories (Codex B2).
+    sync_root = store if store is not None else target.parent
+    if store is not None:
+        if collection_id is None:
+            try:
+                collection_id = target.relative_to(store).parts[0]
+            except (ValueError, IndexError):  # pragma: no cover - defensive
+                collection_id = "unknown"
+        archive_root = superseded_root(store, collection_id)
+    else:
+        # No store root named (only reachable from a direct call that did not pass one). Archive
+        # beside the canonical tree rather than not archiving at all — losing a proof is the one
+        # outcome these functions may never produce.
+        archive_root = target.parent / SUPERSEDED_DIRNAME
+    return _StoreContext(
+        store=store, store_key=store_key, sync_root=sync_root, archive_root=archive_root
+    )
+
+
 def _place_proof(
     staged_ots: Path,
     out_ots_path: Path,
@@ -839,26 +916,8 @@ def _place_proof(
     """
     staged_ots = Path(staged_ots)
     out_ots_path = Path(out_ots_path)
-    store = Path(store_root) if store_root is not None else None
-    # Keyed per proof store: the directory-sync degrade is a property of the store's filesystem.
-    store_key = str(store if store is not None else out_ots_path.parent)
-
-    # Everything this function makes durable is flushed up to (and including) the proof-store root:
-    # anchoring on a directory whose name predates every proof is what makes durability independent
-    # of which attempt created the intermediate directories (Codex B2).
-    sync_root = store if store is not None else out_ots_path.parent
-
-    if store is not None:
-        try:
-            collection_id = out_ots_path.relative_to(store).parts[0]
-        except (ValueError, IndexError):  # pragma: no cover - defensive
-            collection_id = "unknown"
-        archive_root = superseded_root(store, collection_id)
-    else:
-        # No store root named (only reachable from a direct call that did not pass one). Archive
-        # beside the canonical tree rather than not archiving at all — losing a proof is the one
-        # outcome this function may never produce.
-        archive_root = out_ots_path.parent / SUPERSEDED_DIRNAME
+    ctx = _store_context(out_ots_path, store_root)
+    store_key, sync_root, archive_root = ctx.store_key, ctx.sync_root, ctx.archive_root
 
     staged_facts: StoredProofFacts | None = None
     try:
@@ -942,6 +1001,429 @@ def _place_proof(
         # local parse, so the caller can record WHICH digest the proof it just placed commits to.
         staged_facts = read_proof_facts(out_ots_path)
     return StampOutcome(kind="placed", digest=staged_facts.digest, state="incomplete")
+
+
+# --- Proof relocation: a proof's location follows its file (design D4, GitHub #39) -------------
+#
+# These four functions are the ONLY code in Cairn that moves a stored proof from one location to
+# another, and they exist for exactly one caller: the healing sweep in `services.proofs`. Nothing on
+# the scan path may reach them — a scan rewrites the index and never the proof store.
+#
+# They are deliberately DB-free. The two decisions that need the datastore stay with the caller:
+# whether a destination is another row's recorded `ots_path` (threaded in as the `referenced`
+# predicate, re-consulted whenever the destination rules restart), and the fenced compare-and-set
+# that commits the pointer BETWEEN publication and source removal. That split is what makes the
+# pointer invariant — `ots_path` always names a location actually holding this row's proof — hold
+# across a crash at every phase boundary.
+
+# Where a cycle-breaking relocation parks a proof (design D4 rule 1). Under the store, outside every
+# canonical slot, and unable to shadow a collection directory (those are integers) exactly as
+# `.staging` and `.superseded` cannot.
+RELOCATING_DIRNAME = ".relocating"
+
+# `os.link` answering with one of these means the filesystem cannot make a second name for this
+# file — a store without hard links (SMB/FAT/FUSE), a cross-device destination, or a link count at
+# its limit. Deterministic, so the publication falls back to a link-free exclusive create rather
+# than reporting a failure that would repeat forever. Every OTHER errno stays a real failure.
+_LINK_UNSUPPORTED = frozenset(
+    {
+        errno.EPERM,
+        errno.EXDEV,
+        errno.ENOSYS,
+        errno.ENOTSUP,
+        getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+        errno.EMLINK,
+    }
+)
+
+# A parsed proof digest is lower-case hex. Validated before it is ever used to build a glob so a
+# malformed value can never widen an archive search into a metacharacter pattern.
+_HEX_DIGEST_RE = re.compile(r"\A[0-9a-f]{64}\Z")
+
+
+@dataclass(frozen=True)
+class RelocationPublication:
+    """What phases 1–3 of a relocation established, so the caller knows what it may commit.
+
+    * ``aliased``  — source and destination are ONE directory entry (a case-only rename on a
+      case-insensitive store). The proof is already where it belongs: commit the canonical
+      SPELLING and remove nothing, because there may be only one entry to remove.
+    * ``published``— the destination now holds a second, durable copy. Commit the pointer, then
+      call :func:`finish_relocation` to remove the redundant source.
+    * ``adopted``  — the destination already held a byte-identical copy (an earlier attempt
+      interrupted between publication and the pointer commit). Same follow-up as ``published``;
+      the destination's directory chain has been synced here, because the interrupted attempt's
+      own sync may never have run.
+    * ``deferred`` — the destination is recorded as another row's proof. Nothing was touched and
+      nothing may be committed; the caller retries after that row has moved on.
+    """
+
+    kind: str  # 'aliased' | 'published' | 'adopted' | 'deferred'
+    archived: Path | None = None  # where an occupant displaced by rule (c) was preserved
+
+
+def holding_slot(store_root: str | os.PathLike[str], row_id: int | str) -> Path:
+    """``<proof_store>/.relocating/<row_id>.ots`` — the cycle-breaking holding location (D4 rule 1).
+
+    A path swap makes two rows each block the other's destination, which deferral alone can never
+    resolve. Parking ONE member's proof here vacates a canonical slot so the rest converge; the
+    parked pointer is as truthful as any other and the held proof reaches its own canonical slot on
+    a later sweep. The name is fixed-length and ASCII, so it can never be the thing that trips the
+    per-name byte limit.
+    """
+    return Path(store_root) / RELOCATING_DIRNAME / f"{row_id}.ots"
+
+
+def same_directory_entry(a: str | os.PathLike[str], b: str | os.PathLike[str]) -> bool:
+    """Whether two paths name ONE directory entry, by filesystem identity (device + inode).
+
+    The portable truth for "a case-insensitive store treats these two spellings as the same slot".
+    An un-stat-able path answers ``False``: absence is not identity, and no caller may act on a
+    claim the filesystem refused to make.
+
+    *Accepted limitation:* identity cannot distinguish one entry from two hard links to one file —
+    which Cairn's own relocation can leave behind across a crash. Every caller therefore treats a
+    positive answer as a reason to be MORE conservative (defer a stamp; refuse to unlink), never as
+    a licence to remove something.
+    """
+    try:
+        sa, sb = os.lstat(a), os.lstat(b)
+    except OSError:
+        return False
+    return (sa.st_dev, sa.st_ino) == (sb.st_dev, sb.st_ino)
+
+
+def find_archived_proof(
+    store_root: str | os.PathLike[str], collection_id: int | str, digest: str
+) -> Path | None:
+    """An archived copy under ``.superseded`` whose committed digest is ``digest``, or ``None``.
+
+    The archive is content-addressed, so the family for a digest is one directory read; each
+    candidate is still PARSED before it is offered, because the name is an index and only the bytes
+    are evidence. Used by the restore leg (design D4b) to republish a proof whose recorded entry has
+    gone missing from the store.
+    """
+    digest = (digest or "").strip().lower()
+    if not _HEX_DIGEST_RE.match(digest):
+        return None
+    family = superseded_root(store_root, collection_id) / digest[:2]
+    try:
+        candidates = sorted(family.glob(f"{digest}*.ots"))
+    except OSError:  # pragma: no cover - defensive
+        return None
+    for candidate in candidates:
+        if read_proof_facts(candidate).digest == digest:
+            return candidate
+    return None
+
+
+def _classify_destination_error(exc: OSError, dst: Path) -> OtsError:
+    """Map a failure ON THE FINAL OUTPUT PATH to the module's two classes (see the module docstring).
+
+    ``ENAMETOOLONG`` is the one permanent verdict — the filesystem will refuse this name forever.
+    Note what a permanent verdict means HERE, though: the healing sweep treats it as a per-row
+    warning and leaves the row's proof, pointer and provenance exactly as they were (design D5). It
+    is emphatically NOT the stamp path's drop-to-``none``, which would discard a placed proof's
+    provenance to tidy up a location problem.
+    """
+    if exc.errno == errno.ENAMETOOLONG:
+        return OtsPathError(f"cannot write a proof to {str(dst)!r}: {exc}")
+    return OtsError(f"failed to write a proof to {str(dst)!r}: {exc}")
+
+
+def _copy_no_replace(payload: bytes, dst: Path) -> None:
+    """Create ``dst`` exclusively and write ``payload`` into it durably; never replace.
+
+    The same primitive the superseded archive uses (:func:`_archive_copy`), pointed at a canonical
+    slot: ``O_CREAT|O_EXCL`` so an occupant that appeared since the destination was classified
+    raises ``FileExistsError`` for the caller to re-classify rather than being silently overwritten,
+    and :func:`_write_all` so a short write can never be fsynced and named as if it were a proof.
+    No temp file is involved — the exclusive create IS the reservation — so a crash mid-write leaves
+    only a partial file at an unreferenced slot, which the next pass classifies as an occupant and
+    archives rather than trusting.
+
+    A failure after the create removes the partial file: it was made by this call and is nobody
+    else's proof.
+    """
+    fd = os.open(str(dst), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    try:
+        try:
+            _write_all(fd, payload)
+            if os.fstat(fd).st_size != len(payload):  # pragma: no cover - defensive
+                raise OSError(
+                    errno.EIO,
+                    f"published proof is {os.fstat(fd).st_size} bytes, expected {len(payload)}",
+                )
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(dst)
+        raise
+
+
+def publish_relocation(
+    src: str | os.PathLike[str],
+    dst: str | os.PathLike[str],
+    *,
+    store_root: str | os.PathLike[str] | None = None,
+    collection_id: int | str | None = None,
+    referenced: Callable[[Path], bool] | None = None,
+) -> RelocationPublication:
+    """Make ``dst`` durably hold the proof at ``src``, destroying nothing (design D4, phases 1–3).
+
+    Returns without touching the datastore: the caller commits the pointer (a fenced
+    compare-and-set) and only then calls :func:`finish_relocation`. The source is still there and
+    still the truthful location when this returns, which is precisely why a crash here is harmless.
+
+    Phase 1 — **aliasing**. If ``src`` and ``dst`` resolve to one directory entry, the proof is
+    already in place. Identity alone does NOT decide that: network filesystems can report identity
+    they do not have, so it is confirmed by a byte comparison, and an identity claim the bytes
+    contradict refuses the whole relocation rather than committing a pointer on the strength of it.
+    An alias returns immediately — nothing is removed, because there may be only one entry.
+
+    Phase 2 — **destination rules, in this order**:
+
+    1. a destination the caller's ``referenced`` predicate claims for a different row → ``deferred``:
+       no branch here may ever place over, unlink, or otherwise disturb another row's proof;
+    2. an occupant BYTE-IDENTICAL to the source → ``adopted``: this is the published half of an
+       interrupted relocation. Its directory chain is synced here even though nothing was written,
+       because the attempt that published it may have died before its own sync. Committed-digest
+       equality would NOT be enough — two distinct proofs can commit to one file digest while
+       differing in attestation value, and neither may be discarded for the other;
+    3. any other occupant → archived to ``.superseded`` (never discarded), then publication proceeds.
+
+    Phase 3 — **publication**, atomic and non-replacing: a hard link where the filesystem supports
+    one, else a link-free exclusive create plus a full copy, then the directory-sync chain to the
+    store root. A destination that appears between classification and publication (``EEXIST``)
+    restarts phase 2 instead of overwriting — that restart re-consults ``referenced``, so a slot
+    that became another row's proof in the meantime defers rather than being taken.
+
+    Raises :class:`OtsPathError` for a permanently refused destination name and :class:`OtsError`
+    for every other failure; both leave the source proof readable and the caller's pointer truthful.
+    """
+    src = Path(src)
+    dst = Path(dst)
+    ctx = _store_context(dst, store_root, collection_id)
+
+    try:
+        os.lstat(src)
+    except OSError as exc:
+        raise OtsError(f"cannot read the proof to relocate at {str(src)!r}: {exc}") from exc
+
+    # --- Phase 1: aliasing ---------------------------------------------------------------------
+    if same_directory_entry(src, dst):
+        try:
+            if src.read_bytes() != dst.read_bytes():
+                # The filesystem says one entry; the bytes say two. Believe neither and change
+                # nothing: committing the pointer here could name a slot holding someone else's
+                # proof, and removing anything could destroy the only copy of this one.
+                raise OtsError(
+                    f"refusing to relocate {str(src)!r} to {str(dst)!r}: the filesystem reports "
+                    f"them as one directory entry but their contents differ"
+                )
+            return RelocationPublication(kind="aliased")
+        except OSError as exc:
+            raise OtsError(
+                f"cannot confirm the aliased proof at {str(dst)!r}: {exc}"
+            ) from exc
+    # The per-name byte-limit pre-check on the components Cairn creates below the store root. It
+    # runs BEFORE the destination rules so a row the filesystem permanently refuses is reported as
+    # REFUSED rather than as deferred-by-reference — cycle breaking may only ever select a row that
+    # no other rule refuses to move, and that selection reads these outcomes.
+    if not _proof_output_writable(dst, below=ctx.store):
+        raise OtsPathError(
+            f"proof destination name too long to store "
+            f"({len(os.fsencode(dst.name))} bytes > {_NAME_MAX_BYTES}): {str(dst)!r}"
+        )
+
+    while True:
+        # --- Phase 2: destination rules --------------------------------------------------------
+        if referenced is not None and referenced(dst):
+            return RelocationPublication(kind="deferred")
+
+        try:
+            payload = src.read_bytes()
+        except OSError as exc:
+            raise OtsError(f"cannot read the proof to relocate at {str(src)!r}: {exc}") from exc
+
+        archived: Path | None = None
+        if _path_occupied(dst):
+            try:
+                occupant = dst.read_bytes()
+            except OSError as exc:
+                raise OtsError(
+                    f"cannot inspect the proof occupying {str(dst)!r}: {exc}"
+                ) from exc
+            if occupant == payload:
+                try:
+                    _sync_dir_chain(dst.parent, ctx.sync_root, store_key=ctx.store_key)
+                except OSError as exc:
+                    raise OtsError(
+                        f"cannot make the already-published proof at {str(dst)!r} durable: {exc}"
+                    ) from exc
+                return RelocationPublication(kind="adopted")
+            try:
+                archived = _preserve_proof(
+                    dst,
+                    ctx.archive_root,
+                    read_proof_facts(dst),
+                    store_key=ctx.store_key,
+                    sync_root=ctx.sync_root,
+                )
+            except OSError as exc:
+                raise OtsError(
+                    f"refusing to relocate a proof to {str(dst)!r}: could not preserve the proof "
+                    f"already there ({exc})"
+                ) from exc
+            log.warning(
+                "proof displaced by a relocation preserved: %s -> %s", dst, archived
+            )
+
+        # --- Phase 3: publication --------------------------------------------------------------
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise _classify_destination_error(exc, dst) from exc
+
+        try:
+            os.link(src, dst)
+        except FileExistsError:
+            continue  # something took the slot; re-classify it, never overwrite
+        except OSError as exc:
+            if exc.errno not in _LINK_UNSUPPORTED:
+                raise _classify_destination_error(exc, dst) from exc
+            try:
+                _copy_no_replace(payload, dst)
+            except FileExistsError:
+                continue
+            except OSError as copy_exc:
+                raise _classify_destination_error(copy_exc, dst) from copy_exc
+
+        try:
+            _sync_dir_chain(dst.parent, ctx.sync_root, store_key=ctx.store_key)
+        except OSError as exc:
+            raise OtsError(
+                f"cannot make the relocated proof at {str(dst)!r} durable: {exc}"
+            ) from exc
+        return RelocationPublication(kind="published", archived=archived)
+
+
+def finish_relocation(
+    src: str | os.PathLike[str],
+    dst: str | os.PathLike[str],
+    *,
+    store_root: str | os.PathLike[str] | None = None,
+    collection_id: int | str | None = None,
+) -> None:
+    """Remove the now-redundant source entry, loss-proof (design D4, phase 5).
+
+    Called ONLY after the pointer commit succeeded, so ``dst`` is what the index names and ``src``
+    is a duplicate. "Duplicate" is still not "expendable": the sequence is archive a COPY of the
+    source, then unlink it, then re-verify that ``dst`` really still holds the proof — restoring
+    from that archive copy if it does not. The re-verification is the defence against a filesystem
+    whose identity reporting lies: if ``src`` and ``dst`` were secretly one entry after all, the
+    unlink took the destination with it, and the archive copy made a moment earlier is what puts it
+    back.
+
+    Every failure here leaves the committed (truthful) destination pointer alone and raises for the
+    caller to warn about: a post-commit problem must never roll a row back to a pointer the proof
+    may be about to leave. A source that survives is harmless — it sits in an unreferenced slot, and
+    a future stamp there archives it under the never-destroy rules.
+    """
+    src = Path(src)
+    dst = Path(dst)
+    ctx = _store_context(dst, store_root, collection_id)
+
+    try:
+        archived = _archive_copy(
+            src,
+            ctx.archive_root,
+            read_proof_facts(src),
+            store_key=ctx.store_key,
+            sync_root=ctx.sync_root,
+        )
+    except OSError as exc:
+        raise OtsError(
+            f"refusing to remove the relocated proof's source {str(src)!r}: it could not be "
+            f"archived first ({exc})"
+        ) from exc
+
+    # The bytes now exist in three places. Only here may one of them go away.
+    with contextlib.suppress(OSError):
+        os.unlink(src)
+        _sync_dir_chain(src.parent, ctx.sync_root, store_key=ctx.store_key)
+
+    if _path_occupied(dst):
+        try:
+            if dst.read_bytes() == archived.read_bytes():
+                return
+        except OSError as exc:  # pragma: no cover - defensive
+            raise OtsError(
+                f"cannot re-verify the relocated proof at {str(dst)!r}: {exc}"
+            ) from exc
+        # Something else is at the destination the pointer already names. Nothing is removed and
+        # nothing is overwritten: two proofs survive and the operator is told.
+        raise OtsError(
+            f"the relocated proof at {str(dst)!r} no longer matches the proof that was moved "
+            f"there; a copy is preserved at {str(archived)!r} and nothing was overwritten"
+        )
+
+    # The destination went away with the source — the identity-lying filesystem case. Put it back
+    # from the copy made before the unlink; the pointer already names this path.
+    log.warning(
+        "the relocated proof at %s vanished when its source entry was removed (the filesystem "
+        "reported them as distinct entries); restoring it from the archived copy %s",
+        dst,
+        archived,
+    )
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        _copy_no_replace(archived.read_bytes(), dst)
+        _sync_dir_chain(dst.parent, ctx.sync_root, store_key=ctx.store_key)
+    except OSError as exc:
+        raise OtsError(
+            f"could not restore the relocated proof at {str(dst)!r} from {str(archived)!r}: {exc}"
+        ) from exc
+
+
+def republish_proof(
+    source: str | os.PathLike[str],
+    dst: str | os.PathLike[str],
+    *,
+    store_root: str | os.PathLike[str] | None = None,
+    collection_id: int | str | None = None,
+) -> None:
+    """Publish ``source``'s bytes at the ABSENT path ``dst``, never replacing (design D4b).
+
+    The restore leg's primitive: a row's recorded ``ots_path`` names nothing on disk and the archive
+    holds a copy the row's own corroboration rules vouch for. The write is the same non-replacing
+    exclusive create publication uses, so a slot that turns out to be occupied after all refuses
+    instead of overwriting whatever is there.
+    """
+    source = Path(source)
+    dst = Path(dst)
+    ctx = _store_context(dst, store_root, collection_id)
+    if not _proof_output_writable(dst, below=ctx.store):
+        raise OtsPathError(
+            f"proof destination name too long to store "
+            f"({len(os.fsencode(dst.name))} bytes > {_NAME_MAX_BYTES}): {str(dst)!r}"
+        )
+    try:
+        payload = source.read_bytes()
+    except OSError as exc:
+        raise OtsError(f"cannot read the archived proof {str(source)!r}: {exc}") from exc
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        _copy_no_replace(payload, dst)
+        _sync_dir_chain(dst.parent, ctx.sync_root, store_key=ctx.store_key)
+    except FileExistsError as exc:
+        raise OtsError(
+            f"refusing to restore a proof at {str(dst)!r}: something occupies it now"
+        ) from exc
+    except OSError as exc:
+        raise _classify_destination_error(exc, dst) from exc
 
 
 def info(ots_path: str | os.PathLike[str]) -> ProofInfo:

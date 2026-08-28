@@ -582,6 +582,12 @@ def _cmd_upgrade(args: argparse.Namespace) -> int:
     a collection whose slot is held is skipped **and named**, and nothing ever waits: blocking would
     turn a cron ``cairn upgrade`` into an unbounded stall behind a multi-hour deep scan, and the work
     is idempotent so the next invocation picks it up.
+
+    This is also the operator's handle on the proof-location healing sweep (GitHub #39): the same
+    pass that upgrades proofs relocates a moved file's proof to its current path's canonical
+    location and restores a recorded proof that has gone missing from the store. A collection with
+    only that kind of work — no incomplete proofs at all, tripwire mode included — is claimed and
+    swept exactly like any other.
     """
 
     async def run() -> int:
@@ -598,6 +604,7 @@ def _cmd_upgrade(args: argparse.Namespace) -> int:
                 print("no collections configured (use: cairn add-collection).")
                 return 0
             upgraded = still = 0
+            relocated = restored = deferred = refused_proofs = 0
             processed = 0  # collections this invocation actually upgraded or found idle
             refused: list[str] = []
             for collection in collections:
@@ -609,7 +616,19 @@ def _cmd_upgrade(args: argparse.Namespace) -> int:
                 processed += 1
                 upgraded += outcome.upgraded
                 still += outcome.still_incomplete
-            print(f"upgraded={upgraded} still_incomplete={still}")
+                relocated += outcome.sweep.relocated + outcome.sweep.parked
+                restored += outcome.sweep.restored
+                deferred += outcome.sweep.deferred
+                refused_proofs += outcome.sweep.refused
+            line = f"upgraded={upgraded} still_incomplete={still}"
+            if relocated or restored or deferred or refused_proofs:
+                # Only when the healing sweep actually did something, so the ordinary daily line
+                # keeps its shape. The WARNINGs naming each row are the detail; this is the tally.
+                line += (
+                    f" proofs_relocated={relocated} proofs_restored={restored} "
+                    f"proofs_deferred={deferred} proofs_not_healed={refused_proofs}"
+                )
+            print(line)
             for name in refused:
                 print(
                     f"[{name}] SKIPPED — an operation is already in progress for this collection.",

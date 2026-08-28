@@ -2,7 +2,7 @@
 
 ## 1. The referenced-slot stamp guard (`src/services/proofs.py`)
 
-- [ ] 1.1 In `stamp_pending` (batched path + per-file fallback) and `run_stamp_backfill`:
+- [x] 1.1 In `stamp_pending` (batched path + per-file fallback) and `run_stamp_backfill`:
   the referenced-slot guard as the FIRST canonical-slot decision — evaluated under the
   proof-store lock after claim re-confirmation, BEFORE the adoption pass, writability
   classification, staging-symlink creation, and calendar submission. One bounded query for
@@ -12,10 +12,10 @@
   case-insensitive stores; never a false defer on case-sensitive ones). On hit: exclude the member from
   the batch (stays `pending`, no staging entry, no calendar traffic), warn naming the blocking
   row, never fail the batch/operation.
-- [ ] 1.2 No placement-time re-query: rely on (and test) the existing lease fence for the
+- [x] 1.2 No placement-time re-query: rely on (and test) the existing lease fence for the
   guard-to-placement window — a reconciliation referencing a batch slot implies the stamp's
   claim was reclaimed, and the fence refuses the whole batch's placements, members `pending`.
-- [ ] 1.3 Tests: a newcomer at a moved row's former path defers at every entry point (batched
+- [x] 1.3 Tests: a newcomer at a moved row's former path defers at every entry point (batched
   stamp, per-file fallback, backfill); ordering asserted with barriers/mocks — a deferred
   member triggers NO adoption attempt and NO calendar call, and the guard runs after lock +
   claim re-confirmation; the byte-identical newcomer case defers BEFORE `_adopt_or_verdict`
@@ -28,7 +28,7 @@
 
 ## 2. The relocation primitive (`src/services/ots.py`)
 
-- [ ] 2.1 Implement the per-row relocation used ONLY by the healing sweep, phases per design
+- [x] 2.1 Implement the per-row relocation used ONLY by the healing sweep, phases per design
   D4: aliasing check first (lstat dev+inode equality CONFIRMED by byte comparison — identity
   alone never decides; alias → pointer-spelling CAS only, nothing removed); ordered
   destination rules (defer-if-referenced is the CALLER's check, threaded in as a
@@ -39,13 +39,13 @@
   temp names, fsynced, removed on handled failures, crash-left temps are ignored debris);
   directory-sync durability chain; `_NAME_MAX_BYTES` pre-check on components below the store
   root.
-- [ ] 2.2 Loss-proof source removal (post-commit): archive-copy the source first, unlink,
+- [x] 2.2 Loss-proof source removal (post-commit): archive-copy the source first, unlink,
   fsync, then re-verify the destination still holds the proof and restore from the archive
   copy if not. Post-commit failures keep the committed pointer and warn (never roll back the
   row); pre-commit filesystem/precondition failures return a per-row outcome (nothing
   changed, warnable). No branch discards proof bytes; a permanent destination refusal is a
   per-row outcome, never a drop-to-`none`.
-- [ ] 2.3 Unit tests (`tests/test_proof_preservation.py` style): plain relocation; both-exist
+- [x] 2.3 Unit tests (`tests/test_proof_preservation.py` style): plain relocation; both-exist
   crash window completes via byte-identical adoption AND syncs the destination chain; a
   same-identity-but-different-bytes aliasing lie does not commit the pointer;
   same-committed-digest but byte-different occupant is NOT adopted (archived, source
@@ -58,32 +58,32 @@
 
 ## 3. The healing sweep (`src/services/proofs.py` + scheduler/CLI reach)
 
-- [ ] 3.1 Stale-row selection: SQL pre-filter (prefix comparison) + authoritative per-row
+- [x] 3.1 Stale-row selection: SQL pre-filter (prefix comparison) + authoritative per-row
   confirmation via `proof_path` (design D6), so the SQL can never disagree with the helper;
   test they agree on names containing `%`, `_`, and quotes.
-- [ ] 3.2 Corroboration before belief (design D3): source proof parsed; committed digest must
+- [x] 3.2 Corroboration before belief (design D3): source proof parsed; committed digest must
   equal `ots_digest`, or `sha256` for a legacy (`ots_digest` NULL) row; any other outcome
   (mismatch/unreadable/absent source) touches nothing and warns naming the row, digests, and
   `.superseded/` recovery. The sweep writes `ots_path` and nothing else, ever.
-- [ ] 3.3 Defer-if-referenced (design D4 rule 1): one bounded query for another row recording
+- [x] 3.3 Defer-if-referenced (design D4 rule 1): one bounded query for another row recording
   the destination as its `ots_path`; on hit, defer with the old pointer kept. Cycle breaking:
   when a full pass makes no progress and reference-rule-deferred rows remain, relocate ONE
   such member's proof — eligible only if corroboration passed and no permanent destination
   refusal; never a row any other rule refuses — to the durable holding slot
   (`<store>/.relocating/<row_id>.ots`), commit that truthful pointer, continue; the held
   proof converges on a later iteration/sweep.
-- [ ] 3.4 Pointer commit is a fenced compare-and-set: guarded UPDATE on
+- [x] 3.4 Pointer commit is a fenced compare-and-set: guarded UPDATE on
   (`relpath`, `ots_path`, `ots_digest` where recorded) + run-still-live; zero rows → roll
   back, claim-lost, stop (published destination copy stays inert). A datastore failure at the
   commit follows the operation's normal error handling (rollback + run finalization), never a
   per-row skip on a broken session.
-- [ ] 3.4b The restore leg (design D4b): admission also selects rows whose recorded
+- [x] 3.4b The restore leg (design D4b): admission also selects rows whose recorded
   `ots_path` entry is absent on disk; a corroborated superseded-archive copy is republished
   at the recorded path (durability chain, "restored" warning); no corroborated copy → loud
   warning, nothing changed. Tests: the phase-5 crash shape (pointer canonical, entry absent,
   archive copy present) repairs on the next sweep; absent with no corroborated copy warns
   every sweep and never writes.
-- [ ] 3.5 Independent admission + typed-run totals (MODIFIED requirement): stale-pointer
+- [x] 3.5 Independent admission + typed-run totals (MODIFIED requirement): stale-pointer
   existence OR an absent recorded proof entry alone claims the collection and creates the
   `kind='upgrade'` run (tripwire included); `total` = one work item per operation (one per
   incomplete + one per stale row + one per absent-entry row; a row receiving several
@@ -92,7 +92,7 @@
   Wire both entry points: the scheduler's daily pass and `cairn upgrade`. Lease discipline:
   claim heartbeat, per-collection proof flock around each relocation, claim re-confirmed
   after lock acquisition, lock held across all phases.
-- [ ] 3.6 Tests: a pre-existing moved row (live-deployment shape) heals in one sweep with only
+- [x] 3.6 Tests: a pre-existing moved row (live-deployment shape) heals in one sweep with only
   `ots_path` changed; crash-window fixtures (both-exist → completes; pointer-committed +
   leftover source → leftover untouched and never re-selected); chain A→B + C→A converges over
   two sweeps with no cross-row interference; cycle A→B + B→A defers safely; misfiled pointer
@@ -105,7 +105,7 @@
 
 ## 4. Verification
 
-- [ ] 4.1 Full test suite green (`.venv/bin/pytest -q`).
-- [ ] 4.2 `openspec validate relocate-proofs-on-move --strict` passes.
-- [ ] 4.3 Grep checks: no call site assembles a proof path by string concatenation; scans
+- [x] 4.1 Full test suite green (`.venv/bin/pytest -q`).
+- [x] 4.2 `openspec validate relocate-proofs-on-move --strict` passes.
+- [x] 4.3 Grep checks: no call site assembles a proof path by string concatenation; scans
   contain no proof-store mutation; the relocation primitive is reachable only from the sweep.
