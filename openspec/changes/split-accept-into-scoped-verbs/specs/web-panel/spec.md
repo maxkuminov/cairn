@@ -169,6 +169,17 @@ derived from that same snapshot rather than from an earlier count, so that a con
 committed between the two reads cannot leave the page reporting a healthy "all clear" for a
 collection it has just emptied.
 
+Any **count the action itself states** — a button label, and in particular a confirmation that names
+how many files the submit will change — SHALL be derived from that same snapshot, never from an
+earlier count query. This applies to the collection-detail baseline action as much as to the review
+view's scoped ones: a page that counts the not-yet-baselined files in one statement and mints the
+fingerprint in another lets a file committed between them be hashed without being counted, so the
+operator confirms a number smaller than the set the form authorizes and an unchanged submit
+baselines a file the confirmation never named. The number displayed, the population hashed and the
+population eventually mutated SHALL be the same one. Counts the page uses for **pure display**
+elsewhere — status tiles, totals, the file browser — are not claims the action makes and MAY come
+from separate reads.
+
 That single-read derivation SHALL hold for a row **re-rendered on its own** as well as for a whole
 page. Where marking a file reviewed swaps that row back in with its accept control, the state the
 row **displays** — its file status, and therefore the verb its control names — its open-event state
@@ -272,6 +283,19 @@ one.
   files not yet baselined
 - **THEN** the page MAY offer a baseline action, which SHALL require a confirmation before
   submitting
+
+#### Scenario: The baseline confirmation names the population its fingerprint covers
+
+- **WHEN** the collection-detail page is rendered for a collection whose only non-baselined files are
+  new, and a scan commits a further new file **between** the count that decides to offer the action
+  and the read the fingerprint is minted from
+- **THEN** the confirmation SHALL name the number of files in the snapshot the fingerprint was minted
+  from — including the file that landed in that window — and submitting the form unchanged SHALL
+  baseline exactly the files the confirmation named, so the displayed count, the hashed population
+  and the mutation cannot disagree
+- **AND WHEN** the further new file instead lands **after** that read, the confirmation SHALL name
+  only the files that read saw, and the submission SHALL be refused rather than silently baselining
+  the newcomer as well
 
 #### Scenario: The baseline action is withheld while an alert is unread
 

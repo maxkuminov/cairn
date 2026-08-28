@@ -43,7 +43,9 @@
          The confirm is deliberately LIGHT — this promotes `new` → `ok`, deletes nothing and rewrites
          no baseline; a heavy warning here trains the operator to click through the heavy warning on
          the destructive one. `population_fp` binds the submit to the population this page was
-         rendered for (design D14); the route fails closed without it. #}
+         rendered for (design D14); the route fails closed without it. `c.counts.new` is that same
+         population's size in this state — the route overwrites it from the snapshot it hashed — so
+         the number the operator confirms is the number the fingerprint authorizes. #}
       <form method="post" action="/collection/{{ c.id }}/accept" style="display:inline"
             onsubmit="return confirm('Baseline {{ c.counts.new }} new file{{ '' if c.counts.new == 1 else 's' }} as the expected version?');">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />

@@ -224,3 +224,23 @@ Standing guardrails for both slices:
 - [x] 4.2 Verifier concern 1: the baseline button now carries the required kept-vs-lost hint
   (title attribute with the #16 copy verbatim) on `collection_detail.html`; asserted in
   `tests/test_ux_review.py::test_the_baseline_button_states_what_it_keeps_and_loses`.
+
+- [x] 4.3 **BLOCKER (adversarial Codex, `routes.py:929`) — the detail page's baseline confirmation
+  and its fingerprint came from two different snapshots.** `collection_detail` read
+  `cview["counts"]["new"]` (from `_collection_view`'s earlier count query) to render the confirm
+  "Baseline N new file(s)…", while `population_fp` was minted from a later
+  `_read_population("baseline-new")`. A scan committing a second `new` file between the two was
+  invisible to the count and visible to the mint, so the operator confirmed *one* file while the
+  form validly authorized *both*, and an unchanged submit baselined a file the confirmation never
+  named — the render-time lie this change exists to remove, in the one claim the action makes.
+  The gate already derived from the population read; now the displayed count does too:
+  when `show_baseline` holds, `cview["counts"]["new"]` is overwritten (on a copy) with
+  `len(baseline.files)` from that same read — the same pattern `collection_review` uses for its
+  button labels and legend. The confirm string on `collection_detail.html:48` is the only
+  expression re-pointed (nothing else on that page reads `counts.new`); the tiles stay pure display
+  off `cview`. Web-panel delta: the single-read requirement gains the count-agreement clause plus
+  the "The baseline confirmation names the population its fingerprint covers" scenario.
+  Deterministic interleaving regressions in `tests/test_ux_dashboard.py`
+  (`test_the_baseline_confirm_names_the_population_its_fingerprint_covers` — drift **before** the
+  population read, verified to fail on the pre-fix route; and its inverse
+  `test_a_new_file_landing_after_the_baseline_read_is_refused_at_submit`).

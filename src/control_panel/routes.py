@@ -923,7 +923,9 @@ async def collection_detail(
     # reading the population at all, so an ordinary detail render of a large collection never
     # materializes its `new` set. The gate that actually decides to render the form, and the
     # fingerprint that form carries, both come from the SAME single-statement read: publishing a
-    # form for one snapshot while hashing another is the whole failure mode D14 guards against.
+    # form for one snapshot while hashing another is the whole failure mode D14 guards against —
+    # and so does the count its confirm names (below), so the form cannot state a number its own
+    # fingerprint does not cover.
     show_baseline = False
     population_fp = ""
     if cview["issues"] == 0 and cview["open_events"] == 0 and cview["counts"]["new"] > 0:
@@ -937,6 +939,16 @@ async def collection_detail(
         )
         if show_baseline:
             population_fp = _population_fingerprint(collection, baseline)
+            # ...and so does the number the confirm names, exactly as the review page takes its
+            # button labels from its own read. `cview`'s `new` count is an EARLIER, separate
+            # statement: a scan committing a second `new` file between the two left the operator
+            # confirming "Baseline 1 new file" while the fingerprint beside it covered both — an
+            # unchanged submit then validated and baselined a file the confirmation never named.
+            # The claim the ACTION makes is displayed and hashed from one read (copy first: the
+            # dict is `_collection_counts`' own). The tiles around it stay pure display off
+            # `cview`, and none of them reads `counts.new`.
+            cview["counts"] = dict(cview["counts"])
+            cview["counts"]["new"] = len(baseline.files)
     ctx = await _base_context(request, session, user, "collection")
     ctx.update(
         {

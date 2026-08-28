@@ -1640,6 +1640,86 @@ def test_an_acknowledged_row_that_left_the_population_carries_no_accept_control(
 
     assert _aside(lambda s: _statuses(s, 1)) == [("ok", "gone")]
 
+
+def test_the_baseline_confirm_names_the_population_its_fingerprint_covers(cairn_env, monkeypatch):
+    """The count in the confirm, the hashed population and the mutation are one snapshot.
+
+    The mint/render split this pins: `_collection_view` counts the `new` files in one statement and
+    `_read_population` mints the fingerprint in a later one. A scan committing a second `new` file
+    in that window was invisible to the first and visible to the second, so the page asked the
+    operator to confirm "Baseline 1 new file" while the form beside it validly authorized both —
+    submitting unchanged baselined a file the confirmation never named. All three now agree.
+    """
+    root = cairn_env / "confirmcount"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [("first", "new", "complete")]))
+
+    async def a_second_new_file_lands(s):
+        await _mk_files(s, 1, [("second", "new", "complete")])
+
+    with _make_client(cairn_env, seed) as client:
+        # The drift lands INSIDE the window: after `_collection_view`'s count, before the read the
+        # fingerprint is minted from.
+        seen = _drift_before_the_population_read(monkeypatch, a_second_new_file_lands)
+        with _capture_context() as captured:
+            body = client.get("/collection/1").text
+
+        assert seen == ["baseline-new"]  # one read, and it is the one that gated the form
+        ctx = [c for name, c in captured if name == "collection_detail.html"][0]
+        assert ctx["show_baseline"] is True
+        # The rendered claim: the confirm names TWO files, not the one the earlier count saw.
+        assert ctx["c"]["counts"]["new"] == 2
+        assert "Baseline 2 new files as the expected version?" in body
+        # ...and the fingerprint it carries is the one over that same two-file population.
+        assert ctx["population_fp"] == _fp_for("baseline-new")
+        assert f'name="population_fp" value="{ctx["population_fp"]}"' in body
+
+        # Nothing drifted after the read, so the submit is current and performs what was named.
+        _assert_performed(
+            _post(client, "/collection/1/accept", ctx["population_fp"], _csrf(client)),
+            "baseline-new",
+        )
+
+    # The mutation agrees with both: two files baselined, exactly the two the confirm counted.
+    assert _aside(lambda s: _statuses(s, 1)) == [("ok", "first"), ("ok", "second")]
+
+
+def test_a_new_file_landing_after_the_baseline_read_is_refused_at_submit(cairn_env, monkeypatch):
+    """The inverse window: drift the page could not have shown is caught by the guard, not absorbed.
+
+    A `new` file committed AFTER the mint is outside both the confirm's count and the fingerprint,
+    so the page stays honest about what it named — and the POST's own read, which sees the newcomer,
+    refuses the stale form rather than quietly baselining it too.
+    """
+    root = cairn_env / "confirmcountafter"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [("first", "new", "complete")]))
+
+    async def a_second_new_file_lands(s):
+        await _mk_files(s, 1, [("second", "new", "complete")])
+
+    with _make_client(cairn_env, seed) as client:
+        _drift_after_the_population_read(monkeypatch, a_second_new_file_lands)
+        with _capture_context() as captured:
+            body = client.get("/collection/1").text
+
+        ctx = [c for name, c in captured if name == "collection_detail.html"][0]
+        assert ctx["show_baseline"] is True
+        # Rendered count and hash still describe the same (one-file) snapshot...
+        assert ctx["c"]["counts"]["new"] == 1
+        assert "Baseline 1 new file as the expected version?" in body
+        # ...which is no longer current, so the guard refuses instead of widening the mutation.
+        _assert_refused(_post(client, "/collection/1/accept", ctx["population_fp"], _csrf(client)))
+
+    assert _aside(lambda s: _statuses(s, 1)) == [("new", "first"), ("new", "second")]
+
+
 # --- #21 coverage completion: a changed restore is never "All clear" --------------------------
 
 
