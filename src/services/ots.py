@@ -134,6 +134,25 @@ class VerifyResult:
     existed_by: str | None = None  # "existed by" UTC/local date string from the CLI
     calendars: list[str] = field(default_factory=list)
     message: str = ""
+    # Why verification did not succeed. Reason and blame are separate signals, so they are
+    # separate fields with separate copy (design D1/D2). Defaults keep every existing
+    # construction site valid.
+    digest_mismatch: bool = False  # live digest != the digest the proof commits to  (explorer)
+    proof_mismatch: bool = False  # attestation commitment != block merkle root      (explorer)
+    transport_error: str | None = None  # backend unreachable; nothing was established
+    inconclusive: bool = False  # this backend cannot tell pending/mismatch/unreachable apart
+
+
+def failed_lookup_count(transport_error: str | None) -> int:
+    """How many attestation lookups the joined ``transport_error`` reports (0 when unset).
+
+    ``_verify_via_explorer`` joins its fetch failures with ``"; "``; both consumers of
+    :class:`VerifyResult` (the panel card and ``cairn verify``) disclose the count under a verdict
+    that outranks the transport failure, so the split lives here rather than in each of them.
+    """
+    if not transport_error:
+        return 0
+    return len([part for part in transport_error.split("; ") if part.strip()])
 
 
 def _run_ots(args: list[str], timeout: int = DEFAULT_TIMEOUT) -> tuple[int, str, str]:
@@ -504,7 +523,19 @@ def _verify_via_cli(
         # `--bitcoin-node` is a global option, so it must precede the `verify` subcommand.
         args += ["--bitcoin-node", node_rpc_url]
     args += ["verify", "-d", digest, str(ots_path)]
-    rc, out, err = _run_ots(args, timeout=timeout)
+    try:
+        rc, out, err = _run_ots(args, timeout=timeout)
+    except OtsError as exc:
+        # Missing binary / timeout: nothing was established about the file. Report it as transport
+        # rather than letting it propagate into the caller's `except OtsError`, which historically
+        # rebuilt a result carrying the proof's own state and so read as "pending confirmation".
+        return VerifyResult(
+            verified=False,
+            state="none",
+            calendars=proof.calendars,
+            transport_error=str(exc),
+            message=str(exc),
+        )
     combined = f"{out}\n{err}"
     match = _VERIFY_SUCCESS_RE.search(combined)
     if match:
@@ -516,12 +547,19 @@ def _verify_via_cli(
             calendars=proof.calendars,
             message=combined.strip(),
         )
-    # No success line: either still pending (valid, just not verifiable yet) or a real failure.
+    # No success line. `ots verify -d` reports an unanchored proof, a changed file and a dead
+    # Bitcoin node identically, so this backend cannot say which happened: `inconclusive`, never a
+    # guessed mismatch and never the old reassuring "pending" (design D1). Deliberately asymmetric
+    # with `_verify_via_explorer`, which parses the proof locally and therefore *knows* whether the
+    # digest matched and whether each attestation checks out — it sets the two mismatch flags
+    # because it establishes them; classifying this exit by regexing the CLI's wording would be a
+    # guess, and a false mismatch is a false alarm on the product's core signal.
     return VerifyResult(
         verified=False,
         state=proof.state,
         block_height=proof.block_height,
         calendars=proof.calendars,
+        inconclusive=True,
         message=combined.strip(),
     )
 
@@ -537,9 +575,12 @@ def _verify_via_explorer(
     Parses the ``.ots`` with the OpenTimestamps library, checks the supplied ``digest`` is the file
     hash the proof commits to, then for each ``BitcoinBlockHeaderAttestation`` fetches the real
     block at that height and confirms the attestation's commitment equals the block's merkle root.
-    The earliest confirmed block time is the "existed by" date. A merkle mismatch means the file or
-    proof was altered (not-verified); an unreachable explorer is reported as not-verified with the
-    network error (never a false "verified").
+    The earliest confirmed block time is the "existed by" date. A digest mismatch sets
+    ``digest_mismatch`` (the *file* changed); a merkle mismatch with no validated attestation sets
+    ``proof_mismatch`` (the proof or the explorer's block data is wrong — not evidence about the
+    file); every fetch failure is accumulated into ``transport_error`` and attached to whichever
+    terminal result is returned, so an unreachable explorer is never a false "verified" and never a
+    silent one either.
     """
     # Imported lazily so the module stays importable (and the node path / tests stay network-free)
     # without the OpenTimestamps library present.
@@ -579,6 +620,7 @@ def _verify_via_explorer(
             verified=False,
             state=state,
             calendars=pending,
+            digest_mismatch=True,
             message="file digest does not match the stamped proof (file changed since stamping)",
         )
 
@@ -607,32 +649,52 @@ def _verify_via_explorer(
         else:
             mismatch = True
 
-    if mismatch:
+    # Computed once, before any return, and passed to all three terminal results below: a fetch
+    # failure is never dropped because another outcome was decided first, and a later edit cannot
+    # reintroduce a return that silently discards it (design D2).
+    transport_error = "; ".join(errors) or None
+
+    # A validated attestation wins. OTS verification is *existential* — one attestation confirmed
+    # against its real block IS the proof, and a proof may legitimately carry several. So a
+    # mismatched sibling is diagnostic detail in `message`, never a verdict; testing `mismatch`
+    # first (as this did) renders a red "this proof does not check out" over a genuinely anchored
+    # proof, a false alarm on the core signal.
+    if best is not None:
+        block_time, height = best
+        existed_by = datetime.datetime.fromtimestamp(
+            block_time, datetime.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M UTC")
+        message = f"Bitcoin block {height} attests existence as of {existed_by}"
+        if mismatch:
+            message += " (a sibling attestation did not match its block's merkle root)"
         return VerifyResult(
-            verified=False,
+            verified=True,
             state="complete",
+            block_height=height,
+            existed_by=existed_by,
             calendars=pending,
-            message="Bitcoin merkle root does not match the proof — the file or proof may be altered",
-        )
-    if best is None:
-        return VerifyResult(
-            verified=False,
-            state="complete",
-            calendars=pending,
-            message="; ".join(errors) or "could not reach the block explorer",
+            transport_error=transport_error,
+            message=message,
         )
 
-    block_time, height = best
-    existed_by = datetime.datetime.fromtimestamp(
-        block_time, datetime.timezone.utc
-    ).strftime("%Y-%m-%d %H:%M UTC")
+    if mismatch:
+        # No attestation validated and at least one mismatched. The live digest matched (checked
+        # above), so this blames the proof or the explorer's block data — never the file.
+        return VerifyResult(
+            verified=False,
+            state="complete",
+            calendars=pending,
+            proof_mismatch=True,
+            transport_error=transport_error,
+            message="Bitcoin merkle root does not match the proof — the proof or the explorer's block data may be wrong (this is not evidence the file changed)",
+        )
+
     return VerifyResult(
-        verified=True,
+        verified=False,
         state="complete",
-        block_height=height,
-        existed_by=existed_by,
         calendars=pending,
-        message=f"Bitcoin block {height} attests existence as of {existed_by}",
+        transport_error=transport_error,
+        message=transport_error or "could not reach the block explorer",
     )
 
 

@@ -137,8 +137,8 @@
 {% macro ots_badge(state, size="md") -%}
 {%- set meta = {
   "complete": ("Anchored", "ok", "bitcoin"),
-  "pending": ("Pending", "warn", "clock"),
-  "incomplete": ("Incomplete", "warn", "clock"),
+  "pending": ("Queued to stamp", "warn", "clock"),
+  "incomplete": ("Pending confirmation", "warn", "clock"),
   "none": ("Not stamped", "muted", "minusCircle"),
 }.get(state, ("Not stamped", "muted", "minusCircle")) -%}
 <span class="pill pill--soft pill--{{ meta[1] }}{% if size == 'sm' %} pill--sm{% endif %}">{{ icon(meta[2], size=11.5 if size == 'sm' else 12.5, stroke=2) }}{{ meta[0] }}</span>

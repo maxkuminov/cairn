@@ -892,3 +892,14 @@
 .mini-stat--link { display: block; text-decoration: none; color: inherit; transition: border-color 0.14s, box-shadow 0.14s; }
 .mini-stat--link:hover { border-color: var(--danger); box-shadow: var(--shadow-lg); }
 .mini-stat__cta { color: var(--danger); font-weight: 600; white-space: nowrap; }
+
+/* --- ux-audit sprint 1: verify (slice A) --- */
+/* A fourth, neutral verdict style for outcomes where Cairn established nothing: an unreachable
+   explorer/node is not evidence against the file, and red for a network blip either panics the
+   operator or teaches them to dismiss the red card that means a real mismatch. Mirrors
+   `.verdict--warn`'s three rules in the muted `--text-3` palette. */
+.verdict--unavailable { background: var(--surface-2); border: 1px solid var(--border); }
+.verdict--unavailable .verdict__badge { background: var(--text-3); }
+.verdict--unavailable .verdict__title { color: var(--text-2); }
+/* Diagnostic sub-line under a verdict that outranks a recorded transport failure. */
+.verdict__note { font-size: 12.5px; color: var(--text-3); margin-top: 5px; line-height: 1.45; }

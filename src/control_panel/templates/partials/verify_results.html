@@ -12,12 +12,16 @@
           <div class="verify-row__name">{{ f.filename }}</div>
           <div class="verify-row__meta mono">{{ f.collection }} · {{ f.relpath }}</div>
         </div>
-        {{ m.ots_badge("complete", "sm") }}
+        {{ m.ots_badge(f.state, "sm") }}
         {{ m.icon("chevronR", size=15, cls="text-3") }}
       </button>
     {% endfor %}
-    {% if q and not results %}
-      <div class="empty-state" style="border-top:1px solid var(--border)">No anchored files match “{{ q }}”.</div>
+    {% if not results %}
+      {% if q %}
+        <div class="empty-state" style="border-top:1px solid var(--border)">No anchored files match “{{ q }}”.</div>
+      {% else %}
+        <div class="empty-state" style="border-top:1px solid var(--border)">No files have been anchored yet. Stamp a per-file-notarized collection (its <strong>Stamp all</strong> button) and its proofs will appear here once submitted.</div>
+      {% endif %}
     {% endif %}
   </div>
 </div>

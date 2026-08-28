@@ -32,14 +32,14 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
 `templates/partials/verify_result.html`, an **appended** `/* --- ux-audit sprint 1: verdict --- */`
 `panel.css` section, `tests/test_ots.py`, new `tests/test_ux_verify.py`.
 
-- [ ] 2.1 `src/services/ots.py`: add four optional fields to `VerifyResult` (design D2) —
+- [x] 2.1 `src/services/ots.py`: add four optional fields to `VerifyResult` (design D2) —
   `digest_mismatch: bool = False`, `proof_mismatch: bool = False`,
   `transport_error: str | None = None`, `inconclusive: bool = False`. Defaults keep every existing
   construction site valid.
-- [ ] 2.2 `_verify_via_explorer`: set `digest_mismatch=True` on the `want != detached.file_digest`
+- [x] 2.2 `_verify_via_explorer`: set `digest_mismatch=True` on the `want != detached.file_digest`
   return only. That site — and only that site — establishes that the file's bytes are not the ones
   the proof commits to.
-- [ ] 2.3 `_verify_via_explorer`: **reorder the aggregation so a validated attestation wins**, then
+- [x] 2.3 `_verify_via_explorer`: **reorder the aggregation so a validated attestation wins**, then
   set `proof_mismatch=True` (**not** `digest_mismatch`) on the merkle-root failure. OTS verification
   is existential — one attestation confirmed against its real block *is* proof — so the
   `best is not None` verified return must come **before** the `if mismatch:` branch, and
@@ -49,7 +49,7 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   A mismatched sibling on a verified result is kept as **diagnostic detail in `message`** only. On
   the `proof_mismatch` return the live digest matched, so the copy blames the proof or the explorer's
   block data, never the file (design D1); leave `state` as it is.
-- [ ] 2.4 `_verify_via_explorer`: accumulate every `_fetch_block_merkleroot` failure and attach the
+- [x] 2.4 `_verify_via_explorer`: accumulate every `_fetch_block_merkleroot` failure and attach the
   joined reasons as `transport_error` to **every** terminal result returned after the fetch loop —
   the verified one, the `proof_mismatch` one and the `best is None` one alike. One shared
   `transport_error = "; ".join(errors) or None` computed once after the loop, passed to all three
@@ -59,14 +59,14 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   of the one attestation that could be fetched, with no hint that the others were not. A recorded
   `transport_error` never downgrades a verified result and never outranks a mismatch (2.6's order);
   on those it is diagnostic detail.
-- [ ] 2.5 `_verify_via_cli`: wrap the `_run_ots` call so an `OtsError` (missing binary, timeout)
+- [x] 2.5 `_verify_via_cli`: wrap the `_run_ots` call so an `OtsError` (missing binary, timeout)
   returns `VerifyResult(verified=False, state="none", transport_error=str(exc))` instead of
   propagating; and set `inconclusive=True` on the existing non-success-exit return. Do **not** parse
   stderr for a mismatch **or for a transport failure** — `ots verify -d` reports a mismatch, an
   unanchored proof and a dead node identically, and classifying by regexing its wording is a guess
   either way (design D1). The ambiguity is carried in the *copy* (2.9), not resolved by a pattern
   match. Comment the asymmetry with the explorer path so it is not read as an oversight.
-- [ ] 2.6 `routes.py::verify_run`: replace the verdict chain with design D2's order —
+- [x] 2.6 `routes.py::verify_run`: replace the verdict chain with design D2's order —
   `live_unavailable` → `digest_mismatch` (`danger`, "File no longer matches its proof") →
   `result.verified` (`ok`) → `proof_mismatch` (`danger`, "This proof does not check out") →
   `transport_error` (`unavailable`, "Couldn't check right now") → `inconclusive` (`unavailable`,
@@ -78,17 +78,17 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   `incomplete` and `pending` are two branches, not one (design D13). Pass the reason flags into the
   template context — **`transport_error` included on every branch**, not only the branch it wins, so
   2.9 can disclose it under a verdict that outranks it.
-- [ ] 2.7 `routes.py::verify_run`: the `except ots_svc.OtsError` fallback stops passing
+- [x] 2.7 `routes.py::verify_run`: the `except ots_svc.OtsError` fallback stops passing
   `state=fe.ots_state` — construct
   `VerifyResult(verified=False, state="none", transport_error=str(exc))` so it lands on the same
   neutral branch as a returned transport failure. It is now a net, not the primary path: 2.4/2.5
   moved the common cases onto the result object, because `verify` mostly *returns* an unreachable
   backend rather than raising (design D2's swallow-point table).
-- [ ] 2.8 `partials/verify_result.html` + `panel.css`: add the fourth verdict style
+- [x] 2.8 `partials/verify_result.html` + `panel.css`: add the fourth verdict style
   `verdict--unavailable` (four rules mirroring `--warn` but in the muted `--text-3` palette, not
   red — design D2's supervisor override) and its icon branch. **No transport or inconclusive
   outcome may render `danger`.**
-- [ ] 2.9 `partials/verify_result.html`: add the sub-copy branches, one per reason, none of them
+- [x] 2.9 `partials/verify_result.html`: add the sub-copy branches, one per reason, none of them
   reusing another's wording — digest mismatch: the bytes changed since stamping and the proof still
   attests the *earlier* bytes; **proof mismatch: the proof's chain attestation does not check out,
   the proof may be corrupt, and this is not evidence the file changed**; transport: Cairn could not
@@ -106,7 +106,7 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   attestations that could be reached. It is a muted sub-line, never a second verdict style and never
   a downgrade of the headline. Without it, precedence turns into concealment: the operator reads a
   categorical "this proof does not check out" over a proof half of which was never fetched.
-- [ ] 2.10 `src/cli.py::_cmd_verify`: branch in the same order as 2.6 — `digest_mismatch`, then
+- [x] 2.10 `src/cli.py::_cmd_verify`: branch in the same order as 2.6 — `digest_mismatch`, then
   `result.verified`, then `proof_mismatch`, `transport_error`, `inconclusive`, all **before** the
   lifecycle lines, each printing its own reason and returning non-zero. Today the CLI prints
   "pending (proof not yet anchored to Bitcoin)" for a changed file whose proof is incomplete — the
@@ -118,18 +118,18 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   `proof_mismatch` verdict, print it as an extra line after the verdict line ("N attestation lookups
   failed; the verdict is based on the attestations reached", qualifying the mismatch on the mismatch
   branch). That line never changes the exit status the verdict already sets.
-- [ ] 2.11 `partials/verify_results.html:15`: `{{ m.ots_badge(f.state, "sm") }}` — `f.state` is
+- [x] 2.11 `partials/verify_results.html:15`: `{{ m.ots_badge(f.state, "sm") }}` — `f.state` is
   already supplied by `_anchored_view`; confirm it renders for both `incomplete` and `complete` rows.
-- [ ] 2.12 `_macros.html:141`: in `ots_badge`, `incomplete` → **"Pending confirmation"** and
+- [x] 2.12 `_macros.html:141`: in `ots_badge`, `incomplete` → **"Pending confirmation"** and
   `pending` → **"Queued to stamp"** (design D13). `pending` is queued-but-not-submitted and
   `incomplete` is submitted-awaiting-Bitcoin; naming both "pending" is what let the tiles sum them.
-- [ ] 2.13 `partials/verify_results.html`: branch the empty state on whether `q` is set — a search
+- [x] 2.13 `partials/verify_results.html`: branch the empty state on whether `q` is set — a search
   with no hits keeps today's message; **no search and no results** gets "No files have been anchored
   yet" with a pointer to stamping (#32).
-- [ ] 2.14 `partials/verify_result.html:57`: derive the closing sentence from `verified_via` instead
+- [x] 2.14 `partials/verify_result.html:57`: derive the closing sentence from `verified_via` instead
   of asserting "Verified by explorer lookup" (#34). Keep the portability sentence and the `/learn`
   link untouched.
-- [ ] 2.15 `tests/test_ots.py`: the explorer backend returns `digest_mismatch=True` /
+- [x] 2.15 `tests/test_ots.py`: the explorer backend returns `digest_mismatch=True` /
   `proof_mismatch=False` for a non-matching digest, and `proof_mismatch=True` /
   `digest_mismatch=False` for a matching digest whose **only** attestation's stubbed block reports a
   different merkle root; a matching, complete proof returns all four flags clear. **Mixed
@@ -141,7 +141,7 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   attestation mismatching, the result carries `proof_mismatch=True` *and* `transport_error`** — the
   swallowed fetch error survives the mismatch return. The node backend returns `inconclusive=True` on
   a stubbed non-success exit and `transport_error` when the binary cannot be run.
-- [ ] 2.16 `tests/test_ux_verify.py` (new): **the #13 regression tests** — a stamped file whose bytes
+- [x] 2.16 `tests/test_ux_verify.py` (new): **the #13 regression tests** — a stamped file whose bytes
   changed renders neither the string "pending" nor a `warn` verdict, but the mismatch card; a
   merkle-root mismatch renders a card that does **not** claim the file changed; a returned
   `transport_error` and a raised `OtsError` both render "Couldn't check right now" as
@@ -162,7 +162,7 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   language; and a verified-plus-`transport_error` result **and** a
   `proof_mismatch`-plus-`transport_error` result each print the winning verdict *and* the
   failed-lookup line, with the exit status the verdict alone would give.
-- [ ] 2.17 Smoke the external-process boundary without a network: `ots.verify` is exercised with a
+- [x] 2.17 Smoke the external-process boundary without a network: `ots.verify` is exercised with a
   stubbed explorer HTTP layer and a stubbed `_run_ots` only (no live calendar/explorer/node calls in
   the suite).
 
