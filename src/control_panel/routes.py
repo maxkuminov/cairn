@@ -9,6 +9,8 @@ pagination is mandatory server-side (a collection can hold ~186k files).
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -20,7 +22,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, func, select, text, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
@@ -164,6 +167,16 @@ async def _collection_counts(session: AsyncSession, collection_id: int) -> dict[
 
 
 async def _ots_counts(session: AsyncSession, collection_id: int) -> dict[str, int]:
+    """Proof-state tallies for a collection: raw totals plus the *active* (stampable) population.
+
+    The unqualified keys (``none``/``pending``/``incomplete``/``complete``) are raw counts over
+    every row and are for raw display only. Every **coverage claim** must be computed from the
+    ``*_active`` keys, which carry ``status != 'missing'`` — exactly the population
+    ``mark_unstamped_pending`` queues and "Stamp all" acts on. Counting confirmed proofs over all
+    files while dividing by a missing-free denominator is how one missing file with a complete proof
+    reports ``1 / 1`` coverage of a collection where nothing present is confirmed (design D5). By
+    construction ``complete_active + incomplete_active + pending_active + none_active == stampable``.
+    """
     rows = await session.execute(
         select(FileEntry.ots_state, func.count())
         .where(FileEntry.collection_id == collection_id)
@@ -172,7 +185,52 @@ async def _ots_counts(session: AsyncSession, collection_id: int) -> dict[str, in
     out = {"none": 0, "pending": 0, "incomplete": 0, "complete": 0}
     for state, n in rows:
         out[state] = n
+
+    active = await session.execute(
+        select(FileEntry.ots_state, func.count())
+        .where(FileEntry.collection_id == collection_id, FileEntry.status != "missing")
+        .group_by(FileEntry.ots_state)
+    )
+    for key in ("none", "pending", "incomplete", "complete"):
+        out[f"{key}_active"] = 0
+    for state, n in active:
+        out[f"{state}_active"] = n
     return out
+
+
+async def _alert_badge_count(session: AsyncSession, collection_ids: list[int]) -> int:
+    """The sidebar alert badge's number: files that are missing **or** modified (design D3).
+
+    One definition for four render sites (``base.html`` and the three OOB-swap partials), fed by
+    three call sites (``_base_context``, ``_event_feed``, ``ack_event``). The badge used to count
+    ``missing`` only while the dashboard tile beside it counted ``missing + modified``, so the two
+    disagreed; three independent inline queries is how that drifted.
+    """
+    if not collection_ids:
+        return 0
+    n = await session.scalar(
+        select(func.count())
+        .select_from(FileEntry)
+        .where(
+            FileEntry.collection_id.in_(collection_ids),
+            FileEntry.status.in_(("missing", "modified")),
+        )
+    )
+    return int(n or 0)
+
+
+async def _open_event_count(session: AsyncSession, collection_id: int) -> int:
+    """Count of a collection's unacknowledged events — the population ``accept_collection`` clears.
+
+    Used by the collection view (the D7 render gate) and by the D14 fingerprint header, so the gate
+    and the guard can never disagree about what "no open events" means.
+    """
+    n = await session.scalar(
+        select(func.count())
+        .select_from(Event)
+        .where(Event.collection_id == collection_id, Event.acknowledged_at.is_(None))
+    )
+    return int(n or 0)
 
 
 def _collection_status(counts: dict[str, int]) -> str:
@@ -181,6 +239,11 @@ def _collection_status(counts: dict[str, int]) -> str:
     # alarming WORM `modified` raises "attention"; a `missing` file raises "alert". A collection whose
     # only non-ok files are `new` reads "All clear" (a scan never promotes new→ok; baseline via accept
     # to move them into the "Verified OK" count, but it is not required for the collection to be healthy).
+    # A collection with no files at all is not healthy — it is watching nothing. Its `counts` dict
+    # sums to zero exactly in that case, so no extra argument is needed (design D5 / #31). A root
+    # that is a typo or a failed bind mount scans `ok` forever; reporting it green is the failure.
+    if sum(counts.values()) == 0:
+        return "empty"
     if counts["missing"] > 0:
         return "alert"
     if counts["modified"] > 0:
@@ -188,10 +251,15 @@ def _collection_status(counts: dict[str, int]) -> str:
     return "ok"
 
 
+# (label, colour, icon, pill kind). `attention` (WORM modified) keeps the warning triangle;
+# `alert` (missing) uses `minusCircle`, matching every other place a missing file is drawn — the
+# two used to share one icon (design D6). `empty` is muted and explicitly not green (design D5);
+# `folder` is already in the icon set and is not spoken for by another status.
 _STATUS_META = {
     "ok": ("All clear", "var(--ok)", "checkCircle", "ok"),
     "attention": ("Attention", "var(--warn)", "alert", "warn"),
-    "alert": ("Alert", "var(--danger)", "alert", "danger"),
+    "alert": ("Alert", "var(--danger)", "minusCircle", "danger"),
+    "empty": ("No files indexed", "var(--text-3)", "folder", "muted"),
 }
 
 # --- live operation status (scan / stamp / upgrade) -----------------------------------------
@@ -267,6 +335,22 @@ def _launch_operation(collection_id: int, op: OperationFn) -> None:
     task.add_done_callback(_BG_TASKS.discard)
 
 
+def _pending_line(pending_active: int, incomplete_active: int) -> str | None:
+    """Name the two not-yet-confirmed proof states separately; never sum them (design D13).
+
+    ``pending`` = queued locally, not yet submitted to a calendar (a backlog, possibly stuck);
+    ``incomplete`` = submitted, waiting on Bitcoin. Adding them together and calling the total
+    "pending confirmation" reports a file that was never submitted as awaiting confirmation.
+    Whichever half is zero is dropped; both zero returns ``None``.
+    """
+    parts = []
+    if pending_active > 0:
+        parts.append(f"{pending_active:,} queued")
+    if incomplete_active > 0:
+        parts.append(f"{incomplete_active:,} pending confirmation")
+    return " · ".join(parts) if parts else None
+
+
 async def _collection_view(session: AsyncSession, collection: Collection) -> dict[str, Any]:
     counts = await _collection_counts(session, collection.id)
     ots = await _ots_counts(session, collection.id)
@@ -290,6 +374,14 @@ async def _collection_view(session: AsyncSession, collection: Collection) -> dic
     meta = _STATUS_META[status]
     excludes = json.loads(collection.exclude_globs_json or "[]")
     active = await collections_svc.active_run(session, collection.id)
+    # Coverage arithmetic over ONE population: files that could be stamped (design D5).
+    stampable = total_files - counts["missing"]
+    complete_active = ots["complete_active"]
+    # "all confirmed" is a single comparison over the identity in `_ots_counts`, so it cannot drift
+    # out of step with the four counts the way four separate conditions can. `stampable > 0` is what
+    # keeps a zero-file collection from reporting a green completeness claim (#31).
+    all_confirmed = complete_active == stampable and stampable > 0
+    open_events = await _open_event_count(session, collection.id)
     return {
         "id": collection.id,
         "name": collection.name,
@@ -303,6 +395,15 @@ async def _collection_view(session: AsyncSession, collection: Collection) -> dic
         "owner": collection.owner.username if collection.owner else "—",
         "counts": counts,
         "ots_counts": ots,
+        "stampable": stampable,
+        "anchored_ratio": f"{complete_active:,} / {stampable:,}",
+        "all_confirmed": all_confirmed,
+        "not_stamped": ots["none_active"],
+        "pending_line": _pending_line(ots["pending_active"], ots["incomplete_active"]),
+        "is_empty": total_files == 0,
+        # The collection's unacknowledged-event count: the D7 render gate for "Baseline new files"
+        # and (recomputed under the write lock) part of the D14 fingerprint header.
+        "open_events": open_events,
         "file_count": total_files,
         "file_count_h": humanize_count(total_files),
         "size_bytes": int(total_size or 0),
@@ -327,10 +428,8 @@ async def _base_context(
     """Shell context: sidebar collections, alert badge, user block, mode, CSRF token."""
     collections = await collections_svc.list_collections(session, user_id=user.id)
     sidebar = []
-    total_missing = 0
     for c in collections:
         counts = await _collection_counts(session, c.id)
-        total_missing += counts["missing"]
         status = _collection_status(counts)
         sidebar.append(
             {
@@ -351,7 +450,7 @@ async def _base_context(
         "is_admin": user.is_admin,
         "user_email": f"{user.username}@localhost",
         "sidebar_collections": sidebar,
-        "alert_count": total_missing,
+        "alert_count": await _alert_badge_count(session, [c.id for c in collections]),
         "csrf_token": generate_csrf_token(request),
     }
 
@@ -416,11 +515,12 @@ async def _event_feed(session: AsyncSession, collection_ids: list[int]) -> dict[
     ``open_events`` (the "need action" pill) and ``alert_count`` (the sidebar badge) are real
     COUNT queries over ALL of the user's events/files, not just the 20 rendered rows, so both stay
     accurate past the feed cap. Auto-acknowledged ``added``/``restored`` events render in the feed
-    but never count toward ``open_events``.
+    but never count toward ``open_events``. The badge comes from :func:`_alert_badge_count` so it
+    counts the same population as the dashboard tile beside it (design D3).
     """
     events: list[Event] = []
     open_events = 0
-    alert_count = 0
+    alert_count = await _alert_badge_count(session, collection_ids)
     if collection_ids:
         events = list(
             await session.scalars(
@@ -435,15 +535,10 @@ async def _event_feed(session: AsyncSession, collection_ids: list[int]) -> dict[
             .select_from(Event)
             .where(Event.collection_id.in_(collection_ids), Event.acknowledged_at.is_(None))
         )
-        alert_count = await session.scalar(
-            select(func.count())
-            .select_from(FileEntry)
-            .where(FileEntry.collection_id.in_(collection_ids), FileEntry.status == "missing")
-        )
     return {
         "events": [await _event_view(session, e) for e in events],
         "open_events": int(open_events or 0),
-        "alert_count": int(alert_count or 0),
+        "alert_count": alert_count,
     }
 
 
@@ -460,10 +555,49 @@ async def dashboard(
     total_size = sum(v["size_bytes"] for v in views)
     total_missing = sum(v["counts"]["missing"] for v in views)
     total_modified = sum(v["counts"]["modified"] for v in views)
-    total_anchored = sum(v["ots_counts"]["complete"] for v in views)
-    total_pending = sum(
-        v["ots_counts"]["pending"] + v["ots_counts"]["incomplete"] for v in views
+    total_new = sum(v["counts"]["new"] for v in views)
+    total_issues = total_missing + total_modified
+
+    # Fleet-wide proof coverage is computed strictly over `perfile` collections — numerator AND
+    # denominator (design D5 / task 3.7). Tripwire collections stamp nothing and their stamp route
+    # refuses them, so folding their files in ships a "not stamped" count no operator action can
+    # clear; dropping them from one half only would restore a false "all confirmed".
+    notarized = [v for v in views if v["ots"] == "perfile"]
+    total_anchored = sum(v["ots_counts"]["complete_active"] for v in notarized)
+    fleet_stampable = sum(v["stampable"] for v in notarized)
+    fleet_none = sum(v["ots_counts"]["none_active"] for v in notarized)
+    fleet_pending_line = _pending_line(
+        sum(v["ots_counts"]["pending_active"] for v in notarized),
+        sum(v["ots_counts"]["incomplete_active"] for v in notarized),
     )
+    scope_note = (
+        f"across {len(notarized)} notarized collection"
+        f"{'' if len(notarized) == 1 else 's'}"
+    )
+    if not notarized:
+        anchored_sub = "no notarized collections"
+    elif fleet_stampable == 0:
+        anchored_sub = f"No files indexed yet · {scope_note}"
+    elif total_anchored == fleet_stampable:
+        anchored_sub = f"all confirmed · {scope_note}"
+    else:
+        parts = [f"{total_anchored:,} / {fleet_stampable:,} confirmed"]
+        if fleet_pending_line:
+            parts.append(fleet_pending_line)
+        if fleet_none > 0:
+            parts.append(f"{fleet_none:,} not stamped")
+        parts.append(scope_note)
+        anchored_sub = " · ".join(parts)
+
+    # The biggest, reddest number on the panel used to be an inert <div> (#18). It becomes a link to
+    # the page that can act on it: exactly one affected collection -> that collection's review page;
+    # several -> the collections list. NEVER `/review` — it is a 404 until #27 (design D4).
+    affected = [v for v in views if v["issues"] > 0]
+    issues_href = None
+    if total_issues > 0:
+        issues_href = (
+            f"/collection/{affected[0]['id']}/review" if len(affected) == 1 else "/collections"
+        )
 
     collection_ids = [c.id for c in collections]
     feed = await _event_feed(session, collection_ids)
@@ -496,16 +630,14 @@ async def dashboard(
             "tiles": {
                 "files": humanize_count(total_files),
                 "files_sub": f"{len(views)} collections · {humanize_size(total_size)}",
-                "issues": total_missing + total_modified,
+                "issues": total_issues,
                 "issues_sub": f"{total_missing} missing · {total_modified} modified",
-                "issues_color": "var(--danger)"
-                if (total_missing + total_modified) > 0
-                else "var(--ok)",
+                "issues_color": "var(--danger)" if total_issues > 0 else "var(--ok)",
+                "issues_href": issues_href,
+                "new": total_new,
+                "new_sub": "watched, not yet baselined",
                 "anchored": humanize_count(total_anchored),
-                "anchored_sub": (
-                    f"{total_pending} pending confirmation"
-                    if total_pending else "all confirmed"
-                ),
+                "anchored_sub": anchored_sub,
                 "last_activity": humanize_delta(last_run.finished) if last_run else "—",
                 "last_activity_sub": last_activity_sub,
             },
@@ -537,17 +669,12 @@ async def ack_event(
     collections = await collections_svc.list_collections(session, user_id=user.id)
     collection_ids = [c.id for c in collections]
     open_events = 0
-    total_missing = 0
+    alert_count = await _alert_badge_count(session, collection_ids)
     if collection_ids:
         open_events = await session.scalar(
             select(func.count())
             .select_from(Event)
             .where(Event.collection_id.in_(collection_ids), Event.acknowledged_at.is_(None))
-        )
-        total_missing = await session.scalar(
-            select(func.count())
-            .select_from(FileEntry)
-            .where(FileEntry.collection_id.in_(collection_ids), FileEntry.status == "missing")
         )
 
     if view == "review":
@@ -566,7 +693,7 @@ async def ack_event(
             {
                 "it": item,
                 "review_open": int(review_open or 0),
-                "alert_count": int(total_missing or 0),
+                "alert_count": alert_count,
             },
         )
 
@@ -574,7 +701,7 @@ async def ack_event(
     return templates.TemplateResponse(
         request,
         "partials/event_ack.html",
-        {"e": view_ctx, "open_events": int(open_events or 0), "alert_count": int(total_missing or 0)},
+        {"e": view_ctx, "open_events": int(open_events or 0), "alert_count": alert_count},
     )
 
 
@@ -697,18 +824,38 @@ async def validate_root(request: Request, path: str = Query("")):
     )
 
 
+VIEW_MODES = ("tree", "list")
+FILE_FILTERS = ("all", "issues", "new", "ok")
+
+
 @router.get("/collection/{collection_id}", response_class=HTMLResponse)
 async def collection_detail(
     collection_id: int,
     request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
+    view: str | None = Query(None),
+    filter: str = Query("all"),
 ):
+    """Collection detail. ``view`` / ``filter`` are optional deep-link parameters (design D11).
+
+    Both are whitelist-validated and both default to today's render. ``filter`` is threaded into the
+    **initial list-view** query — a checked "Issues" radio over an unfiltered list is worse than no
+    radio at all — while the tree query stays unfiltered (filtering a directory listing would make
+    folder counts disagree with the rows beneath them). Because of that, a non-``all`` filter with no
+    explicit ``view`` implies the list view; an explicit ``view=tree`` is honoured as given.
+    """
     collection = await _get_owned_collection(session, collection_id, user)
-    view = await _collection_view(session, collection)
+    status_filter = filter if filter in FILE_FILTERS else "all"
+    if view in VIEW_MODES:
+        view_mode = view
+    else:
+        view_mode = "list" if status_filter != "all" else "tree"
+    cview = await _collection_view(session, collection)
     rows, total = await collections_svc.query_files(
         session,
         collection_id,
+        status_filter=status_filter,
         page=0,
         page_size=PAGE_SIZE,
         sort=collections_svc.DEFAULT_SORT,
@@ -725,15 +872,26 @@ async def collection_detail(
         sort=collections_svc.DEFAULT_SORT,
         direction=collections_svc.DEFAULT_DIRECTION,
     )
+    # The D14 hidden field is minted only in the one state that renders the baseline form (D7), so
+    # an ordinary detail render of a large collection never materializes its `new` set.
+    show_baseline = (
+        cview["issues"] == 0 and cview["open_events"] == 0 and cview["counts"]["new"] > 0
+    )
+    population_fp = (
+        await _population_fingerprint(session, collection, "baseline-new") if show_baseline else ""
+    )
     ctx = await _base_context(request, session, user, "collection")
     ctx.update(
         {
-            "c": view,
+            "c": cview,
             "files": [_file_view(f) for f in rows],
             "files_total": total,
             "files_shown": len(rows),
             "q": "",
-            "filter": "all",
+            "filter": status_filter,
+            "view": view_mode,
+            "show_baseline": show_baseline,
+            "population_fp": population_fp,
             "page": 0,
             "page_size": PAGE_SIZE,
             "sort": collections_svc.DEFAULT_SORT,
@@ -907,15 +1065,210 @@ async def collection_scan(
     )
 
 
+# --- accept-family population fingerprint (design D14) ---------------------------------------
+# `accept_collection` is one unscoped verb that rewrites baselines, DELETEs `missing` rows and
+# acknowledges every open event on the collection. Both routes that call it render a page first and
+# act at submit time, and the scheduler can complete a scan in between — so the button labelled
+# "Baseline 40 new files" can become a deletion of `missing` rows the operator never saw. Neither a
+# render-time visibility rule nor a submit-time recount closes that: the recount is a separate
+# statement from the accept, and the same scan can claim, run and commit in the gap.
+#
+# The fix is one mechanism used identically by both routes: each form carries a hidden SHA-256 of a
+# canonical description of the population it claims to act on, and the POST recomputes it INSIDE the
+# same write transaction as the accept's own reads and writes. SQLite's single-writer serialization
+# is what makes the check-and-act atomic.
+
+# US separates fields, RS separates records. The byte-length prefix on `relpath` is what makes the
+# encoding injective: a filename may legally contain any byte but `/` and NUL — US and RS included —
+# so without the length two different populations could be made to hash equal. Framing by length
+# removes that by construction rather than by escaping.
+_FP_US = "\x1f"
+_FP_RS = "\x1e"
+
+# Which file statuses each form's fingerprint covers.
+_FP_SCOPES: dict[str, tuple[str, ...]] = {
+    "baseline-new": ("new",),
+    "review-accept": ("missing", "modified"),
+}
+
+# SQLite result codes that mean "someone else holds the writer lock", i.e. drift — not a broken
+# datastore. Everything else propagates.
+_FP_LOCK_ERRNAMES = frozenset({"SQLITE_BUSY", "SQLITE_BUSY_SNAPSHOT", "SQLITE_LOCKED"})
+_FP_LOCK_MESSAGES = ("database is locked", "database table is locked", "database is busy")
+
+# The statement that acquires (or upgrades to) the writer transaction: a no-op write against the
+# collection's own row. SQLite holds the lock until commit or rollback, so from here nothing else
+# can commit and the guard's reads describe the state the accept will act on.
+_FP_WRITE_LOCK_SQL = text("UPDATE collections SET name = name WHERE id = :id")
+
+
+async def _take_write_lock(session: AsyncSession, collection_id: int) -> None:
+    """Escalate this session's transaction to a writer (see :data:`_FP_WRITE_LOCK_SQL`)."""
+    await session.execute(_FP_WRITE_LOCK_SQL, {"id": collection_id})
+
+
+def _is_lock_contention(exc: OperationalError) -> bool:
+    """True when an ``OperationalError`` is SQLite refusing the writer lock, not a broken datastore.
+
+    Classified narrowly: the driver exception's ``sqlite_errorname`` where the runtime provides it
+    (Python >= 3.11), falling back to the message text. A corrupt or misconfigured datastore must
+    never be reported to the operator as "the collection changed since the page loaded".
+    """
+    orig = getattr(exc, "orig", None)
+    name = getattr(orig, "sqlite_errorname", None)
+    if name:
+        return name in _FP_LOCK_ERRNAMES
+    msg = str(orig or exc).lower()
+    return any(m in msg for m in _FP_LOCK_MESSAGES)
+
+
+async def _population_fingerprint(
+    session: AsyncSession, collection: Collection, scope: str
+) -> str:
+    """Hex SHA-256 of D14's canonical encoding of the population ``scope`` names.
+
+    Preimage = header + RS + RS.join(records), UTF-8 encoded.
+
+    * header — ``{scope}US{collection_id}US{created_at}USopen_events={k}`` and, for
+      ``baseline-new`` only, a further ``USissues={n}``. Both of that scope's zero assertions
+      therefore travel *inside* the hash.
+    * record — ``{id}US{len(relpath_bytes)}US{relpath}US{status}US{sha256 or ''}US{first_seen}``,
+      one per file, sorted by ``relpath`` (unique within a collection, so the order is total).
+      Deliberately **not** sorted by ``id``: ``id`` is the field this encoding distrusts.
+
+    Why each field is there. ``files.id`` / ``collections.id`` are ``INTEGER PRIMARY KEY`` *without*
+    ``AUTOINCREMENT``, so SQLite may hand a deleted row's id to a later insert — an
+    id-and-status-only preimage is byte-identical for two populations sharing no file, and the stale
+    form would then delete a record the operator never saw. ``relpath`` pins the logical file,
+    ``sha256`` the content generation, and ``first_seen`` the *row* generation (it is NOT NULL,
+    written at insertion and never rewritten in place, so a row deleted and re-created at the same
+    path with the same digest on the same reused id still encodes differently). The collection's own
+    ``created_at`` does the same job one level up for a recreated collection reusing its id.
+
+    ``open_events`` is the third population the verb mutates and is not derivable from the file
+    rows: a file can go modified -> missing -> restored between render and submit, returning the
+    protected set to exactly its rendered value while its ``modified`` event stays open by design.
+    It is read in the SAME transaction as the file rows, so the whole preimage describes one state.
+    (``added``/``restored``/``moved`` events are born acknowledged, so an ordinary new file does not
+    move this count — the documented ``new``-set exception survives.)
+    """
+    statuses = _FP_SCOPES[scope]
+    open_events = await _open_event_count(session, collection.id)
+    header = (
+        f"{scope}{_FP_US}{collection.id}{_FP_US}"
+        f"{collection.created_at.isoformat()}{_FP_US}open_events={open_events}"
+    )
+    if scope == "baseline-new":
+        issues = await session.scalar(
+            select(func.count())
+            .select_from(FileEntry)
+            .where(
+                FileEntry.collection_id == collection.id,
+                FileEntry.status.in_(("missing", "modified")),
+            )
+        )
+        header += f"{_FP_US}issues={int(issues or 0)}"
+
+    rows = (
+        await session.execute(
+            select(
+                FileEntry.id,
+                FileEntry.relpath,
+                FileEntry.status,
+                FileEntry.sha256,
+                FileEntry.first_seen,
+            )
+            .where(
+                FileEntry.collection_id == collection.id,
+                FileEntry.status.in_(statuses),
+            )
+            .order_by(FileEntry.relpath)
+        )
+    ).all()
+
+    records = [
+        f"{fid}{_FP_US}{len(relpath.encode('utf-8'))}{_FP_US}{relpath}{_FP_US}{status}"
+        f"{_FP_US}{sha256 or ''}{_FP_US}{first_seen.isoformat() if first_seen else ''}"
+        for fid, relpath, status, sha256, first_seen in rows
+    ]
+    preimage = header + _FP_RS + _FP_RS.join(records)
+    return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
+
+
+async def _guarded_accept(
+    session: AsyncSession,
+    collection: Collection,
+    user: User,
+    scope: str,
+    submitted_fp: str,
+) -> RedirectResponse | None:
+    """Run ``accept_collection`` only if the population still matches ``submitted_fp`` (design D14).
+
+    Returns ``None`` when the accept was performed (the caller then redirects to its own success
+    target), or the fail-closed refusal response — a 303 to ``/collection/{id}/review?stale=1``,
+    the page that lists exactly the issues that caused the refusal — on any of:
+
+    * an absent or empty ``population_fp`` (fail closed: an unguarded POST is refused, never run);
+    * an operation already in flight (``active_run``, now belt-and-braces for the *long* window);
+    * the writer lock being unobtainable (BUSY / BUSY_SNAPSHOT / LOCKED — that *is* drift, and an
+      uncaught 500 on a destructive POST is the refusal promise broken exactly where the guard
+      exists, and an invitation to retry blind);
+    * for ``baseline-new``, ``issues`` or ``open_events`` no longer being zero;
+    * the recomputed fingerprint differing from the submitted one.
+
+    Every refusal path rolls back before returning, so a refusal mutates nothing.
+    """
+    stale = RedirectResponse(f"/collection/{collection.id}/review?stale=1", status_code=303)
+    submitted = (submitted_fp or "").strip()
+    if not submitted:
+        await session.rollback()
+        return stale
+    if await collections_svc.active_run(session, collection.id) is not None:
+        await session.rollback()
+        return stale
+
+    # 1. Take the write lock FIRST, before the reads the guard depends on.
+    try:
+        await _take_write_lock(session, collection.id)
+    except OperationalError as exc:
+        if not _is_lock_contention(exc):
+            raise
+        await session.rollback()
+        return stale
+
+    # 2. Recompute inside this transaction, and re-assert the detail form's two zeroes explicitly
+    #    (they are hashed too, so this is belt-and-braces on an unambiguous failure mode).
+    if scope == "baseline-new":
+        counts = await _collection_counts(session, collection.id)
+        open_events = await _open_event_count(session, collection.id)
+        if counts["missing"] + counts["modified"] > 0 or open_events > 0:
+            await session.rollback()
+            return stale
+    current = await _population_fingerprint(session, collection, scope)
+
+    # 3. Compare.
+    if not hmac.compare_digest(current, submitted):
+        await session.rollback()
+        return stale
+
+    # 4. Only now act; `accept_collection`'s own commit() closes this same transaction.
+    await scanner_svc.accept_collection(session, collection, user.id)
+    return None
+
+
 @router.post("/collection/{collection_id}/accept", response_class=HTMLResponse, dependencies=[Depends(verify_csrf)])
 async def collection_accept(
     collection_id: int,
     request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
+    population_fp: str = Form(""),
 ):
+    """The detail page's "Baseline new files" submit, bound to the population it was rendered for."""
     collection = await _get_owned_collection(session, collection_id, user)
-    await scanner_svc.accept_collection(session, collection, user.id)
+    refused = await _guarded_accept(session, collection, user, "baseline-new", population_fp)
+    if refused is not None:
+        return refused
     return RedirectResponse(f"/collection/{collection_id}", status_code=303)
 
 
@@ -978,8 +1331,14 @@ async def collection_review(
     request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
+    stale: str = Query(""),
 ):
-    """Focused review of a collection's missing + modified files, with recovery guidance."""
+    """Focused review of a collection's missing + modified files, with recovery guidance.
+
+    Publishes two keys the review template renders: ``population_fp`` (design D14's hidden field for
+    the Accept form) and ``stale`` (the "this collection changed since the page loaded" banner,
+    whitelisted from ``?stale=1`` exactly as ``view``/``filter`` are handled in D11).
+    """
     collection = await _get_owned_collection(session, collection_id, user)
     view = await _collection_view(session, collection)
 
@@ -1029,6 +1388,11 @@ async def collection_review(
             "copy_count": len(copy_relpaths),
             "copy_truncated": total_issues > len(copy_relpaths),
             "review_open": int(review_open or 0),
+            # Hashed over the collection's ENTIRE missing+modified set in SQL, not the
+            # REVIEW_ROW_LIMIT-capped rows above: accept acts on all of it, so hashing the visible
+            # rows would leave every issue past the cap outside the guard.
+            "population_fp": await _population_fingerprint(session, collection, "review-accept"),
+            "stale": stale == "1",
         }
     )
     return templates.TemplateResponse(request, "collection_review.html", ctx)
@@ -1043,10 +1407,19 @@ async def collection_review_accept(
     request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
+    population_fp: str = Form(""),
 ):
-    """Re-baseline from the review page (new/modified → ok, missing removed), stay on review."""
+    """Re-baseline from the review page (new/modified → ok, missing removed), stay on review.
+
+    Guarded by the same D14 fingerprint as the detail form. The review page is not exempt: its list
+    is a *render*, and "these are exactly the files this button will adopt" stops being true the
+    moment a scan records another missing file — the operator would then delete a record they never
+    saw, from the one page whose entire purpose is that they saw it.
+    """
     collection = await _get_owned_collection(session, collection_id, user)
-    await scanner_svc.accept_collection(session, collection, user.id)
+    refused = await _guarded_accept(session, collection, user, "review-accept", population_fp)
+    if refused is not None:
+        return refused
     return RedirectResponse(f"/collection/{collection_id}/review", status_code=303)
 
 

@@ -128,6 +128,35 @@ def _make_client(cairn_env, seed_coro):
     return TestClient(app)
 
 
+def _population_fp(collection_id: int, scope: str) -> str:
+    """The fingerprint the page publishes for an accept-family form (fix-ux-audit-sprint1, D14).
+
+    Both accept routes recompute it under the write lock and refuse on any drift, so a POST without
+    it fails closed. Computed through the production helper on a throwaway engine, so it can run
+    while a TestClient is live.
+    """
+    from sqlalchemy import event as sa_event
+    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+    from src.config import get_settings
+    from src.control_panel.routes import _population_fingerprint
+    from src.database import _configure_sqlite
+    from src.models.db import Collection
+
+    async def _go():
+        engine = create_async_engine(get_settings().database_url)
+        sa_event.listen(engine.sync_engine, "connect", _configure_sqlite)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as s:
+                return await _population_fingerprint(
+                    s, await s.get(Collection, collection_id), scope
+                )
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_go())
+
+
 def _run_check(coro_factory):
     """Run a post-test DB check on a fresh loop, disposing the engine in-loop afterwards.
 
@@ -485,7 +514,9 @@ def test_accept_sets_files_ok(cairn_env):
 
     with _make_client(cairn_env, seed) as client:
         token = _csrf_token(client)
-        r = client.post("/collection/1/accept", headers={"X-CSRF-Token": token},
+        r = client.post("/collection/1/review/accept",
+                        data={"population_fp": _population_fp(1, "review-accept")},
+                        headers={"X-CSRF-Token": token},
                         follow_redirects=False)
         assert r.status_code == 303
 
@@ -1054,7 +1085,9 @@ def test_review_accept_clears_issues_and_stays_on_review(cairn_env):
 
     with _make_client(cairn_env, seed) as client:
         token = _csrf_token(client)
-        r = client.post("/collection/1/review/accept", headers={"X-CSRF-Token": token},
+        r = client.post("/collection/1/review/accept",
+                        data={"population_fp": _population_fp(1, "review-accept")},
+                        headers={"X-CSRF-Token": token},
                         follow_redirects=False)
         assert r.status_code == 303
         assert r.headers["location"] == "/collection/1/review"

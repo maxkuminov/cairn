@@ -178,28 +178,28 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
 `partials/review_ack_row.html`, an **appended** `panel.css` section, new
 `tests/test_ux_dashboard.py`.
 
-- [ ] 3.1 `routes.py`: add `async def _alert_badge_count(session, collection_ids) -> int` counting
+- [x] 3.1 `routes.py`: add `async def _alert_badge_count(session, collection_ids) -> int` counting
   `FileEntry.status IN ('missing','modified')` for those collections. Call it from `_base_context`,
   `_event_feed`, and `ack_event` — replacing all three inline `status == "missing"` counts (design
   D3). One definition, four render sites.
-- [ ] 3.2 `base.html:40-42`: give the badge `title` and `aria-label` —
+- [x] 3.2 `base.html:40-42`: give the badge `title` and `aria-label` —
   `"{n} files missing or changed — open dashboard"` (singular form at 1). Apply the identical markup
   in `partials/events_feed.html`, `partials/event_ack.html` and `partials/review_ack_row.html` so an
   OOB swap cannot drop the label.
-- [ ] 3.3 `routes.py::dashboard`: compute `issues_href` — exactly one collection with
+- [x] 3.3 `routes.py::dashboard`: compute `issues_href` — exactly one collection with
   `issues > 0` → `/collection/{id}/review`; two or more → `/collections`. **Never `/review`**
   (404 until #27). Absent/None when the total is zero.
-- [ ] 3.4 `dashboard.html:27-31`: render the Open-issues tile as
+- [x] 3.4 `dashboard.html:27-31`: render the Open-issues tile as
   `<a class="card tile tile--link" href="{{ tiles.issues_href }}">` with a `· Review ›` CTA when
   `tiles.issues > 0`; keep the plain `<div class="card tile">` at zero. Append `.tile--link` /
   `.tile__cta` to `panel.css` reusing `.mini-stat--link`'s hover treatment.
-- [ ] 3.5 `routes.py::_ots_counts`: add **one** grouped query carrying `status != 'missing'` and
+- [x] 3.5 `routes.py::_ots_counts`: add **one** grouped query carrying `status != 'missing'` and
   return `complete_active`, `incomplete_active`, `pending_active`, `none_active` beside the existing
   raw totals (design D5). Every ratio component must be counted over the same population — that is
   what `mark_unstamped_pending` queues — so `complete_active + incomplete_active + pending_active +
   none_active == stampable` holds by construction. Expose `stampable = file_count - counts.missing`
   and the ratio string from `_collection_view`; leave the unqualified keys for raw display only.
-- [ ] 3.6 Kill every unearned completeness claim, in `collection_detail.html:85-88`,
+- [x] 3.6 Kill every unearned completeness claim, in `collection_detail.html:85-88`,
   `partials/_collection_card.html:45` and `:57`, and `dashboard.html`'s `anchored_sub`:
   - "all confirmed" only when **`complete_active == stampable > 0`** — one comparison, not four, and
     never over a population that includes missing files (a missing file with a complete proof must
@@ -210,12 +210,12 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
     `"{pending_active:,} queued · {incomplete_active:,} pending confirmation"`, dropping whichever
     half is zero. Today the card footer, the detail tile and `anchored_sub` all add them and call
     the total "pending confirmation".
-- [ ] 3.7 `routes.py::dashboard`: compute the fleet-wide proof figures **only over views whose
+- [x] 3.7 `routes.py::dashboard`: compute the fleet-wide proof figures **only over views whose
   `ots` mode is `perfile`** — numerator *and* denominator — and label the tile's sub-line with the
   population it covers ("across N notarized collections"). Tripwire collections stamp nothing and
   their stamp route refuses them, so folding their files in ships an un-clearable "not stamped"
   count; dropping them from one half only restores a false "all confirmed" (design D5).
-- [ ] 3.8 Zero-file collections must not read healthy on **any** surface (#31): `_collection_status`
+- [x] 3.8 Zero-file collections must not read healthy on **any** surface (#31): `_collection_status`
   gains an `"empty"` return (its `counts` dict sums to zero exactly when the collection has no
   files, so no new argument), `_STATUS_META["empty"] = ("No files indexed", "var(--text-3)",
   "folder", "muted")` (existing icon, no new SVG, and not the `minusCircle` 3.14 gives `alert`). That one map feeds `_op_status_c`, `_collection_view` and
@@ -224,10 +224,10 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   `op_status.html` is what renders the green "All clear" pill on both pages. Also replace "All files
   verified" / "all confirmed" with **"No files indexed yet"** on the card legend and both detail
   tiles.
-- [ ] 3.9 `collection_detail.html:26-38`: when `c.issues > 0`, **remove the Accept form from the
+- [x] 3.9 `collection_detail.html:26-38`: when `c.issues > 0`, **remove the Accept form from the
   header** and make "Review issues" the `btn--primary` (design D7). The destructive path is reachable
   only from the page that explains it.
-- [ ] 3.10 When `c.issues == 0` **and the collection's open-event count is 0** and `c.counts.new >
+- [x] 3.10 When `c.issues == 0` **and the collection's open-event count is 0** and `c.counts.new >
   0`, keep **"Baseline new files"** with an `onsubmit` light confirm naming the count. With
   `issues == 0` but open events outstanding, render **"Review issues"** as the primary action and no
   baseline form (design D7): `accept_collection` also acknowledges every open event, so a restored
@@ -235,7 +235,7 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   promotion. When issues, open events and `new` are all zero, render neither. The count is the same
   `acknowledged_at IS NULL` count the D14 fingerprint hashes — compute it once in
   `_collection_view` and reuse it, so the render gate and the guard can never disagree.
-- [ ] 3.11 `routes.py`: add the shared **population fingerprint** guard (design D14) and apply it to
+- [x] 3.11 `routes.py`: add the shared **population fingerprint** guard (design D14) and apply it to
   `collection_accept`. New `async def _population_fingerprint(session, collection, scope) -> str`
   (it takes the `Collection` row `_get_owned_collection` already loaded, because the collection's
   `created_at` is part of the preimage) returning the hex SHA-256 of design D14's **canonical
@@ -278,7 +278,7 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   **no mutation**, 303 to `/collection/{id}/review?stale=1`. A recount that is not inside the
   accept's own transaction is not a guard — the same scan can claim, run and commit between the
   recount statement and the accept's first `DELETE`.
-- [ ] 3.12 `routes.py`: the **review page's accept is guarded by the same mechanism** (design D14).
+- [x] 3.12 `routes.py`: the **review page's accept is guarded by the same mechanism** (design D14).
   `collection_review` publishes `population_fp` (scope `review-accept`, hashed over the collection's
   **entire** `missing + modified` set in SQL plus the header's `open_events` count — *not* the
   `REVIEW_ROW_LIMIT`-capped rendered rows, and
@@ -294,19 +294,19 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   statement about the *render*: a scan that records another missing file after it makes the claim
   false, and the operator deletes a record they never saw from the page whose whole purpose is that
   they saw it.
-- [ ] 3.13 Any Accept form that still exists on this page carries the review page's `onsubmit`
+- [x] 3.13 Any Accept form that still exists on this page carries the review page's `onsubmit`
   confirm string.
-- [ ] 3.14 `routes.py::_STATUS_META`: `alert` → `minusCircle`, `attention` keeps `alert` (design D6).
+- [x] 3.14 `routes.py::_STATUS_META`: `alert` → `minusCircle`, `attention` keeps `alert` (design D6).
   No new SVG.
-- [ ] 3.15 `dashboard.html`: add the fourth **"New — watched, not yet baselined"** tile
+- [x] 3.15 `dashboard.html`: add the fourth **"New — watched, not yet baselined"** tile
   (`tiles.new`), so `Total ≠ OK + issues` stops being unexplained; rename the collection-detail
   **"Verified OK" → "Matching baseline"**.
-- [ ] 3.16 `routes.py::collection_detail`: accept optional `view` (`tree`|`list`, default `tree`)
+- [x] 3.16 `routes.py::collection_detail`: accept optional `view` (`tree`|`list`, default `tree`)
   and `filter` (`all`|`issues`|`new`|`ok`, default `all`), both whitelist-validated. Thread
   `status_filter=filter` into the **initial list-view** `query_files` call; leave the tree query
   unfiltered; a non-`all` filter with no explicit `view` implies `view="list"` (design D11).
   Template `data-view` and the Tree/List `is-active` classes from `view`.
-- [ ] 3.17 `tests/test_ux_dashboard.py` (new): tile is an `<a>` at issues > 0 and a `<div>` at zero;
+- [x] 3.17 `tests/test_ux_dashboard.py` (new): tile is an `<a>` at issues > 0 and a `<div>` at zero;
   single-collection href is the review page and multi-collection is `/collections` (and neither is
   `/review`); badge carries an aria-label and counts missing + modified; a collection with
   `none_active > 0` never renders "all confirmed" and does render the ratio; **a collection whose
@@ -318,7 +318,7 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   in its card, its detail page or its `op-status` fragment; collection detail with `issues > 0`
   renders no header Accept form; `?view=list&filter=issues` returns a filtered list with the Issues
   radio checked and List active.
-- [ ] 3.18 `tests/test_ux_dashboard.py` — **the D14 guard, both routes**, each driven as a real
+- [x] 3.18 `tests/test_ux_dashboard.py` — **the D14 guard, both routes**, each driven as a real
   interleaving (render the page, mutate the DB the way a scan would, then POST the
   already-rendered `population_fp`): a file marked `missing` between render and POST makes
   `/collection/{id}/accept` refuse — the missing row is still there, its event still unacknowledged,
@@ -345,7 +345,7 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   *absence* of mutation on every refusal, not just the status code — a guard that redirects and still
   deletes is the bug.
 
-- [ ] 3.19 `routes.py`: the guard helper handles **lock contention as a refusal** (design D14).
+- [x] 3.19 `routes.py`: the guard helper handles **lock contention as a refusal** (design D14).
   Wrap the step-1 no-op `UPDATE collections SET name = name WHERE id = :id` — the statement that
   acquires/upgrades the writer transaction — in `except sqlalchemy.exc.OperationalError`, and
   convert it **only** when SQLite reports `SQLITE_BUSY`, `SQLITE_BUSY_SNAPSHOT` or `SQLITE_LOCKED`
@@ -356,7 +356,7 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   must not be reported as "the collection changed since the page loaded". Uncaught, these become an
   HTTP 500 on a destructive POST: the refusal promise broken exactly where the guard exists, and an
   invitation to retry blind. Both accept-family routes go through the one helper.
-- [ ] 3.20 `tests/test_ux_dashboard.py` — **contention**: with a second session holding the SQLite
+- [x] 3.20 `tests/test_ux_dashboard.py` — **contention**: with a second session holding the SQLite
   writer lock on the same database (begin a write transaction there and leave it open) fire the
   accept POST on both routes and assert each returns the `303` to `…/review?stale=1`, **not** a 500,
   and that nothing was mutated once the holding transaction is rolled back; and that an

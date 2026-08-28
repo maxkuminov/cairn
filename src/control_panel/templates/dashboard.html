@@ -24,10 +24,25 @@
     <div class="tile__value">{{ tiles.files }}</div>
     <div class="tile__sub">{{ tiles.files_sub }}</div>
   </div>
+  {% if tiles.issues > 0 and tiles.issues_href %}
+    <a class="card tile tile--link" href="{{ tiles.issues_href }}">
+      <div class="tile__label">{{ m.icon("alert", size=16, stroke=1.9) }}<span>Open issues</span></div>
+      <div class="tile__value" style="color:{{ tiles.issues_color }}">{{ tiles.issues }}</div>
+      <div class="tile__sub">{{ tiles.issues_sub }} <span class="tile__cta">· Review {{ m.icon("chevronR", size=11) }}</span></div>
+    </a>
+  {% else %}
+    <div class="card tile">
+      <div class="tile__label">{{ m.icon("alert", size=16, stroke=1.9) }}<span>Open issues</span></div>
+      <div class="tile__value" style="color:{{ tiles.issues_color }}">{{ tiles.issues }}</div>
+      <div class="tile__sub">{{ tiles.issues_sub }}</div>
+    </div>
+  {% endif %}
+  {# `Total ≠ OK + issues` was unexplained: `new` files are watched and notarized but not yet
+     baselined, and nothing on the dashboard said so. #}
   <div class="card tile">
-    <div class="tile__label">{{ m.icon("alert", size=16, stroke=1.9) }}<span>Open issues</span></div>
-    <div class="tile__value" style="color:{{ tiles.issues_color }}">{{ tiles.issues }}</div>
-    <div class="tile__sub">{{ tiles.issues_sub }}</div>
+    <div class="tile__label">{{ m.icon("file", size=16, stroke=1.9) }}<span>New files</span></div>
+    <div class="tile__value" style="color:{{ 'var(--accent)' if tiles.new > 0 else 'var(--text-3)' }}">{{ tiles.new }}</div>
+    <div class="tile__sub">{{ tiles.new_sub }}</div>
   </div>
   <div class="card tile">
     <div class="tile__label">{{ m.icon("bitcoin", size=16, stroke=1.9) }}<span>Proofs anchored</span></div>

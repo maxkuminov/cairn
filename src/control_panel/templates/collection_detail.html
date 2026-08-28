@@ -21,19 +21,27 @@
         <button class="btn btn--subtle" type="submit">{{ m.icon("bitcoin", size=15) }} Stamp all</button>
       </form>
     {% endif %}
-    {# Re-baseline action: clears modified/missing alarms AND promotes informational `new` files to
-       `ok` (a scan never does — it preserves status). Shown whenever there is anything to baseline,
-       so a new-only collection (e.g. a freshly added one) can be moved into the "Verified OK" count. #}
-    {% if c.issues > 0 %}
-      <a class="btn btn--subtle" href="/collection/{{ c.id }}/review">{{ m.icon("alert", size=15) }} Review issues</a>
-    {% endif %}
-    {% if c.issues > 0 or c.counts.new > 0 %}
+    {# Action hierarchy (design D7). The destructive Accept is NOT here: it lives only on the review
+       page, where the contrast card explains it and the list shows what it will act on. With issues
+       OR any open event outstanding, Review issues is the primary action — `accept_collection` also
+       acknowledges every open event, so offering "Baseline new files" beside an unread alert (a
+       restored file leaves one open while the file set reads clean) would clear it under a confirm
+       that promises only a new-file promotion. #}
+    {% if c.issues > 0 or c.open_events > 0 %}
+      <a class="btn btn--primary" href="/collection/{{ c.id }}/review">{{ m.icon("alert", size=15) }} Review issues</a>
+    {% elif show_baseline %}
       {# Plain POST→303 redirect (not htmx): re-baselining changes the tiles, file table, status pill,
          and this button's own visibility, so a full reload is the correct refresh. An htmx hx-post with
-         hx-swap="none" would silently discard the redirected page and leave the UI stale. #}
-      <form method="post" action="/collection/{{ c.id }}/accept" style="display:inline">
+         hx-swap="none" would silently discard the redirected page and leave the UI stale.
+         The confirm is deliberately LIGHT — this promotes `new` → `ok`, deletes nothing and rewrites
+         no baseline; a heavy warning here trains the operator to click through the heavy warning on
+         the destructive one. `population_fp` binds the submit to the population this page was
+         rendered for (design D14); the route fails closed without it. #}
+      <form method="post" action="/collection/{{ c.id }}/accept" style="display:inline"
+            onsubmit="return confirm('Baseline {{ c.counts.new }} new file{{ '' if c.counts.new == 1 else 's' }} as the expected version?');">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <button class="btn btn--primary" type="submit">{{ m.icon("check", size=15) }} {% if c.issues > 0 %}Accept changes{% else %}Baseline new files{% endif %}</button>
+        <input type="hidden" name="population_fp" value="{{ population_fp }}" />
+        <button class="btn btn--primary" type="submit">{{ m.icon("check", size=15) }} Baseline new files</button>
       </form>
     {% endif %}
   </div>
@@ -63,8 +71,9 @@
     <div class="mini-stat__sub">{{ c.size }}</div>
   </div>
   <div class="card mini-stat">
-    <div class="mini-stat__label">{{ m.icon("checkCircle", size=15, stroke=1.9) }}<span>Verified OK</span></div>
-    <div class="mini-stat__value" style="color:var(--ok)">{{ "{:,}".format(c.counts.ok) }}</div>
+    <div class="mini-stat__label">{{ m.icon("checkCircle", size=15, stroke=1.9) }}<span>Matching baseline</span></div>
+    <div class="mini-stat__value" style="color:{{ 'var(--text-3)' if c.is_empty else 'var(--ok)' }}">{{ "{:,}".format(c.counts.ok) }}</div>
+    {% if c.is_empty %}<div class="mini-stat__sub">No files indexed yet</div>{% endif %}
   </div>
   {% if c.issues %}
   <a class="card mini-stat mini-stat--link" href="/collection/{{ c.id }}/review">
@@ -82,9 +91,17 @@
   {% if c.ots != "none" %}
     <div class="card mini-stat">
       <div class="mini-stat__label">{{ m.icon("bitcoin", size=15, stroke=1.9) }}<span>Anchored to chain</span></div>
-      <div class="mini-stat__value" style="color:var(--accent)">{{ "{:,}".format(c.ots_counts.complete) }}</div>
-      {% set pend = c.ots_counts.pending + c.ots_counts.incomplete %}
-      <div class="mini-stat__sub">{% if pend %}{{ pend }} pending{% else %}all confirmed{% endif %}</div>
+      <div class="mini-stat__value" style="color:{{ 'var(--text-3)' if c.is_empty else 'var(--accent)' }}">{{ "{:,}".format(c.ots_counts.complete_active) }}</div>
+      {# Every component of this claim is counted over `status != 'missing'` (design D5), so a
+         missing file's complete proof can never fill the ratio; and the two not-yet-confirmed
+         states are named separately, never summed (design D13). #}
+      <div class="mini-stat__sub">
+        {%- if c.is_empty -%}No files indexed yet
+        {%- elif c.all_confirmed -%}all confirmed
+        {%- else -%}{{ c.anchored_ratio }} confirmed{% if c.pending_line %} · {{ c.pending_line }}{% endif %}
+        {%- endif -%}
+      </div>
+      {% if c.not_stamped > 0 %}<div class="mini-stat__sub" style="color:var(--warn)">{{ "{:,}".format(c.not_stamped) }} not stamped — use Stamp all</div>{% endif %}
     </div>
   {% else %}
     <div class="card mini-stat">
@@ -96,12 +113,12 @@
 </div>
 
 {# File browser card — Tree (default) ⇄ List toggle. #}
-<div class="card card--flush browser" id="browser-{{ c.id }}" data-view="tree">
+<div class="card card--flush browser" id="browser-{{ c.id }}" data-view="{{ view }}">
   <div class="table-toolbar">
     <h3 style="font-size:14.5px">Files</h3>
     <div class="seg view-toggle">
-      <button type="button" class="seg__btn is-active" data-view="tree">{{ m.icon("folder", size=13) }} Tree</button>
-      <button type="button" class="seg__btn" data-view="list">{{ m.icon("stack", size=13) }} List</button>
+      <button type="button" class="seg__btn {% if view == 'tree' %}is-active{% endif %}" data-view="tree">{{ m.icon("folder", size=13) }} Tree</button>
+      <button type="button" class="seg__btn {% if view == 'list' %}is-active{% endif %}" data-view="list">{{ m.icon("stack", size=13) }} List</button>
     </div>
     <div class="table-search browser-list-only" style="margin-left:auto">
       {{ m.icon("search", size=15) }}
