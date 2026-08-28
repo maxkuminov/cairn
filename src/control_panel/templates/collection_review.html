@@ -17,11 +17,15 @@
   <div>
     <a class="back-link" href="/collection/{{ c.id }}">{{ m.icon("arrowLeft", size=15) }} {{ c.name }}</a>
     <h1>What changed</h1>
+    {# Only where there is something to act on. On an all-clear page this paragraph described a
+       situation the page then contradicts, and offered recovery instructions for nothing. #}
+    {% if (total_issues or 0) > 0 or (review_open or 0) > 0 %}
     <div class="page-header__sub">
       Files in <strong>{{ c.name }}</strong> that went missing or changed. Recover anything you want
       back, then clear the alerts — <strong>Mark reviewed</strong> to just note them, or
       <strong>Accept</strong> to make the current state your new baseline.
     </div>
+    {% endif %}
   </div>
   {# The bulk actions used to live here as two near-identical buttons; they now live in the
      self-explaining "Clear these alerts" panel below so Mark reviewed vs Accept can't be confused. #}
@@ -36,8 +40,22 @@
   <div class="card" id="stale-banner"
        style="margin-bottom:16px;display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border-color:color-mix(in oklch, var(--warn) 35%, var(--border));background:color-mix(in oklch, var(--warn-soft) 40%, var(--surface))">
     <span style="color:var(--warn);flex-shrink:0;display:flex">{{ m.icon("alert", size=16, stroke=2) }}</span>
+    {# The consequence comes FIRST. The operator arrives here having clicked a destructive button;
+       the one thing they need to know before anything else is that it did not run. A banner that
+       opens by describing the collection reads as a status note, and leaves them believing the
+       accept went through. #}
     <div style="flex:1;font-size:13px;line-height:1.55;color:var(--text-2)">
-      This collection changed since the page loaded — the list below is current.
+      <strong>Your action was NOT applied</strong> — this collection changed since the page loaded.
+      Nothing was deleted or acknowledged.
+      {% if (total_issues or 0) > 0 or (review_open or 0) > 0 %}
+        The list below is current; review it and decide again.
+      {% else %}
+        {# Refused, and now there is nothing left to review: the state you were acting on may
+           already have been resolved (a file came back, or another session accepted it). Saying
+           "the list below is current" over an empty page reads as if the accept had emptied it. #}
+        There is nothing left to review in this collection right now — whatever you were resolving
+        may already have been handled, by a scan or in another session.
+      {% endif %}
     </div>
     <button type="button" class="btn btn--sm btn--subtle" aria-label="Dismiss"
             onclick="var b=document.getElementById('stale-banner'); if (b) b.remove();">Dismiss</button>
@@ -110,11 +128,13 @@
       </div>
     </div>
     <div class="recovery__hint">
-      Cairn watches your files read-only — it never restores them itself. Paste the list above into
+      Cairn watches your files read-only — it never restores them itself. Paste the copied list into
       your own backup tool (restic, Borg, rsync, Time Machine, a cloud sync…) to bring them back, then
       <strong>Scan now</strong> on the collection to confirm, or <strong>Accept all changes</strong> to
       stop tracking what's gone for good.
-      {% if copy_truncated %}<br />Showing the first {{ "{:,}".format(copy_count) }} of {{ "{:,}".format(total_issues) }} paths — use <span class="mono">cairn status</span> for the full set.{% endif %}
+      {# Point at a route that exists: `cairn status` is not implemented, and the filtered file
+         browser (already linked at the foot of the list) is where the full set actually lives. #}
+      {% if copy_truncated %}<br />The buttons copy the first {{ "{:,}".format(copy_count) }} of {{ "{:,}".format(total_issues) }} paths — open the <a href="/collection/{{ c.id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, for the full set.{% endif %}
     </div>
     <details class="recovery__more">
       <summary>How to recover (any backup tool)</summary>
@@ -209,54 +229,19 @@
     if (!card) return;
     var rel = card.getAttribute("data-relpaths") || "";
     var root = card.getAttribute("data-root") || "";
-    var note = document.getElementById("recovery-copied");
     function paths(kind) {
       if (!rel) return "";
       if (kind === "rel") return rel;
       var base = root.replace(/\/+$/, "");
       return rel.split("\n").map(function (p) { return base + "/" + p; }).join("\n");
     }
-    // A failed copy has to *say so*: silently doing nothing leaves the operator pasting a stale
-    // clipboard into their backup tool and restoring the wrong set of paths.
-    function report(ok) {
-      if (!note) return;
-      note.textContent = ok ? "Copied ✓" : "Couldn't copy — select the paths and copy manually";
-      note.style.color = ok ? "" : "var(--danger)";
-      note.hidden = false;
-      setTimeout(function () { note.hidden = true; }, ok ? 1800 : 5000);
-    }
-    // navigator.clipboard is undefined outside a secure context (plain http on a LAN address is
-    // the normal self-hosted case), so fall back to the old hidden-textarea + execCommand path.
-    function legacyCopy(text) {
-      try {
-        var ta = document.createElement("textarea");
-        ta.value = text;
-        ta.setAttribute("readonly", "");
-        ta.style.position = "fixed";
-        ta.style.top = "-1000px";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        ta.select();
-        ta.setSelectionRange(0, ta.value.length);
-        var ok = document.execCommand("copy");
-        document.body.removeChild(ta);
-        return !!ok;
-      } catch (e) {
-        return false;
-      }
-    }
+    // The insecure-origin fallback and the visible "Copied ✓" / failure state live in
+    // partials/_clipboard.html (window.cairnCopy), shared with the verify card so the two copy
+    // surfaces cannot drift. A failed copy has to *say so*: silently doing nothing leaves the
+    // operator pasting a stale clipboard into their backup tool and restoring the wrong paths.
     card.querySelectorAll("[data-copy]").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        var text = paths(btn.getAttribute("data-copy"));
-        if (navigator.clipboard && window.isSecureContext) {
-          navigator.clipboard.writeText(text).then(function () {
-            report(true);
-          }).catch(function () {
-            report(legacyCopy(text));
-          });
-        } else {
-          report(legacyCopy(text));
-        }
+        window.cairnCopy(paths(btn.getAttribute("data-copy")), "recovery-copied");
       });
     });
   })();

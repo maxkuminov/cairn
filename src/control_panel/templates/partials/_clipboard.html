@@ -1,0 +1,58 @@
+{# The panel's ONE clipboard implementation, included once from base.html so every copy control on
+   every page shares it and the surfaces cannot drift apart.
+
+   `navigator.clipboard` is undefined outside a secure context, and plain http on a LAN address is
+   the normal self-hosted deployment — so a bare `navigator.clipboard && …writeText(…)` is a silent
+   no-op exactly where Cairn usually runs. Worse than doing nothing: the operator pastes whatever
+   was already on their clipboard into a backup tool or an evidence bundle. Hence the fallback, and
+   hence the visible result — a copy that failed has to say so.
+
+   Usage: `cairnCopy(text, "id-of-a-note-span")`. #}
+<script>
+  (function () {
+    // Hidden-textarea + execCommand: the pre-async-clipboard path, still the only one that works
+    // on an insecure origin. Also the fallback when a secure-context write is rejected (permission
+    // policy, a document that isn't focused).
+    function legacyCopy(text) {
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "-1000px";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        var ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        return !!ok;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    // The visible outcome. `note` is an element or the id of one; a caller with nowhere to report
+    // to still gets the copy attempted.
+    window.cairnCopyReport = function (note, ok) {
+      if (typeof note === "string") { note = document.getElementById(note); }
+      if (!note) return;
+      note.textContent = ok ? "Copied ✓" : "Couldn't copy — select the text and copy it manually";
+      note.style.color = ok ? "" : "var(--danger)";
+      note.hidden = false;
+      setTimeout(function () { note.hidden = true; }, ok ? 1800 : 5000);
+    };
+
+    window.cairnCopy = function (text, note) {
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(function () {
+          window.cairnCopyReport(note, true);
+        }).catch(function () {
+          window.cairnCopyReport(note, legacyCopy(text));
+        });
+      } else {
+        window.cairnCopyReport(note, legacyCopy(text));
+      }
+    };
+  })();
+</script>

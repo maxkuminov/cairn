@@ -731,6 +731,18 @@
   .meta-cell--wide { flex: 1 1 100%; }
   .meta-cell--wide .meta-cell__value { white-space: normal; overflow: visible; text-overflow: clip; }
 
+  /* #13: the Root path cell is a long absolute path in a ~45%-wide cell, so the ellipsis ate all
+     of it — and touch has no hover to recover the `title` with. Let it wrap instead of clipping;
+     the whole point of the cell is the path. */
+  .meta-cell__value.mono { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; }
+
+  /* #7: "Mark all N reviewed (all collections)" is a nowrap button wider than the rail-card row it
+     sits in, so it overflowed the card off the right edge on a 390px screen. Let the header row and
+     the control group wrap, and let this button's own label wrap rather than stay one long line. */
+  .row-between { flex-wrap: wrap; row-gap: 8px; }
+  #open-events-pill { flex-wrap: wrap; max-width: 100%; }
+  #open-events-pill .btn { white-space: normal; text-align: left; max-width: 100%; }
+
   /* File rows reflow from the fixed 5-column grid into a stacked card: the filename gets the full
      first line (it was being crushed to ~0 width by the fixed metadata columns — invisible in the
      folder tree, which has no horizontal scroll), with size/status/date wrapping onto a compact
@@ -908,6 +920,25 @@
      "processed / total (pct)" count next to it already carries the same information — so drop the
      bar rather than the text: 345 − 92 = 253px, which fits. */
   .op-bar { display: none; }
+
+  /* …which was only half the fix. The badge is still ~269px (worst case: the deep-scan variant),
+     and it shares a `justify-content: space-between` flex row with the collection's NAME. Flex
+     resolves that by shrinking the name — the item with `min-width: 0` — so on a phone the name was
+     crushed to ~23px and the card became unidentifiable. Nothing about a nowrap badge can be
+     negotiated down, so stop negotiating: give the badge a row of its own beneath the title block.
+     `flex-basis: 100%` on a wrapping row forces the break; `order` pins it after the name in case
+     the include ever moves. The name then owns its full line at every width. */
+  .collection-card__title-row { flex-wrap: wrap; }
+  .collection-card__title-row > :first-child { flex: 1 1 100%; order: 1; }
+  .collection-card__title-row > .op-status { flex: 0 0 100%; order: 2; margin-top: 8px; }
+}
+
+@media (max-width: 480px) {
+  /* Even on its own row the deep-scan badge overruns the card's content box on a 320px screen
+     (~252px of usable width). The "deep" chip is the most droppable part: it qualifies a scan the
+     label already names, and the collection's deep-verify cadence is on the detail page. Scoped to
+     the card, so the detail page's Status cell — which has room and wraps — keeps it. */
+  .collection-card__title-row .op-badge__deep { display: none; }
 }
 
 /* --- ux-audit sprint 1: verify (slice A) --- */
@@ -927,3 +958,9 @@
 .tile--link { display: block; text-decoration: none; color: inherit; transition: border-color 0.14s, box-shadow 0.14s; }
 .tile--link:hover { border-color: var(--danger); box-shadow: var(--shadow-lg); }
 .tile__cta { color: var(--danger); font-weight: 600; white-space: nowrap; }
+
+/* --- live-pass fixes: shared clipboard feedback ------------------------------------------- */
+/* Result line for `window.cairnCopy` (partials/_clipboard.html). Green by default; the helper
+   swaps the colour to `--danger` and holds it longer when the copy failed, because a copy that
+   silently did nothing leaves the operator pasting a stale clipboard. */
+.copy-note { font-size: 12px; font-weight: 600; color: var(--ok); margin-top: 5px; }

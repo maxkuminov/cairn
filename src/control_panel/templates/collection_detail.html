@@ -55,7 +55,9 @@
       {# Live operation badge while a scan/stamp/upgrade runs; resting status pill otherwise. #}
       <div class="meta-cell__value">{% include "partials/op_status.html" %}</div>
     </div>
-    <div class="meta-cell"><div class="meta-cell__label">Root path</div><div class="meta-cell__value mono" style="font-size:12px">{{ c.root }}</div></div>
+    {# The full path is the value: on a phone the ellipsis hid most of it and touch has no hover, so
+       the cell carries a `title` for the pointer case and is allowed to wrap under the breakpoint. #}
+    <div class="meta-cell"><div class="meta-cell__label">Root path</div><div class="meta-cell__value mono" style="font-size:12px" title="{{ c.root }}">{{ c.root }}</div></div>
     <div class="meta-cell"><div class="meta-cell__label">Policy</div><div class="meta-cell__value" style="text-transform:uppercase;letter-spacing:0.03em">{{ c.mode }}</div></div>
     <div class="meta-cell"><div class="meta-cell__label">Notarization</div><div class="meta-cell__value">{% if c.ots == "none" %}Tripwire only{% else %}Per-file · new files only{% endif %}</div></div>
     <div class="meta-cell"><div class="meta-cell__label">Scan cadence</div><div class="meta-cell__value">{{ c.cadence }}</div></div>

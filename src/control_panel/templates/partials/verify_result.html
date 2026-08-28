@@ -7,7 +7,17 @@
       <div class="verdict__sub">
         {# One branch per reason, no wording shared between them: what Cairn established and who it
            blames are different questions, and collapsing them is how a changed file read "pending". #}
-        {% if verdict == "ok" and existed_by %}
+        {% if live_unavailable %}
+          {# No live bytes were read, so NOTHING was compared. The generic fallback below offers
+             "its contents may have changed" as an explanation — a speculation about tampering
+             built on a check that never ran. This branch says what actually happened instead. #}
+          Cairn could not read <span class="mono">{{ filename }}</span> to check it &mdash; {{ live_unavailable }}. Its current bytes were never hashed, so <strong>nothing was compared</strong> and no conclusion was reached. This says nothing about whether the file was altered or tampered with; there was simply nothing here to check.
+          {% if file_status == "missing" %}
+            Cairn's own record already lists this file as <strong>missing</strong> from {{ collection }}, so this is the expected result rather than a new finding. <a href="/collection/{{ collection_id }}/review">Review what changed in {{ collection }}</a> to restore it from a backup or accept its removal.
+          {% else %}
+            Cairn's record still lists this file as present, so the file has gone or become unreadable since the last scan. Restore it (or fix its permissions) and verify again; a scan will record the change either way.
+          {% endif %}
+        {% elif verdict == "ok" and existed_by %}
           <span class="mono">{{ filename }}</span> existed in this exact form, unaltered, on or before <strong>{{ existed_by }}</strong>, confirmed against the public Bitcoin record.
         {% elif verdict == "ok" %}
           <span class="mono">{{ filename }}</span> still matches its proof, confirmed against the public Bitcoin record.
@@ -37,7 +47,17 @@
         {% elif unreadable_proof %}
           The proof file for <span class="mono">{{ filename }}</span> could not be read or parsed &mdash; it is damaged, truncated, or not an OpenTimestamps proof. <strong>Nothing was concluded about the file</strong>: its bytes were never compared to anything. Re-stamp the file to make a fresh proof.
         {% elif verdict == "warn" and ots_state == "incomplete" %}
-          <span class="mono">{{ filename }}</span>'s fingerprint has been submitted to Bitcoin but isn't confirmed yet. This usually settles within a few hours.
+          {# The reassurance is age-dependent. A proof submitted this morning does usually settle
+             within hours; one submitted months ago is stuck, and repeating "a few hours" at it
+             tells the operator to keep waiting for something that is not coming. Same threshold as
+             `cairn upgrade`'s stale-incomplete warning, so the two surfaces can't disagree. #}
+          {% if stamp_stale %}
+            <span class="mono">{{ filename }}</span>'s fingerprint was submitted to Bitcoin on <strong>{{ stamped_at }}</strong> &mdash; {{ stamped_days }} day{{ "" if stamped_days == 1 else "s" }} ago, which is unusually long for a proof that still isn't confirmed. Run <span class="mono">cairn upgrade</span> to pull down a completed proof, or check that your calendar servers are reachable.
+          {% elif stamped_at %}
+            <span class="mono">{{ filename }}</span>'s fingerprint was submitted to Bitcoin on <strong>{{ stamped_at }}</strong> and isn't confirmed yet. This usually settles within a few hours.
+          {% else %}
+            <span class="mono">{{ filename }}</span>'s fingerprint has been submitted to Bitcoin but isn't confirmed yet. This usually settles within a few hours.
+          {% endif %}
         {% elif verdict == "warn" and ots_state == "pending" %}
           <span class="mono">{{ filename }}</span>'s fingerprint is queued locally and has not been submitted to a timestamp server yet. Nothing has been asked of Bitcoin for it so far.
         {% elif verdict == "unavailable" and ots_state == "none" %}
@@ -61,13 +81,25 @@
   <div class="card card--flush">
     <div class="detail-row"><div class="detail-row__label">{{ m.icon("file", size=15) }} File</div><div class="detail-row__value mono" style="font-size:12.5px">{{ relpath }}</div><span></span></div>
     <div class="detail-row"><div class="detail-row__label">Collection</div><div class="detail-row__value">{{ collection }}</div><span></span></div>
+    {# Two different facts, never merged into one label. With live bytes this is the digest just
+       computed from them. Without live bytes (missing/unreadable file) nothing was hashed, so the
+       row shows the digest the LAST SCAN recorded, said in those words — "(unknown)" threw away
+       the one thing Cairn does still hold about a file that has gone. #}
     <div class="detail-row">
-      <div class="detail-row__label">Fingerprint</div>
+      <div class="detail-row__label">{{ "Fingerprint" if live_digest or not baseline_sha256 else "Last recorded fingerprint" }}</div>
       <div class="detail-row__value">
-        <span class="mono" style="font-size:11.5px;word-break:break-all;color:var(--text-2)" id="verify-sha">{{ sha256 }}</span>
-        <div class="detail-row__hint">The file's unique digital fingerprint (a SHA-256 hash). Any change to the file would produce a different one.</div>
+        <span class="mono" style="font-size:11.5px;word-break:break-all;color:var(--text-2)" id="verify-sha">{{ sha256 if live_digest or not baseline_sha256 else baseline_sha256 }}</span>
+        <div class="detail-row__hint">
+          {% if live_digest or not baseline_sha256 %}
+            The file's unique digital fingerprint (a SHA-256 hash). Any change to the file would produce a different one.
+          {% else %}
+            The fingerprint Cairn recorded the last time it could read this file. It was <strong>not</strong> compared with anything in this check &mdash; the file's current bytes could not be read.
+          {% endif %}
+        </div>
+        <div class="copy-note" id="verify-sha-copied" hidden></div>
       </div>
-      <button type="button" class="copy-btn" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('verify-sha').textContent.trim())">{{ m.icon("copy", size=15) }}</button>
+      <button type="button" class="copy-btn" aria-label="Copy fingerprint"
+              onclick="cairnCopy(document.getElementById('verify-sha').textContent.trim(), 'verify-sha-copied')">{{ m.icon("copy", size=15) }}</button>
     </div>
     {# Confirmed provenance is rendered ONLY under a verified verdict. On every other branch the
        block and the date are what the proof *declares* &mdash; read out of the proof file, confirmed
@@ -86,26 +118,40 @@
     {% if calendars %}
     <div class="detail-row"><div class="detail-row__label">Timestamp servers</div><div class="detail-row__value"><div style="display:flex;flex-direction:column;gap:3px">{% for cal in calendars %}<span class="mono" style="font-size:11.5px;color:var(--text-2)">{{ cal }}</span>{% endfor %}</div><div class="detail-row__hint">The OpenTimestamps services that submitted the fingerprint to Bitcoin.</div></div><span></span></div>
     {% endif %}
+    {# Only where a lookup actually happened. On a never-notarized, queued, unreadable-proof or
+       unreachable-backend card nothing was ever looked up anywhere, and naming a backend there
+       reports a check that did not run. #}
+    {% if lookup_made %}
     <div class="detail-row"><div class="detail-row__label">{{ m.icon("search", size=15) }} Checked using</div><div class="detail-row__value">{{ verified_via }}<div class="detail-row__hint">Where Cairn looked up the Bitcoin record to confirm this proof.</div></div><span></span></div>
+    {% endif %}
   </div>
 
+  {# The copyable report carries the same qualifications as the card: an unconfirmed block is
+     labelled unconfirmed, a recorded-baseline digest is labelled as such, and the backend line
+     appears only where a lookup was actually made. #}
   <pre id="verify-report" hidden>Cairn verification report
 File:        {{ relpath }}
 Collection:      {{ collection }}
-SHA-256:     {{ sha256 }}
-Verdict:     {{ title }}{% if verified and existed_by %}
+{% if live_digest or not baseline_sha256 %}SHA-256:     {{ sha256 }}{% else %}SHA-256 (LAST RECORDED, not re-read in this check): {{ baseline_sha256 }}{% endif %}
+Verdict:     {{ title }}{% if live_unavailable %}
+Note:        {{ live_unavailable }} — nothing was compared in this check{% endif %}{% if verified and existed_by %}
 Existed by:  {{ existed_by }}{% endif %}{% if verified and block_height %}
 Bitcoin block: #{{ "{:,}".format(block_height) }}{% elif block_height %}
-Block recorded in the proof (UNVERIFIED, not confirmed by this check): #{{ "{:,}".format(block_height) }}{% endif %}
-Verified via: {{ verified_via }}</pre>
+Block recorded in the proof (UNVERIFIED, not confirmed by this check): #{{ "{:,}".format(block_height) }}{% endif %}{% if lookup_made %}
+Verified via: {{ verified_via }}{% endif %}</pre>
   <div class="flex gap-10" style="margin-top:16px">
     {# Only offered when a proof actually exists on the row: the export route 409s without one, and
        a download button on a card that just said "no proof yet" is a promise the page can't keep. #}
     {% if has_proof %}<a class="btn" href="/verify/export/{{ file_id }}">{{ m.icon("download", size=15) }} Download .ots proof</a>{% endif %}
-    <button type="button" class="btn btn--ghost" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('verify-report').textContent)">{{ m.icon("copy", size=15) }} Copy verification report</button>
+    <button type="button" class="btn btn--ghost"
+            onclick="cairnCopy(document.getElementById('verify-report').textContent, 'verify-report-copied')">{{ m.icon("copy", size=15) }} Copy verification report</button>
+    <span class="copy-note" id="verify-report-copied" hidden></span>
   </div>
   <div class="info-strip" style="margin-top:18px">
     {{ m.icon("info", size=15, cls="text-3") }}
-    <span>Checked using {{ verified_via }}. For fully trustless verification, point Cairn at your own Bitcoin node in Settings. The <span class="mono">.ots</span> proof is portable: a third party can verify it against their own copy of the file, without Cairn ever handing out the watched file's bytes. <a href="/learn">How this works →</a></span>
+    {# The backend sentence is gated on a lookup having happened, same rule as the row above. The
+       node route is an environment setting, not a panel control: Settings renders verification
+       read-only, so sending the operator there to "point Cairn at your own node" is a dead end. #}
+    <span>{% if lookup_made %}Checked using {{ verified_via }}. {% endif %}For fully trustless verification, point Cairn at your own Bitcoin node: set <span class="mono">CAIRN_VERIFY_BACKEND=node</span> and <span class="mono">CAIRN_NODE_RPC_URL</span> in the server environment and restart (these are not editable from the panel). The <span class="mono">.ots</span> proof is portable: a third party can verify it against their own copy of the file, without Cairn ever handing out the watched file's bytes. <a href="/learn">How this works →</a></span>
   </div>
 </div>

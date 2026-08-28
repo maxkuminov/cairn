@@ -19,6 +19,23 @@ Where such proof-declared metadata is shown at all it SHALL be explicitly labell
 the proof and unverified, SHALL NOT be captioned as where the displayed fingerprint is recorded, and
 SHALL carry the same qualification into any copyable report the page offers.
 
+The same labelling rule governs the **fingerprint** the page displays. Where the live bytes were
+hashed, that is the file's fingerprint. Where they could not be read, the page SHALL NOT present an
+empty or unknown value in that slot: it SHALL show the digest the last scan recorded, labelled as
+the last recorded fingerprint and stated as not having been compared with anything in this check.
+The recorded digest is the one fact Cairn still holds about a file that has gone, and it is the
+value an operator needs in order to look for the file elsewhere.
+
+The page's statement of **which backend was used to check** SHALL be rendered only where a lookup
+was actually made and answered. Where nothing was ever looked up — no proof exists, the proof is
+queued or unparseable, the live file could not be read, the digests disagreed before any attestation
+was fetched, or the backend could not be reached — naming a backend reports a check that did not
+run, and SHALL be omitted from the result, from the closing guidance and from any copyable report.
+
+Where the page tells the operator how to obtain fully trustless verification it SHALL name the
+**environment settings** that select the node backend, and SHALL NOT direct them to the settings
+page, which renders the verification backend read-only.
+
 The verdict SHALL be chosen by *why* verification did not succeed, not by the proof's stored state.
 The panel SHALL evaluate the outcomes in this order: the live file being unavailable, then a
 **digest mismatch**, then a **verified** result, then a **proof mismatch**, then a **transport
@@ -68,6 +85,16 @@ false alarm on the product's core signal; certifying an unvalidated proof is a f
 the evidence itself; and accusing a valid proof of corruption for the ordinary consequence of
 editing a file is the same false alarm pointed at the evidence.
 
+A result where the **live file could not be read** — gone from disk, or unreadable — SHALL be
+rendered in its own words: the file could not be read, so its bytes were never hashed and nothing
+was compared. It SHALL state that this says nothing about whether the file was altered, and it
+SHALL NOT be rendered with the generic wording that offers a possible change of contents as an
+explanation. No comparison was made, so a change of contents is not a finding this outcome supports
+— it is speculation about tampering built on a check that never ran, on the one page an operator
+consults to answer exactly that question. Where the file's own record already states the file is
+missing from the collection, the panel SHALL say so plainly and SHALL link to the collection's
+review view, so the outcome reads as the already-known state it is rather than as a new fault.
+
 A result whose stored proof **could not be parsed** SHALL be rendered in its own words: the proof
 file could not be read, and no conclusion was reached about the file. It SHALL NOT be rendered with
 the generic wording that offers a possible file change or an unconfirmed proof as explanations —
@@ -106,6 +133,13 @@ unreachability — and says which backend cannot separate them. It SHALL NOT pre
 a proof awaiting confirmation, and it SHALL NOT narrow the list by inferring a cause from the
 backend's output text: an inferred cause is a guess, and naming only "not yet confirmed or changed"
 raises a file-change alarm for what is most often an unreachable node.
+
+A proof **awaiting Bitcoin confirmation** SHALL be reported with the date it was submitted, and its
+reassurance SHALL depend on how long it has been waiting. Past the same age at which the upgrade
+command warns about a stuck proof, the panel SHALL drop the "usually settles within a few hours"
+reassurance, state how long the proof has been waiting and that this is unusually long, and name the
+upgrade command and the calendar servers as what to check. Repeating a few-hours reassurance over a
+proof submitted months ago tells the operator to keep waiting for something that is not coming.
 
 The two not-yet-confirmed proof states SHALL produce **two different verdicts**, never one: a proof
 submitted and awaiting Bitcoin confirmation, and a proof queued for stamping that has not been
@@ -162,6 +196,21 @@ asserting a fixed backend.
 - **THEN** the panel SHALL render the verified verdict, and SHALL NOT render the proof-mismatch
   failure
 
+#### Scenario: A long-unconfirmed proof drops the reassurance
+
+- **WHEN** the user verifies a file whose proof has been awaiting Bitcoin confirmation for longer
+  than the configured stuck-proof alarm age
+- **THEN** the result SHALL name the submission date and how long it has been waiting, SHALL say
+  that this is unusually long, SHALL name the upgrade command and the calendar servers as what to
+  check, and SHALL NOT say that it usually settles within a few hours
+
+#### Scenario: A recently submitted proof keeps the reassurance and gains its date
+
+- **WHEN** the user verifies a file whose proof was submitted within the stuck-proof alarm age and
+  is not yet confirmed
+- **THEN** the result SHALL name the submission date and SHALL say that this usually settles within
+  a few hours
+
 #### Scenario: A queued proof is not described as awaiting confirmation
 
 - **WHEN** the verified file's proof is queued for stamping and has not been submitted to a
@@ -211,6 +260,33 @@ asserting a fixed backend.
 - **WHEN** the user verifies a file that is gone from disk
 - **THEN** the panel SHALL report that the file is unavailable and cannot be verified, and SHALL NOT
   verify against the stored digest
+
+#### Scenario: An unreadable live file is explained, not speculated about
+
+- **WHEN** the user verifies a file whose bytes could not be read, so that nothing was hashed and
+  nothing was compared
+- **THEN** the result SHALL say that the file could not be read and that nothing was compared, SHALL
+  state that this says nothing about whether the file was altered, and SHALL NOT offer that the
+  file's contents may have changed as an explanation
+
+#### Scenario: A file already recorded missing is named as such and linked to review
+
+- **WHEN** the user verifies a file whose own record already carries the missing status
+- **THEN** the result SHALL state that Cairn's record already lists the file as missing from its
+  collection, and SHALL offer a link to that collection's review view
+
+#### Scenario: A file that could not be read shows its last recorded fingerprint
+
+- **WHEN** the user verifies a file whose bytes could not be read and for which a baseline digest is
+  recorded
+- **THEN** the page SHALL display that recorded digest, labelled as the last recorded fingerprint
+  and stated as not compared in this check, and SHALL NOT display an unknown fingerprint
+
+#### Scenario: The backend is named only where a lookup happened
+
+- **WHEN** the user verifies a file for which no lookup was made — it has never been stamped, its
+  proof is queued or unreadable, or its live bytes could not be read
+- **THEN** the result SHALL NOT name a verification backend as having been used
 
 #### Scenario: The anchored list shows real proof states
 
@@ -481,9 +557,17 @@ loaded" hides a fault the operator must act on.
 
 On refusal the endpoint SHALL mutate nothing — no file record removed, no baseline rewritten, no
 event acknowledged — and SHALL redirect to the review view **carrying a marker that the view
-renders as an explanation** that the collection changed since the page loaded and that the list
-shown is current. A refusal with no visible explanation is indistinguishable from a broken button
-and invites the operator to click it again.
+renders as an explanation**. That explanation SHALL lead with the consequence — the operator's
+action was **not** applied and nothing was deleted or acknowledged — before it describes the
+collection, and only then state that the collection changed since the page loaded. A refusal with no
+visible explanation is indistinguishable from a broken button and invites the operator to click it
+again; one that opens by describing the collection reads as a status note and leaves the operator
+believing the destructive action went through.
+
+Where the refusal lands on a view with **nothing left to review**, the explanation SHALL still lead
+with the action not having been applied, and SHALL account for the empty view by saying the state
+may already have been resolved. It SHALL NOT tell the operator that the list shown is current when
+there is no list, which reads as if their action had emptied it.
 
 "Scan now" SHALL run the scan **asynchronously** — it SHALL start the scan in the background and
 return immediately rather than blocking the request until the scan completes, so the panel can show
@@ -530,9 +614,18 @@ one.
 #### Scenario: A refused submission is explained on the review view
 
 - **WHEN** the review view is opened with the staleness marker a refused re-baseline redirects to
-- **THEN** the view SHALL render a dismissable notice saying the collection changed since the page
-  loaded and that the list shown is current, and SHALL NOT render that notice on an ordinary visit
-  or for an unrecognized marker value
+- **THEN** the view SHALL render a dismissable notice that states first that the action was not
+  applied and that nothing was deleted or acknowledged, then that the collection changed since the
+  page loaded and that the list shown is current, and SHALL NOT render that notice on an ordinary
+  visit or for an unrecognized marker value
+
+#### Scenario: A refusal landing on an all-clear view still says the action was not applied
+
+- **WHEN** the review view is opened with the staleness marker and the collection has no missing or
+  modified files and no open alerts left to review
+- **THEN** the notice SHALL still state that the action was not applied and nothing was deleted or
+  acknowledged, SHALL say the state may already have been resolved, and SHALL NOT claim that a list
+  shown below is current
 
 #### Scenario: A submission with no fingerprint is refused
 
@@ -678,14 +771,41 @@ would silently baseline every not-yet-baselined file in the collection.
 
 Where the list of affected files is truncated, the link to the full set SHALL open the file browser
 already switched to the list view and already filtered to issues, rather than a view that discards
-both. Copy-to-clipboard controls SHALL handle a clipboard write being unavailable or rejected, and
-SHALL report the failure rather than silently appearing to succeed.
+both. Where the copyable path list is truncated, the view SHALL point at that same filtered browser
+for the full set, and SHALL NOT direct the operator to a command that is not implemented.
+
+Copy-to-clipboard controls SHALL handle a clipboard write being unavailable or rejected, and SHALL
+report the failure rather than silently appearing to succeed. This SHALL hold for **every** copy
+control the panel renders, including those on the verification result, and the behaviour SHALL be
+implemented once and shared rather than reimplemented per surface. Recovery guidance SHALL refer to
+the copied list by the control that produced it rather than by its position on the page.
+
+The view's introduction, which describes files that went missing or changed and how to recover them,
+SHALL be rendered only where there is something to review. On a view with no issues and no open
+alerts it describes a situation the page itself then contradicts.
 
 #### Scenario: Dashboard issue count links to the review view
 
 - **WHEN** a collection has one or more missing or modified files and the user views the dashboard
 - **THEN** the card's issue count SHALL be a visibly clickable link that opens that collection's
   review view
+
+#### Scenario: The keyboard-activated issue count responds to both activation keys
+
+- **WHEN** the user focuses a dashboard card's issue count and presses Space
+- **THEN** the review view SHALL open, as it does for Enter
+
+#### Scenario: The review view's introduction is withheld when there is nothing to review
+
+- **WHEN** the user opens the review view for a collection with no missing or modified files and no
+  open alerts
+- **THEN** the page SHALL NOT render the introduction describing files that went missing or changed
+
+#### Scenario: A truncated copy list points at the filtered browser
+
+- **WHEN** the review view's copyable path list is truncated
+- **THEN** the notice SHALL link to the file browser filtered to issues for the full set, and SHALL
+  NOT name an unimplemented command
 
 #### Scenario: Review view lists what happened to each file
 
@@ -876,6 +996,16 @@ Summaries SHALL NOT add the two together under one label. Where both are non-zer
 name each with its own count; where one is zero it MAY be omitted. The documentation SHALL name each
 state as the interface words it.
 
+The notarization vocabulary SHALL NOT be borrowed for the **integrity** result. A collection summary
+reporting that its files match the baseline the last scan recorded SHALL NOT describe them as
+*verified*: verification is the notary's word for a proof checked against the Bitcoin record, which
+no scan performs, and reusing it credits the collection with evidence that was never gathered.
+
+A count of unacknowledged alerts SHALL be named for what clearing it does. Acknowledging is a
+reading log — it records that the operator has seen the alert and changes nothing about the file or
+the baseline — so the count SHALL NOT be labelled as needing action, which promises a repair the
+control does not perform.
+
 The documentation SHALL describe only verification paths an operator can actually complete. It SHALL
 lead with the public drag-and-drop verifier, SHALL state that verifying requires **both** the file
 and its `.ots` proof — the panel's export serves only the proof, so the file must be supplied
@@ -940,11 +1070,33 @@ Where a live progress indicator cannot fit alongside the content that identifies
 progressing, the indicator's non-essential detail SHALL be dropped rather than the identifying
 content. Fixed-width metadata cells SHALL reflow rather than clip their values.
 
+Where dropping non-essential detail is not sufficient — the indicator remains wider than the space
+its row can give up — the indicator SHALL be moved out of that row entirely so that the identifying
+content occupies a full line of its own. An indicator whose width cannot be negotiated must stop
+sharing a row with the name, rather than continue to consume it.
+
+A control whose label cannot fit its container SHALL be allowed to wrap rather than overflow the
+container it sits in.
+
 #### Scenario: A running operation does not crush the collection name
 
 - **WHEN** a collection with a running operation is rendered on a viewport narrower than the mobile
   breakpoint
-- **THEN** the collection's name SHALL remain readable, with the progress bar omitted if necessary
+- **THEN** the collection's name SHALL remain readable, with the progress bar omitted if necessary,
+  and the progress indicator SHALL occupy its own row rather than share the name's
+
+#### Scenario: A bulk action's label does not push its card off screen
+
+- **WHEN** a bulk acknowledgement control whose label carries a count and a scope is rendered on a
+  viewport narrower than the mobile breakpoint
+- **THEN** the control SHALL wrap within its container rather than overflow it
+
+#### Scenario: A long root path is readable on a phone
+
+- **WHEN** the collection detail page's root-path cell is rendered on a viewport narrower than the
+  mobile breakpoint
+- **THEN** the path SHALL wrap rather than be truncated, and SHALL also carry the full value as a
+  pointer hint
 
 #### Scenario: Detail metadata reflows instead of clipping
 

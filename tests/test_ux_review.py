@@ -29,7 +29,12 @@ HINT = (
     "Notes that you've seen this. The file stays on record as missing or changed, keeps any "
     "existence proof, and the collection keeps its Alert status until you restore or retire it."
 )
-STALE_COPY = "This collection changed since the page loaded — the list below is current."
+# The refusal banner leads with the CONSEQUENCE (live-pass M2): the operator clicked a destructive
+# button and the first thing they need is that it did not run. Asserted as the lead phrase, not the
+# whole paragraph — the second half branches on whether anything is left to review.
+STALE_LEAD = "<strong>Your action was NOT applied</strong>"
+STALE_NOTHING_MUTATED = "Nothing was deleted or acknowledged."
+STALE_COPY = "this collection changed since the page loaded"
 
 
 # --- helpers ---------------------------------------------------------------------------------
@@ -370,10 +375,42 @@ def test_population_fp_is_rendered_when_the_route_publishes_it(cairn_env):
 
 
 def test_stale_banner_renders_only_when_the_route_says_stale(cairn_env):
-    assert STALE_COPY in _render_review(stale=True)
-    assert "id=\"stale-banner\"" in _render_review(stale=True)
+    banner = _render_review(stale=True)
+    assert STALE_COPY in banner
+    assert "id=\"stale-banner\"" in banner
     assert STALE_COPY not in _render_review()          # no key -> no banner
     assert STALE_COPY not in _render_review(stale="")  # falsy -> no banner
+
+
+def test_stale_banner_leads_with_the_action_not_having_been_applied(cairn_env):
+    """M2: the cause is not the headline — the consequence is.
+
+    "This collection changed since the page loaded" is a true statement *about the collection* that
+    never says the operator's Accept did nothing. Read at speed after clicking a destructive button
+    it parses as a status note on a page that has apparently been accepted.
+    """
+    banner = _render_review(stale=True, total_issues=1)
+    assert STALE_LEAD in banner
+    assert STALE_NOTHING_MUTATED in banner
+    # Order: consequence, then cause. Not merely "both strings are present somewhere".
+    assert banner.index(STALE_LEAD) < banner.index(STALE_COPY)
+    # With a list to look at, the operator is told to look at it.
+    assert "The list below is current" in banner
+
+
+def test_stale_banner_refused_onto_an_empty_review_still_says_it_was_not_applied(cairn_env):
+    """M2: the refusal redirects unconditionally, so it can land on an all-clear page.
+
+    "The list below is current" over an empty page reads as if the accept had emptied it — the
+    exact false impression the banner exists to prevent.
+    """
+    banner = _render_review(stale=True, total_issues=0, review_open=0)
+    assert STALE_LEAD in banner
+    assert STALE_NOTHING_MUTATED in banner
+    assert "The list below is current" not in banner
+    assert "may already have been handled" in banner
+    # The all-clear card still carries the way out; no "try again" is invented for it.
+    assert "Back to Photos" in banner
 
 
 def test_plain_review_get_has_no_stale_banner(cairn_env):
@@ -393,3 +430,55 @@ def test_plain_review_get_has_no_stale_banner(cairn_env):
         refused = client.get("/collection/1/review?stale=1").text
         assert STALE_COPY in refused
         assert 'id="stale-banner"' in refused
+
+
+# --- live UX pass: review-page copy (#11 / #14 / #18) -----------------------------------------
+
+
+def test_the_truncation_notice_points_at_the_filtered_browser_not_an_unbuilt_command(cairn_env):
+    """#11: `cairn status` is listed as *planned* — the notice sent the operator to a command that
+    does not exist, when the page already links the place the full set actually lives."""
+    html = _render_review(copy_truncated=True, copy_count=2000, total_issues=9000)
+
+    assert "cairn status" not in html
+    assert 'href="/collection/1?view=list&amp;filter=issues"' in html
+    assert "The buttons copy the first 2,000 of 9,000 paths" in html
+
+
+def test_the_recovery_copy_refers_to_the_button_not_to_a_position(cairn_env):
+    """#14: "the list above" names nothing — the paths are on the clipboard, not on the page."""
+    html = _render_review()
+
+    assert "Paste the list above" not in html
+    assert "Paste the copied list" in html
+
+
+def test_the_review_intro_is_withheld_when_there_is_nothing_to_review(cairn_env):
+    """#18: on an all-clear page the intro described missing/changed files and offered recovery
+    instructions for a set that is empty — the page then contradicts it two lines down."""
+    intro = "that went missing or changed"
+
+    assert intro in _render_review(total_issues=1, review_open=1)
+    # Restored-but-unread alerts are still something to act on, so the intro stays.
+    assert intro in _render_review(total_issues=0, review_open=2)
+    # Genuinely nothing to do: no intro.
+    assert intro not in _render_review(total_issues=0, review_open=0)
+
+
+def test_the_recovery_copy_buttons_go_through_the_one_shared_clipboard_helper(cairn_env):
+    """M4: the review page's working fallback is now the panel's only clipboard implementation,
+    so the verify card cannot drift away from it."""
+    root = cairn_env / "photos"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _seed_missing_file_with_event(cid)
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/collection/1/review").text
+
+    assert "window.cairnCopy(paths(" in body
+    # The implementation ships once, from base.html, with the fallback and the visible result.
+    assert body.count("function legacyCopy") == 1
+    assert "execCommand" in body and ".catch(" in body and "Couldn't copy" in body

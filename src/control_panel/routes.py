@@ -512,7 +512,7 @@ async def _event_view(session: AsyncSession, event: Event) -> dict[str, Any]:
 async def _event_feed(session: AsyncSession, collection_ids: list[int]) -> dict[str, Any]:
     """Recent-events feed + live counts for the dashboard and its htmx refreshes.
 
-    ``open_events`` (the "need action" pill) and ``alert_count`` (the sidebar badge) are real
+    ``open_events`` (the "unreviewed" pill) and ``alert_count`` (the sidebar badge) are real
     COUNT queries over ALL of the user's events/files, not just the 20 rendered rows, so both stay
     accurate past the feed cap. Auto-acknowledged ``added``/``restored`` events render in the feed
     but never count toward ``open_events``. The badge comes from :func:`_alert_badge_count` so it
@@ -679,7 +679,7 @@ async def ack_event(
 
     if view == "review":
         # Acknowledged from the review page: swap that row in place and refresh the collection's
-        # "need action" pill (#review-open-pill) plus the global sidebar badge.
+        # "unreviewed" pill (#review-open-pill) plus the global sidebar badge.
         fe = await session.get(FileEntry, event.file_id) if event.file_id else None
         item = _review_item(fe, collection.root, event) if fe is not None else None
         review_open = await session.scalar(
@@ -2012,14 +2012,49 @@ async def verify_run(
     # requires an explorer/node block lookup (a later refinement); until then it stays absent.
     block_hash = result.block_hash if result else None
 
+    # "Checked using <backend>" claims a lookup was made at that backend. It is true only where the
+    # chain was actually consulted AND answered: a verified attestation, or an attestation fetched
+    # and found not to commit to its block. Every other branch never reached the network — a
+    # never-stamped or queued file has nothing to look up, an unparseable `.ots` yields no
+    # attestation to look up, a digest disagreement short-circuits before the first fetch (the
+    # explorer backend compares the committed digest locally and returns), and a transport failure
+    # is the lookup NOT happening. Printing the backend there attributes the outcome to a check
+    # that never ran, which is the same class of overclaim as the unverified block row above.
+    lookup_made = bool(result and (result.verified or result.proof_mismatch))
+
+    # Stale-incomplete disclosure (mirrors `cairn upgrade`'s warning and its threshold,
+    # `CAIRN_INCOMPLETE_PROOF_ALARM_DAYS`, so the panel and the CLI can't disagree about when a
+    # submitted proof has waited too long). "Usually settles within a few hours" is true of a proof
+    # submitted this morning and false — reassuring noise over a real stuck stamp — of one
+    # submitted in March.
+    stamped_days: int | None = None
+    if fe.ots_stamped_at is not None:
+        stamped_at = fe.ots_stamped_at
+        if stamped_at.tzinfo is None:
+            stamped_at = stamped_at.replace(tzinfo=timezone.utc)
+        stamped_days = max(0, int((datetime.now(timezone.utc) - stamped_at).total_seconds() // 86400))
+
     ctx = {
         "file_id": file_id,
         "filename": Path(fe.relpath).name,
         "relpath": fe.relpath,
         "collection": collection.name,
+        "collection_id": collection.id,
         "sha256": digest or "(unknown)",
+        # The live re-hash, or nothing. A card with no live digest must not present the recorded
+        # baseline in the slot labelled "the file's fingerprint" — nothing was hashed this check.
+        "live_digest": bool(digest),
+        # Shown INSTEAD, explicitly labelled, when the live bytes could not be read: "(unknown)"
+        # threw away the one fact Cairn does hold about a file that is gone.
+        "baseline_sha256": (fe.sha256 or None),
         "verdict": verdict,
         "title": title,
+        # Why no live bytes were hashed (missing / unreadable), and what the file row itself says.
+        # The card owes an explicit account of "nothing was compared" here; without these it fell
+        # through to the generic fallback, which speculates that the contents may have changed —
+        # the one thing this check established nothing about.
+        "live_unavailable": live_unavailable,
+        "file_status": fe.status,
         "verified": bool(result and result.verified),
         # Whether there is a proof to offer for download at all (the export route 409s without one).
         "has_proof": bool(fe.ots_path),
@@ -2047,6 +2082,12 @@ async def verify_run(
         "block_hash": block_hash,
         "calendars": result.calendars if result else [],
         "verified_via": verified_via,
+        "lookup_made": lookup_made,
+        "stamped_at": humanize_date(fe.ots_stamped_at),
+        "stamped_days": stamped_days,
+        "stamp_stale": (
+            stamped_days is not None and stamped_days >= settings.incomplete_proof_alarm_days
+        ),
         "message": (
             live_unavailable
             if live_unavailable is not None

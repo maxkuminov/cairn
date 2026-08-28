@@ -177,3 +177,158 @@ def test_status_meta_cell_takes_a_full_row_and_stops_ellipsizing():
     assert any(
         ".meta-cell--wide .meta-cell__value" in b and "white-space: normal" in b for b in blocks
     )
+
+
+# --- live UX pass: the mobile findings the first mobile slice only half-fixed ------------------
+
+
+def _media_blocks(max_width: int) -> list[str]:
+    """Bodies of every `@media (max-width: Npx)` block in panel.css."""
+    css = CSS_PATH.read_text()
+    blocks: list[str] = []
+    marker = f"@media (max-width: {max_width}px) {{"
+    idx = css.find(marker)
+    while idx != -1:
+        i = idx + len(marker) - 1
+        start = i + 1
+        depth = 1
+        while depth and i + 1 < len(css):
+            i += 1
+            if css[i] == "{":
+                depth += 1
+            elif css[i] == "}":
+                depth -= 1
+        blocks.append(css[start:i])
+        idx = css.find(marker, i)
+    return blocks
+
+
+def test_the_collection_card_badge_takes_a_row_of_its_own_so_the_name_keeps_its_line():
+    """M3 / #33: hiding the progress bar was only half the fix.
+
+    The badge is still ~269px (deep-scan variant) and shares a `space-between` flex row with the
+    collection NAME, so flex resolved the overflow by shrinking the name — the only item with
+    `min-width: 0` — to ~23px. A nowrap badge cannot be negotiated down, so it gets its own row.
+    """
+    blocks = _media_blocks(768)
+    assert any(".collection-card__title-row { flex-wrap: wrap; }" in b for b in blocks)
+    badge_rule = [
+        b for b in blocks if ".collection-card__title-row > .op-status" in b
+    ]
+    assert badge_rule, "the card's op-status is not given a row of its own under the breakpoint"
+    rule = badge_rule[0]
+    assert "flex: 0 0 100%" in rule  # a full-width basis is what forces the wrap
+    assert "order: 2" in rule
+    # …and the name block owns the line above it.
+    assert any(".collection-card__title-row > :first-child { flex: 1 1 100%;" in b for b in blocks)
+
+
+def test_the_deep_tag_is_dropped_from_the_card_badge_at_phone_width():
+    """Even on its own row the deep-scan badge overruns a 320px card's ~252px content box."""
+    blocks = _media_blocks(480)
+    assert any(
+        ".collection-card__title-row .op-badge__deep { display: none; }" in b for b in blocks
+    )
+
+
+def test_the_bulk_review_button_may_wrap_instead_of_overflowing_the_rail_card():
+    """#7: a nowrap button wider than its 390px card pushed the card off the right edge."""
+    blocks = _media_blocks(768)
+    assert any("#open-events-pill .btn" in b and "white-space: normal" in b for b in blocks)
+    assert any("#open-events-pill { flex-wrap: wrap;" in b for b in blocks)
+    assert any(".row-between { flex-wrap: wrap;" in b for b in blocks)
+
+
+def test_the_mono_root_path_cell_wraps_rather_than_clipping_on_a_phone():
+    """#13: the ellipsis ate the whole path, and touch has no hover to recover a `title` with."""
+    blocks = _media_blocks(768)
+    assert any(
+        ".meta-cell__value.mono" in b and "white-space: normal" in b and "overflow-wrap" in b
+        for b in blocks
+    )
+
+
+def test_the_root_path_cell_carries_a_title_for_the_pointer_case(cairn_env):
+    with _client(cairn_env) as client:
+        body = client.get("/collection/1").text
+
+    assert 'class="meta-cell__value mono" style="font-size:12px" title=' in body
+
+
+def test_the_panel_ships_an_inline_favicon_so_no_request_404s(cairn_env):
+    """#17: every page load logged a /favicon.ico 404 in the browser console."""
+    with _client(cairn_env) as client:
+        body = client.get("/").text
+
+    assert 'rel="icon"' in body
+    assert "data:image/svg+xml" in body
+
+
+async def _seed_file(cid: int, *, status: str) -> None:
+    from datetime import datetime, timezone
+
+    from src.database import get_sessionmaker
+    from src.models.db import FileEntry
+
+    now = datetime.now(timezone.utc)
+    async with get_sessionmaker()() as s:
+        s.add(FileEntry(
+            collection_id=cid, relpath="a/b.txt", size=4, sha256="e" * 64,
+            status=status, ots_state="none", first_seen=now, last_checked=now,
+        ))
+        await s.commit()
+
+
+def test_the_card_legend_reports_the_baseline_comparison_not_a_notary_verdict(cairn_env):
+    """#9: "verified" is the notary's word for a proof checked against Bitcoin. A scan compares
+    against the recorded baseline and confirms no proof at all."""
+    root = cairn_env / "clean-collection"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _seed_file(cid, status="ok")
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/").text
+
+    assert "All files verified" not in body
+    assert "matching baseline" in body.lower()
+
+
+def test_the_alert_pills_say_unreviewed_rather_than_need_action(cairn_env):
+    """#12: "need action" overstated it — clearing the pill is a reading log, not a repair."""
+    async def seed():
+        from datetime import datetime, timezone
+
+        from src.database import get_sessionmaker
+        from src.models.db import Event
+
+        root = cairn_env / "pill-collection"
+        root.mkdir()
+        cid = await seed_collection(root)
+        async with get_sessionmaker()() as s:
+            s.add(Event(collection_id=cid, kind="missing", detected_at=datetime.now(timezone.utc)))
+            await s.commit()
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/").text
+
+    assert "unreviewed" in body
+    assert "need action" not in body
+
+
+def test_the_keyboard_activated_issue_count_answers_space_as_well_as_enter(cairn_env):
+    """#19: a `role="link"` must respond to both activation keys, not only Enter."""
+    root = cairn_env / "issue-collection"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _seed_file(cid, status="missing")
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/").text
+
+    assert 'role="link"' in body
+    assert "event.key===' '" in body

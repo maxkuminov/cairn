@@ -800,10 +800,30 @@ needs the treatment.
 page that lists exactly the issues that caused the refusal, with the clearing controls in reach. The
 panel has no flash-message mechanism, so the marker is the message: `collection_review` accepts
 `stale` as a whitelisted query parameter (only `1` is recognized; anything else is ignored, exactly
-as `view` / `filter` are handled in D11) and renders a dismissable banner — *"This collection
-changed since the page loaded — the list below is current."* A bare redirect would land the operator
-on an ordinary review page with no account of why their click did nothing, which reads as a broken
-button and invites them to click it again.
+as `view` / `filter` are handled in D11) and renders a dismissable banner. A bare redirect would land
+the operator on an ordinary review page with no account of why their click did nothing, which reads
+as a broken button and invites them to click it again.
+
+*The banner leads with the consequence.* The live pass caught the first wording doing the second
+half of that job and not the first: *"This collection changed since the page loaded — the list below
+is current."* is a true statement **about the collection**, and it never says the thing the operator
+came here needing — that their click did nothing. Read at speed after pressing **Accept all
+changes**, it parses as a status note on a page that has, apparently, been accepted. The order is
+now fixed: consequence, then cause, then instruction — *"**Your action was NOT applied** — this
+collection changed since the page loaded. Nothing was deleted or acknowledged. The list below is
+current; review it and decide again."* "Nothing was deleted or acknowledged" is named explicitly
+because those are the two things `accept_collection` does, and a guard that mutated nothing is worth
+nothing to an operator who cannot tell that it did.
+
+*And the empty landing.* The refusal redirects to the review page unconditionally, so the very drift
+that caused it can leave nothing to review — another session accepted the set, or a scan restored
+the missing file. "The list below is current" over an empty page reads as if the accept had emptied
+it, which is the exact false impression the banner exists to prevent. The banner therefore branches
+on the same `total_issues` / `review_open` the page body branches on: the lead sentence is unchanged
+(the action still was not applied) and the second half becomes an account of the emptiness — the
+state may already have been resolved, by a scan or in another session. No "try again" affordance is
+offered: there is nothing left to try, and the all-clear card already carries **Back to
+{collection}**. The requirement is an honest account, not a second button.
 
 *Coverage, stated plainly.* `accept_collection` mutates three populations, and the guard now binds
 each of them: the **file rows it deletes and rewrites**, by identity *and* generation

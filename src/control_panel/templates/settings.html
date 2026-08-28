@@ -212,8 +212,12 @@
             <span style="color:var(--ok);font-weight:600">GET</span>
             <span class="text-2" id="healthz-url">{{ healthz_url }}</span>
             {% if healthz_url_is_example %}<span class="pill pill--soft pill--muted pill--sm">Example</span>{% endif %}
-            <button type="button" class="copy-btn" style="margin-left:auto" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('healthz-url').textContent.trim())">{{ m.icon("copy", size=15) }}</button>
+            {# Shared helper (partials/_clipboard.html): the bare `navigator.clipboard && …` was a
+               silent no-op on the insecure origins a self-hosted panel usually runs on. #}
+            <button type="button" class="copy-btn" style="margin-left:auto" aria-label="Copy health URL"
+                    onclick="cairnCopy(document.getElementById('healthz-url').textContent.trim(), 'healthz-url-copied')">{{ m.icon("copy", size=15) }}</button>
           </div>
+          <div class="copy-note" id="healthz-url-copied" hidden></div>
           {% if healthz_url_is_example %}
             <div class="field__hint" style="margin-top:10px">That is an illustrative address, not yours — set the panel address above and this becomes your real health URL.</div>
           {% endif %}

@@ -33,7 +33,7 @@
            (not a nested <a>, which is invalid) intercepts the click and navigates to review. #}
         <span class="legend__review" role="link" tabindex="0"
               onclick="event.preventDefault();event.stopPropagation();window.location.href='/collection/{{ c.id }}/review'"
-              onkeydown="if(event.key==='Enter'){event.preventDefault();window.location.href='/collection/{{ c.id }}/review'}">
+              onkeydown="if(event.key==='Enter'||event.key===' '||event.key==='Spacebar'){event.preventDefault();event.stopPropagation();window.location.href='/collection/{{ c.id }}/review'}">
           {% if c.counts.missing > 0 %}<span class="legend__stat">{{ m.dot("var(--danger)", size=7) }}{{ c.counts.missing }} missing</span>{% endif %}
           {% if c.counts.modified > 0 %}<span class="legend__stat">{{ m.dot("var(--warn)", size=7) }}{{ c.counts.modified }} modified</span>{% endif %}
           <span class="legend__cta">Review {{ m.icon("chevronR", size=12) }}</span>
@@ -44,7 +44,10 @@
       {% elif c.is_empty %}
         <span class="legend__stat">{{ m.dot("var(--text-3)", size=7) }}No files indexed yet</span>
       {% else %}
-        <span class="legend__stat">{{ m.dot("var(--ok)", size=7) }}All files verified</span>
+        {# "verified" is the notary vocabulary (a proof checked against Bitcoin); this legend reports
+           the integrity check, which is a comparison against the recorded baseline. Using the
+           notary word here claims every file's proof was just confirmed, which no scan does. #}
+        <span class="legend__stat">{{ m.dot("var(--ok)", size=7) }}All files matching baseline</span>
       {% endif %}
     </div>
   </div>

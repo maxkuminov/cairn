@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -52,6 +52,7 @@ async def _seed_one_anchored_file(
     ots_state: str = "complete",
     sha256: str | None = "d" * 64,
     status: str = "ok",
+    stamped_days_ago: int = 0,
 ) -> int:
     """One collection with a single on-disk, stamped file. Returns the collection id.
 
@@ -70,11 +71,14 @@ async def _seed_one_anchored_file(
 
     cid = await seed_collection(root)
     now = datetime.now(timezone.utc)
+    # `stamped_days_ago` ages the submission: the panel's awaiting-confirmation copy branches on it
+    # at `CAIRN_INCOMPLETE_PROOF_ALARM_DAYS`, the same threshold `cairn upgrade` warns at.
+    stamped = now - timedelta(days=stamped_days_ago)
     async with get_sessionmaker()() as s:
         s.add(FileEntry(
             collection_id=cid, relpath="doc.txt", size=5, sha256=sha256,
             status=status, ots_state=ots_state, ots_path=str(root.parent / "p" / "doc.txt.ots"),
-            ots_stamped_at=now, first_seen=now, last_checked=now,
+            ots_stamped_at=stamped, first_seen=now, last_checked=now,
         ))
         await s.commit()
     return cid
@@ -215,7 +219,10 @@ def test_inconclusive_names_all_three_possibilities(verify_client, monkeypatch):
 def test_incomplete_reads_pending_confirmation(verify_client, monkeypatch):
     html = _post_verify(verify_client, _result(state="incomplete"), monkeypatch)
     assert "Pending confirmation" in html
-    assert "submitted to Bitcoin but isn't confirmed yet" in html
+    # Live-pass M5: the card now dates the submission. A proof stamped just now keeps the
+    # reassurance, because for a fresh proof it is true.
+    assert "was submitted to Bitcoin on" in html
+    assert "This usually settles within a few hours." in html
 
 
 def test_pending_reads_queued_to_stamp_with_no_awaiting_wording(verify_client, monkeypatch):
@@ -831,3 +838,171 @@ def test_cli_node_backend_missing_binary_prints_could_not_check(cairn_env, capsy
     assert rc == 1
     assert "COULD NOT CHECK" in text
     assert "pending" not in text.lower()
+
+
+# --- live UX pass: M1 / M5 / #15 -------------------------------------------------------------
+#
+# Three findings from driving the deployed panel, all the same shape: a card that says more than
+# the check established. The file that could not be read got the generic red fallback speculating
+# about its contents; a proof stuck since March was told it usually settles within a few hours;
+# and the backend was named as having been "used" on cards where nothing was ever looked up.
+
+
+def _unavailable_client(cairn_env, *, status: str = "ok"):
+    """A client whose one tracked file is NOT on disk, so the live re-hash cannot happen."""
+    root = cairn_env / "gone"
+    root.mkdir()  # deliberately no doc.txt
+    return _make_client(lambda: _seed_one_anchored_file(root, status=status))
+
+
+def test_a_file_that_cannot_be_read_never_speculates_about_its_contents(cairn_env, monkeypatch):
+    """M1: `live_unavailable` set the verdict but was absent from the template context.
+
+    The card therefore fell through to the generic fallback — "Its contents may have changed since
+    it was recorded" — which is speculation about tampering built on a check that never ran, on the
+    one page an operator opens to answer exactly that question.
+    """
+    with _unavailable_client(cairn_env) as client:
+        html = _post_verify(client, _result(verified=True), monkeypatch)
+
+    assert "File unavailable — cannot verify" in html
+    assert "contents may have changed" not in html
+    assert "could not read" in html
+    assert "nothing was compared" in html.lower()
+    assert "says nothing about whether the file was altered" in html
+
+
+def test_a_file_recorded_missing_says_so_and_points_at_review(cairn_env, monkeypatch):
+    """M1: where the row already says `missing`, the card names that and offers the way forward."""
+    with _unavailable_client(cairn_env, status="missing") as client:
+        html = _post_verify(client, _result(verified=True), monkeypatch)
+
+    assert "already lists this file as <strong>missing</strong>" in html
+    assert 'href="/collection/1/review"' in html
+    assert "contents may have changed" not in html
+
+
+def test_an_unreadable_file_shows_its_last_recorded_fingerprint(cairn_env, monkeypatch):
+    """#15: "(unknown)" threw away the one fact Cairn still holds about a file that has gone."""
+    with _unavailable_client(cairn_env, status="missing") as client:
+        html = _post_verify(client, _result(verified=True), monkeypatch)
+
+    assert "(unknown)" not in html
+    assert "Last recorded fingerprint" in html
+    assert "d" * 64 in html
+    assert "not</strong> compared with anything in this check" in html
+
+
+def test_the_backend_is_not_named_where_no_lookup_happened(cairn_env, monkeypatch):
+    """#15: "Checked using <explorer>" on a card where nothing was ever fetched.
+
+    A file that could not be read never reached the network, so naming a backend reports a check
+    that did not run — and the closing strip repeated the same claim.
+    """
+    with _unavailable_client(cairn_env) as client:
+        html = _post_verify(client, _result(verified=True), monkeypatch)
+
+    assert "Checked using" not in html
+    assert "Verified via:" not in html
+
+
+def test_the_backend_is_not_named_on_a_never_notarized_file(cairn_env, monkeypatch):
+    root = cairn_env / "unstamped"
+    root.mkdir()
+    (root / "doc.txt").write_text("hello")
+
+    async def seed():
+        cid = await _seed_one_anchored_file(root, ots_state="none")
+        from src.database import get_sessionmaker
+        from src.models.db import FileEntry
+
+        async with get_sessionmaker()() as s:
+            fe = await s.get(FileEntry, 1)
+            fe.ots_path = None  # nothing to verify -> `result` is None
+            await s.commit()
+        return cid
+
+    with _make_client(seed) as client:
+        token = _csrf_token(client)
+        html = client.post("/verify", data={"csrf_token": token, "file_id": 1}).text
+
+    assert "Not notarized yet" in html
+    assert "Checked using" not in html
+
+
+def test_the_backend_is_named_on_a_verified_card(verify_client, monkeypatch):
+    """The other half of #15: where a lookup DID happen, the strip must stay."""
+    html = _post_verify(
+        verify_client,
+        _result(verified=True, block_height=880000, existed_by="2026-02-14 18:35 UTC"),
+        monkeypatch,
+    )
+    assert "Checked using" in html
+    assert "Verified via:" in html
+
+
+def test_a_long_unconfirmed_proof_drops_the_few_hours_reassurance(cairn_env, monkeypatch):
+    """M5: "usually settles within a few hours" is false — and actively misleading — at 90 days.
+
+    Threshold mirrors `cairn upgrade`'s stale-incomplete warning
+    (`CAIRN_INCOMPLETE_PROOF_ALARM_DAYS`, default 7) so the two surfaces cannot disagree about when
+    a submitted proof has waited too long.
+    """
+    root = cairn_env / "stuck"
+    root.mkdir()
+    (root / "doc.txt").write_text("hello")
+    with _make_client(
+        lambda: _seed_one_anchored_file(root, ots_state="incomplete", stamped_days_ago=90)
+    ) as client:
+        html = _post_verify(client, _result(state="incomplete"), monkeypatch)
+
+    assert "Pending confirmation" in html
+    assert "usually settles within a few hours" not in html
+    assert "90 days ago" in html
+    assert "unusually long" in html
+    assert "cairn upgrade" in html
+    assert "calendar servers" in html
+
+
+def test_a_freshly_submitted_proof_keeps_the_reassurance_and_gains_a_date(cairn_env, monkeypatch):
+    """M5's other side: at one day old the reassurance is true and must survive."""
+    root = cairn_env / "fresh"
+    root.mkdir()
+    (root / "doc.txt").write_text("hello")
+    with _make_client(
+        lambda: _seed_one_anchored_file(root, ots_state="incomplete", stamped_days_ago=1)
+    ) as client:
+        html = _post_verify(client, _result(state="incomplete"), monkeypatch)
+
+    assert "was submitted to Bitcoin on" in html
+    assert "This usually settles within a few hours." in html
+    assert "unusually long" not in html
+
+
+def test_the_trustless_route_names_the_env_settings_not_the_settings_page(
+    verify_client, monkeypatch
+):
+    """#8: Settings renders the verification backend read-only, so sending the operator there is a
+    dead end. Name the two environment settings that actually select the node backend."""
+    html = _post_verify(verify_client, _result(verified=True), monkeypatch)
+
+    assert "CAIRN_VERIFY_BACKEND=node" in html
+    assert "CAIRN_NODE_RPC_URL" in html
+    assert "Bitcoin node in Settings" not in html
+
+
+def test_every_copy_control_on_the_verify_card_uses_the_shared_helper(verify_client, monkeypatch):
+    """M4: `navigator.clipboard && …writeText(…)` is a silent no-op on an insecure origin, which is
+    where a self-hosted panel normally runs. Both buttons go through the one shared helper."""
+    html = _post_verify(verify_client, _result(verified=True), monkeypatch)
+
+    assert "navigator.clipboard && navigator.clipboard.writeText" not in html
+    assert html.count("cairnCopy(") >= 2  # the fingerprint button and the report button
+
+    # The card is an htmx fragment, so the helper it calls has to already be on the page it swaps
+    # into: base.html includes it everywhere, with the insecure-origin fallback and the visible
+    # result. Asserted on the full page, which is what the fragment actually lands in.
+    page = verify_client.get("/verify").text
+    assert "window.cairnCopy" in page
+    assert "execCommand" in page and ".catch(" in page
+    assert "Couldn't copy" in page

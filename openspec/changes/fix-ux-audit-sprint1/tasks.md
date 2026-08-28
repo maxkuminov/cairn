@@ -714,3 +714,131 @@ it does not establish.
   two scenarios, and the per-backend unreadable-proof scenarios).
 - [x] 9.6 Gates re-run: full `PYTHONPATH=. pytest -q` green, `ruff check src tests` clean,
   `openspec validate fix-ux-audit-sprint1 --strict` passes.
+
+## 10. Live-pass fixes (`user-representative` browser pass on the deployed panel)
+
+The sprint shipped, was deployed, and was then driven end-to-end in a browser. The pass found
+nineteen issues; three had been ticketed separately and are excluded here. What follows is
+everything else, fixed in the main tree.
+
+The five majors are one family: **a surface that says more than the check behind it established.**
+That is the same failure mode §9 closed inside `VerifyResult`, reappearing one layer out in the
+templates — which is why they are folded into this change's deltas rather than opened as a new one.
+
+- [x] 10.1 (M1) **A file that cannot be read no longer speculates about its contents.**
+  `routes.verify_run` set `verdict="danger"` / *"File unavailable — cannot verify"* from
+  `live_unavailable` and then **did not publish `live_unavailable` in the template context**, so
+  `partials/verify_result.html` fell through every branch to the generic fallback: *"Its contents
+  may have changed since it was recorded, or the proof isn't confirmed yet."* Nothing was hashed
+  and nothing was compared, so a possible change of contents is not a finding — it is speculation
+  about tampering built on a check that never ran, offered on the one page an operator opens to
+  answer exactly that question. The context now carries `live_unavailable` and `file_status`, and
+  the partial's chain opens with a dedicated branch: the file could not be read (with the reason),
+  its bytes were never hashed, **nothing was compared**, and this says nothing about whether the
+  file was altered. Where the row's own status is already `missing` the card says so plainly and
+  links to `/collection/{id}/review`; otherwise it says the file has gone or become unreadable
+  since the last scan. The may-have-changed wording is unreachable from this state.
+- [x] 10.2 (M2) **The staleness banner leads with the consequence.** *"This collection changed
+  since the page loaded — the list below is current"* is a true statement about the **collection**
+  that never says the thing the operator came here needing: their Accept did nothing. Read at speed
+  after pressing a destructive button it parses as a status note on a page that has apparently been
+  accepted. Now: *"**Your action was NOT applied** — this collection changed since the page loaded.
+  Nothing was deleted or acknowledged. The list below is current; review it and decide again."* The
+  two verbs are named because they are exactly what `accept_collection` does. The banner also
+  branches on the **refused-onto-an-empty-page** case (the drift that caused the refusal can leave
+  nothing to review): the lead is unchanged and the second half becomes an account of the emptiness
+  rather than "the list below is current", which over an empty page reads as if the accept had
+  emptied it. No "try again" affordance — there is nothing left to try, and the all-clear card
+  already carries **Back to {collection}**.
+- [x] 10.3 (M3) **The collection card's name keeps its line.** #33's first fix hid `.op-bar`, which
+  was half of it: the badge is still ~269px (deep-scan variant), and it shares a
+  `justify-content: space-between` flex row with the collection **name**, so flex resolved the
+  overflow by shrinking the only item with `min-width: 0` — the name, down to ~23px, leaving the
+  card unidentifiable. A nowrap badge cannot be negotiated down, so it stops sharing the row:
+  under 768px `.collection-card__title-row` wraps, the title block takes `flex: 1 1 100%` / `order: 1`
+  and `.op-status` takes `flex: 0 0 100%` / `order: 2`. Under 480px the card's `deep` chip is
+  dropped as well (a 320px card's content box is ~252px); scoped to the card, so the detail page's
+  Status cell — which has room and already wraps — keeps it. CSS-only.
+- [x] 10.4 (M4) **One clipboard implementation, shared.** The verify card's two copy controls were
+  `navigator.clipboard && navigator.clipboard.writeText(…)` — undefined outside a secure context,
+  which is where a self-hosted panel normally runs, so both were silent no-ops. Worse than nothing:
+  the operator pastes a stale clipboard into an evidence bundle. The review page's working pattern
+  (`.catch()` → hidden-textarea `execCommand` → visible "Copied ✓" / failure) is now
+  `partials/_clipboard.html`, included once from `base.html` and exposing `window.cairnCopy(text,
+  noteId)`. The review page, the verify card and Settings' health-URL button all call it, so the
+  surfaces cannot drift. New `.copy-note` style for the result line.
+- [x] 10.5 (M5) **The pending-confirmation card dates the submission and branches on age.**
+  *"This usually settles within a few hours"* is true of a proof submitted this morning and
+  actively misleading over one submitted in March — it tells the operator to keep waiting for
+  something that is not coming. The card now names the submission date from `ots_stamped_at`, and
+  past `settings.incomplete_proof_alarm_days` (default 7 — the **same** threshold
+  `cairn upgrade`'s `proofs.stale_incomplete` warning uses, so the two surfaces cannot disagree)
+  drops the reassurance for the age, "unusually long", and the two things to check: `cairn upgrade`
+  and the calendar servers.
+- [x] 10.6 (#15) **"Checked using …" only where a lookup happened**, and a recorded fingerprint
+  instead of "(unknown)". The strip claimed a backend had been consulted on cards where nothing was
+  ever fetched — never-notarized, queued, unparseable proof, unreadable file, unreachable backend,
+  and a digest disagreement (which the explorer backend establishes *locally* and returns from
+  before the first block fetch). Gated on `lookup_made` = verified ∨ proof-mismatch, the two
+  outcomes that require an answered lookup; the detail row, the closing strip and the copyable
+  report are all gated together. Separately, a file that could not be read showed `(unknown)` in
+  the fingerprint slot, discarding the one fact Cairn still holds about it: the row now shows
+  `files.sha256` labelled **"Last recorded fingerprint"**, stated as *not* compared in this check.
+- [x] 10.7 Minors: **(#7)** the rail's "Mark all N reviewed (all collections)" is a nowrap button
+  wider than its 390px card — `.row-between` and `#open-events-pill` wrap and the button's label
+  is allowed to; **(#8)** the trustless-verification sentence names `CAIRN_VERIFY_BACKEND=node` and
+  `CAIRN_NODE_RPC_URL` instead of sending the reader to Settings, which renders the verification
+  backend read-only; **(#9)** the card legend's "All files verified" → "All files matching
+  baseline" (a scan compares against the recorded baseline; *verified* is the notary's word for a
+  proof checked against Bitcoin, which no scan does); **(#11)** the truncation notice points at the
+  issues-filtered file browser it already links rather than the unimplemented `cairn status`;
+  **(#12)** "N need action" → "N unreviewed" in `_events_controls.html` and
+  `_review_open_pill.html` (clearing the pill is a reading log, not a repair); **(#13)** the Root
+  path cell carries a `title` and wraps under 768px instead of ellipsizing away the whole path on a
+  device with no hover; **(#14)** "paste the list above" → "paste the copied list"; **(#17)** an
+  inline `data:` SVG favicon in `base.html` kills the per-page `/favicon.ico` 404; **(#18)** the
+  review page's missing-or-changed intro renders only when there is something to review;
+  **(#19)** the card legend's `role="link"` handles Space as well as Enter.
+- [x] 10.8 Out of scope, ticketed separately and deliberately untouched: the topbar's decorative
+  global search box, the collection page's new-count tile, and the "Run scan now" scope/confirm.
+- [x] 10.9 Regressions (all verified to fail against the pre-fix templates):
+  `test_a_file_that_cannot_be_read_never_speculates_about_its_contents`,
+  `test_a_file_recorded_missing_says_so_and_points_at_review`,
+  `test_an_unreadable_file_shows_its_last_recorded_fingerprint`,
+  `test_the_backend_is_not_named_where_no_lookup_happened`,
+  `test_the_backend_is_not_named_on_a_never_notarized_file`,
+  `test_the_backend_is_named_on_a_verified_card`,
+  `test_a_long_unconfirmed_proof_drops_the_few_hours_reassurance`,
+  `test_a_freshly_submitted_proof_keeps_the_reassurance_and_gains_a_date`,
+  `test_the_trustless_route_names_the_env_settings_not_the_settings_page`,
+  `test_every_copy_control_on_the_verify_card_uses_the_shared_helper` (tests/test_ux_verify.py);
+  `test_stale_banner_leads_with_the_action_not_having_been_applied`,
+  `test_stale_banner_refused_onto_an_empty_review_still_says_it_was_not_applied`,
+  `test_the_truncation_notice_points_at_the_filtered_browser_not_an_unbuilt_command`,
+  `test_the_recovery_copy_refers_to_the_button_not_to_a_position`,
+  `test_the_review_intro_is_withheld_when_there_is_nothing_to_review`,
+  `test_the_recovery_copy_buttons_go_through_the_one_shared_clipboard_helper`
+  (tests/test_ux_review.py);
+  `test_the_collection_card_badge_takes_a_row_of_its_own_so_the_name_keeps_its_line`,
+  `test_the_deep_tag_is_dropped_from_the_card_badge_at_phone_width`,
+  `test_the_bulk_review_button_may_wrap_instead_of_overflowing_the_rail_card`,
+  `test_the_mono_root_path_cell_wraps_rather_than_clipping_on_a_phone`,
+  `test_the_root_path_cell_carries_a_title_for_the_pointer_case`,
+  `test_the_panel_ships_an_inline_favicon_so_no_request_404s`,
+  `test_the_card_legend_reports_the_baseline_comparison_not_a_notary_verdict`,
+  `test_the_alert_pills_say_unreviewed_rather_than_need_action`,
+  `test_the_keyboard_activated_issue_count_answers_space_as_well_as_enter`
+  (tests/test_ux_docs.py). Updated for the new copy: `STALE_COPY` split into `STALE_LEAD` /
+  `STALE_NOTHING_MUTATED` / `STALE_COPY` (tests/test_ux_review.py) and
+  `test_incomplete_reads_pending_confirmation` (tests/test_ux_verify.py); the shared
+  `_seed_one_anchored_file` gained `stamped_days_ago`.
+- [x] 10.10 Spec + design updated: the `web-panel` delta (the unreadable-live-file requirement and
+  its two scenarios, the fingerprint-labelling and backend-naming rules with four scenarios, the
+  age-dependent awaiting-confirmation rule with two scenarios, the refusal banner's
+  consequence-first ordering and its empty-landing case with a scenario each, the review-view copy
+  rules with three scenarios, the vocabulary rules barring *verified* for a baseline comparison and
+  *needs action* for a reading log, and the phone-width rule that an unnegotiable indicator leaves
+  the name's row entirely plus three scenarios) and design **D14** (why the banner's order was wrong
+  and how the empty landing is accounted for).
+- [x] 10.11 Gates re-run: full `PYTHONPATH=. pytest -q` green, `ruff check src tests` clean,
+  `openspec validate fix-ux-audit-sprint1 --strict` passes.
