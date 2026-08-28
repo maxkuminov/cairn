@@ -76,8 +76,10 @@ the path; the truncation notice SHALL direct the operator to the per-collection 
 
 Search copy SHALL match the widened population on **every render path** (full-page and
 partial-refinement alike): the search heading, the searchable-file count, and the no-match copy
-SHALL describe tracked files, not anchored files or proofs. Anchored-only wording survives only
-on the recent-anchored listing, whose population it correctly describes.
+SHALL describe tracked files, not anchored files or proofs. Proof-oriented wording (recent
+proofs, submitted proofs) is permitted only on the default recent-proofs listing, whose
+population it correctly describes; anchored wording is permitted nowhere an unconfirmed proof
+can appear.
 
 #### Scenario: A never-stamped file's badge
 

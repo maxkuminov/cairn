@@ -2,7 +2,7 @@
 
 ## 1. Verify search covers every tracked file (#41 backend, prerequisite for #36)
 
-- [ ] 1.1 In `src/control_panel/routes.py`, split the search query from the anchored-recency
+- [ ] 1.1 In `src/control_panel/routes.py`, split the search query from the recent-proofs
   query: search (used by `GET /verify/search` and the new `?q=` initial render) drops the
   `ots_state IN ('incomplete','complete')` filter and matches all tracked files owned by the
   user (same escaped-LIKE, same 50-row cap), ordered by the unique key `relpath ASC,
@@ -11,7 +11,8 @@
   meaning — and its heading/copy says recent *proofs*, never "anchored" (its population
   includes unconfirmed proofs; sprint-1 vocabulary).
 - [ ] 1.2 Blank stays default: a blank or whitespace-only query — including
-  `GET /verify/search?q=` — renders the anchored-only recent listing, never the widened search.
+  `GET /verify/search?q=` — renders the default recent-proofs listing, never the widened
+  search.
 - [ ] 1.3 In `partials/verify_results.html`: render each result row's proof-state badge (reuse
   the existing badge macro) so unstamped rows are visibly unstamped; every row remains
   selectable into the per-file verify flow regardless of state; when total > cap, state
@@ -19,7 +20,9 @@
   as the escape hatch; each row names its collection.
 - [ ] 1.4 State-neutral search copy on both render paths: the searchable-count line, the search
   heading, and the no-match copy in `verify.html` + `partials/verify_results.html` describe
-  tracked files, not anchored files/proofs; anchored wording survives only on the recent list.
+  tracked files, not anchored files/proofs; proof-oriented wording ("recent proofs") is
+  permitted only on the default recent-proofs listing, and anchored wording nowhere an
+  unconfirmed proof can appear.
 - [ ] 1.5 Tests (`tests/test_ux_verify.py`): search returns `none`/`pending` files with state
   visible; blank query (both routes) renders the recent list only; truncation line appears with
   the true total when matches exceed the cap and results follow the unique
