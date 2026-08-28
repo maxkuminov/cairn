@@ -449,6 +449,26 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > key is deleted) and offers Retry ONLY on transport/inconclusive outcomes. Gates: 2-round spec
 > review, 2-scope adversarial review + convergence to PASS, verifier 70/70, live pass 14/14.
 
+> UX-audit sprint 2 (fix-ux-audit-sprint2): the five remaining panel-honesty issues (#36-#38,
+> #40, #41 — coordination #43), one defect class: a surface misstating or withholding what it does
+> or what a number means. **Global search works**: the topbar box is a GET form into `/verify?q=…`
+> (placeholder promises only file/name/path search — never hashes or collections); verify search
+> covers EVERY tracked file (state filter dropped), ordered by the unique key `relpath ASC,
+> collection_id ASC`, 50-row cap with the TRUE total disclosed ("Showing 50 of N matches" + file-
+> browser escape hatch), blank/whitespace queries render the default listing — which is captioned
+> "Recent proofs", never "anchored" (its population includes unconfirmed proofs). The proof badge
+> links to `/verify?file=` in every state (the never-stamped card branches on `collection_ots` so
+> tripwire collections aren't told to "Stamp all"); collection detail gains a "New files —
+> watched, not yet baselined" stat; the dashboard scan button reads "Scan all collections" with a
+> count-naming confirm (render-time snapshot, POST unchanged); the card segbar carries
+> `role="img"` + a counts-derived label and coverage reads "N / M present files anchored" / "all N
+> present files anchored" (words only — sprint-1 D5/D13 identities untouched). **No schema
+> change.** Gates: 5-round Codex spec review, adversarial impl review to PASS, verifier 22/22,
+> live user-rep pass (all five verified fixed; secondary findings → #44-#50). Search routes:
+> `_recent_proofs_query` / `_search_tracked_files` / `_results_context` in
+> `src/control_panel/routes.py` — the ONE context builder serves both render paths, so full-page
+> and htmx views cannot disagree about the population on screen.
+
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
   Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).
