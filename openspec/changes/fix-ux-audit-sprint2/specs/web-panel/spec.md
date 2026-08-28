@@ -1,0 +1,132 @@
+# Delta: web-panel (fix-ux-audit-sprint2)
+
+## ADDED Requirements
+
+### Requirement: The global search control performs a search
+
+The top-bar search control SHALL submit its query and land the operator on the verify page with
+that query applied to the tracked-file search, rendering the same bounded, owner-scoped results
+the verify page's own search produces — including its empty state for a query with no matches. A
+control rendered in the page chrome SHALL NOT be inert: a search box that accepts typing and does
+nothing on submit is a silent failure of the most prominent control on the page, and either works
+or is not rendered.
+
+The navigation SHALL preserve the query so the verify page's search input arrives pre-filled with
+it, and refining the search from there SHALL behave exactly as searching on the verify page
+directly.
+
+#### Scenario: Submitting a query from the top bar
+
+- **WHEN** the operator types a query into the top-bar search box on any page and submits
+- **THEN** the panel SHALL navigate to the verify page with the query applied, showing the
+  tracked-file search results for that query with the query visible in the search input
+
+#### Scenario: A query with no matches
+
+- **WHEN** the submitted query matches no tracked file the operator owns
+- **THEN** the verify page SHALL render its existing no-matches empty state, not a blank region
+  and not another user's files
+
+#### Scenario: An empty submission
+
+- **WHEN** the operator submits the top-bar search with an empty query
+- **THEN** the panel SHALL land on the verify page in its default state and SHALL NOT render an
+  error
+
+### Requirement: Every proof state's badge reaches the verify surface
+
+The file browser's proof-state badge SHALL link to the per-file verify surface in **every** proof
+state — never-stamped, queued for stamping, awaiting confirmation, and confirmed alike. The
+verify surface already renders an honest, state-appropriate card for each of these; a badge that
+links only in the confirmed state makes the guidance for every other state unreachable except by
+hand-typed URL, which means the card's advice is invisible to exactly the operator it addresses.
+
+The verify page's tracked-file search SHALL likewise include files in every proof state, showing
+each result's proof state so an unstamped file is visibly unstamped in the list. A search scoped
+to already-anchored files silently hides the files whose verify card carries actionable guidance.
+The verify page's *recent anchored* listing keeps its anchored-only meaning — the state filter
+belongs to that list's stated purpose, not to search.
+
+#### Scenario: A never-stamped file's badge
+
+- **WHEN** the operator clicks the proof badge of a file that has never been stamped
+- **THEN** the panel SHALL open the per-file verify surface for that file, showing the
+  never-notarized card with its guidance
+
+#### Scenario: Queued and awaiting-confirmation badges
+
+- **WHEN** the operator clicks the proof badge of a file whose proof is queued for stamping or
+  awaiting Bitcoin confirmation
+- **THEN** the panel SHALL open the per-file verify surface for that file rather than rendering
+  an inert pill
+
+#### Scenario: Searching for an unstamped file
+
+- **WHEN** the operator searches the verify page for a tracked file that has never been stamped
+- **THEN** the file SHALL appear in the results with its proof state visible, and selecting it
+  SHALL reach its verify card
+
+### Requirement: The collection detail page discloses the new-file count
+
+The collection detail page's summary statistics SHALL state the count of files that are watched
+but not yet baselined, using the same vocabulary as the dashboard's new-files tile, whenever such
+files exist — and SHALL render the count (as zero) rather than omit the concept when none do. The
+detail page is where the operator acts on a collection; a population that is invisible there but
+required to explain the page's own arithmetic (total ≠ baselined + issues) forces the operator to
+discover it inside a confirmation dialog.
+
+#### Scenario: A collection with new files
+
+- **WHEN** the operator opens the detail page of a collection with files in the new state
+- **THEN** the summary statistics SHALL include the new-file count, described as watched but not
+  yet baselined, consistent with the dashboard tile's wording
+
+#### Scenario: The counts explain the total
+
+- **WHEN** the detail page renders its summary statistics for any collection
+- **THEN** the displayed populations (baselined, new, changed/missing) SHALL account for the
+  displayed total without requiring a number that appears on no surface
+
+### Requirement: A fleet-wide action states its scope before acting
+
+A dashboard control that acts on every collection SHALL say so in its label, and SHALL obtain a
+lightweight confirmation that names the number of collections it is about to act on before
+proceeding. An unqualified action label on a fleet-wide control invites the operator to expect a
+scoped action; the correction is a statement of scope, not a change of behavior.
+
+#### Scenario: The scan-all control states its scope
+
+- **WHEN** the operator views the dashboard's scan control
+- **THEN** its label SHALL state that it scans all collections
+
+#### Scenario: Confirmation names the count
+
+- **WHEN** the operator activates the dashboard's scan-all control
+- **THEN** the panel SHALL ask for confirmation naming how many collections will be scanned, and
+  SHALL proceed only on confirmation
+
+### Requirement: The status bar and the coverage ratio each name what they measure
+
+The collection card's file-status bar SHALL carry an accessible label naming it as a breakdown of
+file statuses and stating the counts it renders, and the notarization coverage line SHALL name
+the population its denominator counts (the collection's present files). The two figures sit
+adjacent and measure different things; unlabelled, a fully-green status bar over a low anchored
+ratio reads as a contradiction on the product's headline claim. The labels SHALL derive from the
+same counts the visuals render from, so the label and the picture cannot drift apart.
+
+#### Scenario: The segbar is labelled
+
+- **WHEN** a collection card renders its file-status bar
+- **THEN** the bar SHALL expose a label (accessible name and hover text) identifying it as file
+  status and stating the ok/new/modified/missing counts it depicts
+
+#### Scenario: The anchored ratio names its denominator
+
+- **WHEN** a collection card renders a notarization coverage ratio
+- **THEN** the wording SHALL state that the denominator counts the collection's present files, so
+  the deliberate exclusion of missing files from the denominator is stated rather than implied
+
+#### Scenario: Labels agree with the visual
+
+- **WHEN** the file-status bar renders segments for a collection's counts
+- **THEN** the label's counts SHALL be the same values the segments are sized from
