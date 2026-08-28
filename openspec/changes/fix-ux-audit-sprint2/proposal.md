@@ -62,8 +62,9 @@ _None._
   `partials/_collection_card.html` (segbar labelling, ratio wording),
   `partials/verify_results.html` (unstamped rows render honestly).
 - **Routes**: `src/control_panel/routes.py` — `verify_page` accepts a `q` parameter (initial
-  search results server-rendered); `_anchored_query` widens to include `none`/`pending` states
-  for search (recent-anchored list keeps its current meaning). No new routes, no schema change,
+  search results server-rendered); the search query drops the submitted-proof state filter
+  (the default recent-proofs list keeps that filter and its meaning, captioned as proofs, never
+  as anchored). No new routes, no schema change,
   no migration.
 - **Tests**: extend `tests/test_ux_verify.py` / `tests/test_ux_dashboard.py` / `tests/test_panel.py`
   in their existing style.

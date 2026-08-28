@@ -68,13 +68,14 @@ per-collection so a global box can't target one.
 
 ### D2 — Search covers every tracked file; the state filter moves from the query to the render
 
-`_anchored_query`'s `ots_state IN ('incomplete','complete')` filter is correct for the *recent
-anchored* list (its name and heading say "anchored") but wrong for *search*: it silently hides
+`_anchored_query`'s `ots_state IN ('incomplete','complete')` filter — the submitted-proof
+predicate — is correct for the default *recent proofs* list but wrong for *search*: it silently hides
 exactly the files whose verify card carries actionable advice ("Not notarized yet — use Stamp
 all"). Search (both `verify_search` and D1's initial results) drops the state filter and
 searches all tracked files owned by the user; each result row shows its proof-state badge
 (reusing the existing badge macro), so an unstamped row is visibly unstamped in the list. The
-recent list keeps the anchored filter — its meaning is unchanged. Result rows stay clickable to
+recent-proofs list keeps the submitted-proof filter — its meaning is unchanged (and its
+heading/copy must never call that population anchored; see below). Result rows stay clickable to
 the same per-file verify flow for every state (consistent with D3).
 
 Three properties close the holes the first spec round left open:
