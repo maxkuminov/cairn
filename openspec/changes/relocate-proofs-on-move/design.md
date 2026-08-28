@@ -4,140 +4,183 @@
 
 `_reconcile_moves` (`src/services/scanner.py`) reconciles a 1:1 content-matched missing+added
 pair into one surviving row: it repoints `relpath`, keeps identity (`first_seen`, `sha256`,
-`ots_path`, `ots_state`, `ots_stamped_at`), emits one `moved` event. It deliberately mutates
+`ots_path`, `ots_state`, `ots_stamped_at`, `ots_digest`), emits one `moved` event. It mutates
 only the index — so the proof file stays at the OLD relpath's canonical location
-(`proof_path()` = `<proof_store>/<collection_id>/<relpath>.ots`), and `ots_path` keeps naming
-it. The pointer is truthful but the old canonical slot is claimable: a later stamp of a
-different file at the old relpath displaces the moved file's proof into `.superseded/` (never
-destroyed, since guard-proof-and-restore-integrity) and the moved row's pointer then resolves
-to a stranger's proof. `files.ots_digest` makes that misfiling detectable at verify time — as a
-proof mismatch on a perfectly healthy file, which is a false alarm on the product's core
-signal.
+(`proof_path()` = `<proof_store>/<collection_id>/<relpath>.ots`) and `ots_path` keeps naming
+it, truthfully. The defect: the old canonical slot is claimable — a later stamp of a different
+file at the old relpath displaces the moved file's proof into `.superseded/` (never destroyed,
+since guard-proof-and-restore-integrity) and the moved row's pointer then resolves to a
+stranger's proof. `files.ots_digest` makes that detectable at verify time — as a proof
+mismatch on a perfectly healthy file: a false alarm on the product's core signal.
 
-Machinery already in place (guard-proof-and-restore-integrity): proof mutation is single-writer
-under the collection's operation claim; placement itself is serialized by a per-collection
-flock at the proof store; `_place_proof` implements never-destroy placement with a durability
-(fsync) chain to the store root; the daily upgrade pass walks proofs and backfills provenance.
+Round 1 of the spec audit (9 BLOCKERs) established that relocating from inside the scanner
+adds a second proof-mutation path with its own crash windows, ordering hazards against the
+same scan's stamp pass, and lease questions. This design therefore splits the fix into a
+**guard** (immediate, closes the loss path everywhere) and a **relocation sweep** (single code
+path, converges pointers), instead of teaching the scanner to move files.
 
 ## Goals / Non-Goals
 
 **Goals:**
 
-- After a reconciled move, the proof lives at the NEW relpath's canonical location and
-  `ots_path` says so — the old slot is vacated before anything else can be stamped into it.
-- **The pointer invariant**: at every moment, including mid-crash, `ots_path` names a path
-  where this row's proof actually exists. No intermediate state may leave it dangling.
-- Failure is per-file and never lossy; stale pointers (failed relocations AND every pre-fix
-  moved row on the live deployment) converge via a daily healing pass with no migration.
+- No stamp, at any entry point, may ever displace a proof that any row currently records as
+  its `ots_path` — the loss path is closed by construction, not by relocation winning a race.
+- Moved files' proofs converge to the canonical location for their current relpath — including
+  every pre-fix moved row on the live deployment — via one relocation code path, with no
+  migration.
+- **The pointer invariant**: at every moment, including across a crash at any phase boundary,
+  `ots_path` names a location actually holding this row's proof (corroborated, not assumed).
+- No branch, on any input, may discard proof bytes.
 
 **Non-Goals:**
 
-- Deriving `ots_path` from `relpath` (can't represent mid-heal/failed states; 18 read sites).
-- Repairing pointers already misfiled before this ships (verify's provenance ladder reports
-  them; recovery from `.superseded/` stays manual).
-- Any change to move-matching rules or to `_place_proof`'s stamping-time rules.
+- Deriving `ots_path` from `relpath` (cannot represent mid-heal/deferred states; 18 read
+  sites).
+- Repairing pointers already misfiled before this ships: the sweep must *detect* them (source
+  corroboration) and refuse to act, warning toward `.superseded/` recovery — un-misfiling is
+  manual, per guard-proof-and-restore-integrity's accepted scope.
+- Any change to move-matching rules, to `_reconcile_moves`'s index-only contract, or to
+  `_place_proof`'s occupied-canonical-path rules for stamping.
 
 ## Decisions
 
-### D1 — A `relocate_proof(old, new, store_root)` primitive in `ots.py`, crash-safe by link-then-unlink
+### D1 — The referenced-slot stamp guard (the actual fix for the loss path)
 
-The move is not an `os.replace` (which could destroy an occupant) and not move-then-update
-(which strands the pointer if the process dies between filesystem and DB). The order is:
+Before placing any proof, the stamp path (batched `stamp_pending`, its per-file fallback, and
+the backfill) SHALL defer any member whose canonical output path is currently recorded as
+`ots_path` by a **different** row in the collection — one bounded query over the batch's
+output paths. A deferred member stays `pending` with a warning naming the blocking row; it is
+retried on later passes and proceeds once the sweep (D2) has relocated the blocker away.
 
-1. **Pre-checks** (under the collection's proof flock, post-acquisition re-checked): source
-   exists; destination canonical path unoccupied (else see D2); destination component lengths
-   pass the `_NAME_MAX_BYTES` pre-check for components Cairn creates below the store root.
-2. **Link phase**: `mkdir -p` the destination's parents; hard-link source → destination
-   (`os.link`); fsync the destination directory chain up to the store root (the existing
-   durability helper). Filesystems refusing `link` (EPERM/EXDEV/ENOTSUP) fall back to
-   copy-to-temp + fsync + `os.rename` into place — same visible result: **both paths hold the
-   proof**.
-3. **Commit phase** (caller): update `ots_path` to the new location and commit the DB.
-4. **Unlink phase**: remove the old path (`suppress(OSError)` — a leftover old copy is
-   harmless, see below) and fsync its directory.
+This guard alone makes the #39 hazard unreachable from every entry point (scheduler, panel,
+CLI): the stranger's stamp waits instead of displacing. It also covers the same-scan case — a
+newcomer appearing at a just-vacated old path defers its stamp until the mover's proof has
+been relocated by the sweep, rather than racing it. The scanner itself remains free of proof
+mutation.
 
-Crash between 2 and 3: pointer still names the old path, which still exists — truthful; the
-healing pass later finds `ots_path` ≠ canonical and re-runs relocation, whose destination is
-now occupied *by the same digest* → adopt-and-finish (D2). Crash between 3 and 4: pointer names
-the new path, which exists — truthful; the stale old copy squats in the old canonical slot
-until a future stamp there archives it (never-destroy) or the healing pass's cleanup removes it
-when it matches the mover's recorded digest. At no point is the pointer dangling and at no
-point is a proof byte lost.
+Cost: the newcomer-at-a-moved-path's proof is delayed by up to one healing cycle (a day, or
+an operator's `cairn upgrade`). Accepted: a delayed stamp is recoverable; a displaced proof
+pointer is a false alarm on the core signal.
 
-### D2 — Occupied destination: adopt same-digest, defer otherwise; never displace silently
+### D2 — Relocation lives in ONE place: the healing sweep of the upgrade pass
 
-If the new canonical path is already occupied:
+The daily upgrade pass (and `cairn upgrade`) gains a per-collection stale-pointer sweep: rows
+where `ots_path IS NOT NULL` and `ots_path` differs from the canonical path for the current
+`relpath`. **Stale-pointer existence is an independent admission reason** for the upgrade
+operation — a collection with no `incomplete` proofs (or a tripwire collection carrying
+historical proofs) still claims its run slot and sweeps; the sweep's work is counted in the
+run's progress totals.
 
-- **Same committed digest as the source proof** (parse both with `read_proof_facts`): adopt the
-  occupant — treat the relocation as already done (finish at phase 3; the source copy is then
-  the redundant one and is removed in phase 4). This is what makes retry/healing idempotent.
-- **Referenced by another row**: if any other `files` row in the collection has
-  `ots_path` == destination (one bounded query), DEFER — keep the old pointer, warn. Chain
-  moves (A→B while C→A) converge over successive healing passes as each mover vacates its slot.
-- **Occupied by anything else** (orphaned/unknown proof): archive the occupant into
-  `.superseded/` via the existing preservation helper (never-destroy), then proceed. It is not
-  referenced by any row and the archive keeps its bytes.
+The canonical-location comparison is computed **through `proof_path`** (D6) — candidate rows
+may be selected by SQL prefix comparison, but the authoritative staleness test for each
+candidate is `Path(row.ots_path) != proof_path(settings, cid, row.relpath)` in Python, so the
+SQL expression can never disagree with the helper.
 
-### D3 — Relocation runs inside `_reconcile_moves`, after the added-row delete/flush, before the stamp pass
+The sweep runs under the collection's operation claim with the standard lease discipline
+(heartbeat, in-band reclamation checks) and takes the per-collection proof-store flock for
+each relocation, **re-confirming the claim after lock acquisition and holding the flock across
+every phase** of D4 (inspect → publish → pointer commit → unlink) — the same fencing the
+stamp tail uses.
 
-The scanner already holds the run claim; `_reconcile_moves` already runs after the
-missing-sweep and **before alerts/stamp/finalize**, so a same-scan newcomer at the vacated old
-path stamps into an already-vacated slot. Rows with `ots_state` in (`none`, `pending`) or
-`ots_path IS NULL` have nothing to relocate and skip untouched. The docstring's "mutates the
-index only" contract is updated: reconciliation now moves proof files, under the same lease +
-proof-flock discipline as stamping.
+### D3 — Corroborate the source before believing it (misfiled pointers must not propagate)
 
-Failure of any phase for one file: log one WARNING, keep the OLD pointer (still truthful),
-count nothing into `summary.errors` (the scan's own work succeeded; the proof store is a
-parallel artifact — same philosophy as "a stamp never fails a scan"), and let healing retry.
-The reconciliation itself (relpath repoint, `moved` event) proceeds regardless — the index must
-describe the collection truthfully even when the proof store is briefly behind.
+Before relocating, parse the proof at the source (`read_proof_facts`):
 
-### D4 — The daily upgrade pass heals stale pointers
+- **Row has `ots_digest`**: the source proof's committed digest must equal it. A mismatch
+  means the pointer is already misfiled (e.g. the old slot was re-stamped by a stranger
+  before this change deployed): do NOT relocate, do NOT archive, do NOT touch the row; warn
+  naming the row, both digests, and `.superseded/` recovery. The sweep must never launder a
+  stranger's proof into the mover's canonical slot.
+- **Legacy row (`ots_digest` NULL)**: the source proof's committed digest must equal the
+  row's recorded `sha256` (its last-scanned baseline). Equality is the explicit safe legacy
+  rule — the proof provably commits to this file's bytes. Anything else (mismatch, unreadable
+  source, no digest) → preserve all bytes, touch nothing, warn for operator recovery.
+- An unreadable or absent source: touch nothing, warn. (An absent source with `ots_path` set
+  is a store-integrity problem relocation cannot fix.)
 
-`run_daily_upgrade`'s per-collection work gains a bounded healing sweep: select rows where
-`ots_path IS NOT NULL` and `ots_path` ≠ the canonical path for the current `relpath`
-(expressible in SQL as a concat against the collection's store prefix; the store path comes
-from settings). Each hit re-runs `relocate_proof` under the same claim + flock the upgrade
-pass already holds. This single mechanism covers: relocations that failed transiently, chain
-moves deferred by D2, crashes between D1's phases, and **every moved-before-this-change row on
-the live deployment** — no migration, convergence within a day of deploy (or immediately via
-`cairn upgrade`).
+`ots_digest` is never written by the sweep (M4 of the audit): relocation changes `ots_path`
+and nothing else on the row.
 
-A path that fails permanently (`_NAME_MAX_BYTES`, ENAMETOOLONG) re-warns daily; deliberate —
-an operator should keep hearing about a proof that cannot sit where the index expects it.
-(The alternative — dropping to `ots_state='none'` like unstampable paths — would discard a
-placed proof's provenance; refused.)
+### D4 — The relocation phases, crash-safe and never-destroy
 
-### D5 — `proof_path()` is the single canonical-location oracle
+Under the claim + flock, per row, with `src = ots_path`, `dst = proof_path(current relpath)`:
 
-Both the scanner's relocation call and the healing sweep compute locations via
-`proofs.proof_path(settings, collection_id, relpath)`. No string concatenation at call sites
-(same rule as `panel_url`). The SQL prefix used by D4's sweep is derived from the same helper
-applied to the empty relpath, keeping the two views of "canonical" from drifting.
+1. **Aliasing check**: if `src` and `dst` resolve to the same directory entry
+   (`os.lstat` dev+inode equality — a case-only rename on a case-insensitive filesystem),
+   the proof is already in place: update `ots_path` to the canonical spelling, commit, and
+   STOP — never unlink, since there is only one entry.
+2. **Destination inspection**, ordered — the defer test comes first:
+   a. `dst` is recorded as `ots_path` by a different row → **defer** (chain moves A→B, C→A
+      converge over successive sweeps; cycles A→B, B→A in one scan defer each other until one
+      side's slot is freed by its own relocation — each sweep relocates what it can and the
+      pair resolves over passes; nothing is ever placed over a referenced slot).
+   b. `dst` occupied, **byte-identical** to `src` (full content compare — committed digest
+      alone is NOT sufficient, since two distinct proofs can commit to the same file digest
+      with different attestation value) → the relocation is already half-done (a crash
+      between phases 3 and 5, or a hard-link surviving both): skip to phase 4.
+   c. `dst` occupied by anything else → archive the occupant to `.superseded/` via the
+      existing preservation helper (it is unreferenced, per (a), and never discarded), then
+      continue.
+3. **Publish**: `mkdir -p` parents; hard-link `src → dst`. Where the filesystem refuses links
+   (EPERM/EXDEV/ENOTSUP): copy to a temp name in `dst`'s directory, fsync, then publish with
+   a **no-replace** primitive (`os.link(temp, dst)` + unlink temp — EEXIST restarts phase 2's
+   classification; never a bare `os.rename` over a checkable window). Fsync the directory
+   chain to the store root (existing durability helper). Both paths now hold the proof.
+4. **Pointer commit**: set `ots_path = dst`, commit the DB. A datastore failure here rolls
+   back and aborts the sweep's current item through the operation's normal error handling —
+   it is NOT swallowed per-file (the session is not reusable after a failed commit); the
+   filesystem state (proof at both paths) is exactly the phase-3/5 crash window and heals on
+   the next sweep via 2b.
+5. **Unlink** the old entry (`suppress(OSError)`) and fsync its directory. A leftover old
+   copy after a crash between 4 and 5 is harmless: it sits in a slot that is no longer
+   referenced; a future stamp there archives it (never-destroy). The sweep makes **no
+   promise to garbage-collect** such copies (the audit's M3: a pointer already equal to
+   canonical is not selected as stale, so no such promise is implementable there).
+
+Crash walk: before 3 → nothing changed. Between 3 and 4 → pointer names `src`, which exists;
+next sweep hits 2b and finishes. Between 4 and 5 → pointer names `dst`, which exists; stale
+copy handled as above. The invariant holds at every boundary, and every completion path
+re-established that the bytes at the destination are this row's proof (corroborated at D3,
+byte-compared at 2b) before the pointer moved.
+
+### D5 — Failure classification
+
+Filesystem/precondition failures (phases 1–3, 5) are per-row: warn, leave the row unchanged
+(pointer still truthful), continue the sweep; they re-warn on later sweeps. A permanent
+destination refusal (`_NAME_MAX_BYTES` pre-check on components below the store root,
+ENAMETOOLONG) is the same per-row warn — deliberately NOT the unstampable-path drop-to-`none`
+rule, which would discard a placed proof's provenance; the operator keeps hearing about a
+proof that cannot sit where the index expects it. Datastore failures follow D4 phase 4.
+
+### D6 — `proof_path()` is the single canonical-location oracle
+
+The stamp guard (D1), the sweep's staleness test (D2), and every relocation phase compute
+locations via `proofs.proof_path(settings, collection_id, relpath)`. SQL may pre-filter
+candidates, but no comparison that decides an action is string-assembled at a call site; a
+test asserts the SQL pre-filter and the helper agree on a representative row set (including
+names with `%`/`_`/quotes).
 
 ## Risks / Trade-offs
 
-- [FS mutation from the scanner widens the scanner's failure surface] → every phase is wrapped
-  per-file; no relocation failure can fail a scan or a reconciliation (D3), mirroring the
-  stamp-never-fails-a-scan rule.
-- [Hard-link fallback (copy) doubles I/O for one proof] → proofs are KB-sized; negligible.
-- [Stale old-slot copy after a crash between phases 3 and 4] → harmless by construction: a
-  future stamp there archives it (never-destroy); healing removes it only when it matches the
-  mover's recorded digest.
-- [Healing sweep scans `files` per collection daily] → one indexed-prefix comparison over
-  ~200k rows per collection per day; the upgrade pass already does heavier per-proof work.
-- [Adopt-same-digest at destination could adopt a proof with same digest but different (better)
-  attestation state] → adoption records what is on disk via the existing corroboration rules
-  (`ots_digest` written only from parsed facts); a same-digest occupant is this file's proof by
-  definition of the content-addressed store.
+- [A deferred stamp (D1) could stay pending indefinitely if the sweep never converges the
+  blocking row (e.g. a permanently refused destination)] → the member re-warns on every stamp
+  pass and the row's state is visible in the panel as queued; the pairing warning names the
+  blocking row. Accepted as loud, lossless behavior.
+- [One healing cycle of pointer-at-old-path exposure after a move] → harmless once D1 is in:
+  nothing can stamp over a referenced slot; verify follows `ots_path`, which is truthful.
+- [Byte-compare at 2b reads two full proofs] → proofs are KB-sized.
+- [Sweep scans `files` per collection daily] → indexed prefix pre-filter + Python
+  confirmation; the upgrade pass already does heavier per-proof work.
+- [Case-insensitive-store aliasing check relies on lstat identity] → dev+inode equality is
+  the portable truth for "same entry"; on filesystems where even that is unreliable the 2b
+  byte-compare still prevents loss (worst case: defer/warn).
 
 ## Migration Plan
 
-No schema change, no migration. Deploy standard (`make deploy`); healing converges live rows
-within one daily upgrade pass, or immediately via `cairn upgrade`. Rollback = previous image;
-already-relocated proofs remain correct under the old code (it reads `ots_path`, which is
-truthful either way).
+No schema change, no migration. Deploy standard (`make deploy`). D1's guard is effective from
+the first post-deploy stamp pass; D2's sweep converges live stale pointers on the next daily
+upgrade or an operator `cairn upgrade`. Rollback = previous image; relocated rows stay
+correct under old code (it reads `ots_path`, which is truthful either way).
 
 ## Open Questions
 
