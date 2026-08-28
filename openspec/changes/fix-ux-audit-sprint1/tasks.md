@@ -500,7 +500,7 @@ mobile section), new `tests/test_ux_docs.py`.
 - [x] 6.5 `ruff check .` clean.
 - [x] 6.6 `openspec validate fix-ux-audit-sprint1 --strict` passes.
 - [x] 6.7 `make audit` (pip-audit) — unchanged dependency set, so this must stay green.
-- [ ] 6.8 Adversarial Codex pass. Mandatory trigger: this change touches the verify verdict path.
+- [x] 6.8 Adversarial Codex pass. Mandatory trigger: this change touches the verify verdict path.
   Frame it as a defensive control review and say what "wrong" means here — the expensive failure is a
   **false negative** (a changed or deleted file that reads clean, a proof that reads verified when it
   should not, or an alert that silently stops being raised). Specifically ask it to attack: the new
@@ -571,7 +571,7 @@ whose whole subject is not destroying records the operator never saw.
   `test_a_stamped_file_still_offers_its_proof_download`.
 - [x] 7.9 Gates re-run after the rework: full `PYTHONPATH=. pytest -q` green, `ruff check src tests`
   clean, `openspec validate fix-ux-audit-sprint1 --strict` passes.
-- [ ] 7.10 Re-run the adversarial Codex pass (§6.8) against the reworked guard: say which findings
+- [x] 7.10 Re-run the adversarial Codex pass (§6.8) against the reworked guard: say which findings
   were addressed and how, and ask it to attack the new mint path specifically — the union snapshot's
   atomicity, the event component's injectivity, and any remaining read that feeds a rendered claim
   but not the hash.
