@@ -616,6 +616,59 @@ about a **claim** the surfaces made that the check behind it did not establish. 
   `integrity-scanning` delta gains the liveness + fence requirements and the `ots-notarization`
   delta gains "Proof mutation stops when the claim it runs under has been reclaimed".
 
+- [x] 5.3p **The fence was a check-then-act, so it could be raced — the lock now sits at the
+  resource.** `lease_held()` reads the claim and returns; the `os.replace` happens milliseconds
+  later, past a calendar round-trip. A reclamation landing in that window (reachable in production:
+  the keepalive gives up after `_KEEPALIVE_MAX_CONSECUTIVE_FAILURES` while the operation keeps
+  working, so the lease can age out under a live pass) leaves the original pass and the replacement
+  claimant both placing proofs for one collection — both find the canonical path free, both
+  `os.replace`, one submission destroyed with no trace. No amount of re-reading the datastore closes
+  it: the check and the act are different operations.
+- [x] 5.3p.1 **A per-collection advisory lock on the proof store.** `ots.CollectionProofLock` takes
+  `fcntl.flock(LOCK_EX)` on `<proof_store>/<collection_id>/.lock` (created with its parents; outside
+  the `.staging`/`.superseded` namespaces and never a proof — every proof is `<relpath>.ots`). It
+  wraps the placement critical section at **both** mutation sites: `proofs.stamp_pending` around
+  each batch (the batch body is now `proofs._stamp_one_batch`, extracted unchanged so the whole
+  inspect → preserve → place → record sequence is one call) and `proofs.upgrade_incomplete` around
+  each `ots upgrade`, keyed on that row's own collection so a fleet-wide pass never holds two at
+  once. Held **per unit of work, never per pass**: holding it across a multi-hour upgrade would
+  invert the outcome, blocking the live claimant until it timed out. Acquisition is bounded
+  (`PLACEMENT_LOCK_TIMEOUT_SECONDS`, 60s) and polls `LOCK_EX|LOCK_NB` rather than using
+  `signal.alarm`, which only fires on the main thread; it runs through `asyncio.to_thread` so the
+  wait never blocks the event loop, while release runs inline (a non-blocking syscall — and the lock
+  lives on the file description, not on the thread that took it). A timeout is a **transient**
+  `OtsError`: nothing placed, nothing dropped to `ots_state='none'`, and the pass stops rather than
+  paying one timeout per remaining batch for a resource someone else still holds.
+- [x] 5.3p.2 **A post-acquisition re-check.** The lease is re-read *inside* the lock, before
+  anything is mutated; a claim found gone there raises `collections.LeaseLost` exactly as the
+  pre-existing fence does (the fence body is now one closure per function, used for both the cheap
+  pre-lock check and the authoritative post-lock one). Whichever placer wins the lock takes its turn
+  alone; the loser aborts on the re-check without writing, in either arrival order.
+- [x] 5.3p.3 **Accepted limitation, with `_fsync_dir`'s errno discipline.** A store whose filesystem
+  cannot lock (`ENOLCK`/`ENOSYS`/`EINVAL`/`ENOTSUP`/`EOPNOTSUPP` — CIFS/SMB, some FUSE, NFS without
+  a lock daemon) logs **one** WARNING per proof store (lazily, in-band, no probe, no setting, process
+  memory in `_BEST_EFFORT_PLACEMENT_LOCK`) and proceeds on the DB fence alone; every other errno
+  stays transient. Classifying it transient instead would wedge notarization forever on such a
+  store — a concurrency nicety costing the notary its ability to notarize.
+- [x] 5.3p.4 Tests in `tests/test_proof_serialization.py`:
+  `test_a_reclamation_after_the_fence_cannot_put_two_placers_on_one_proof_path` (the verdict's exact
+  ordering — `lease_held` is patched to reclaim the collection at the instant it returns `True` and
+  to let the replacement claimant run a full stamp; the fake calendar still routes through the real
+  `ots._place_proof`, so the assertions are about real placement: exactly one canonical proof, it is
+  the winner's bytes, `LeaseLost` from the loser, and an **empty** `.superseded` family — it fails
+  without the post-lock re-check, archiving the winner's proof under `unknown/`),
+  `test_a_second_placer_is_excluded_by_the_lock_and_gives_up_transiently` (a second descriptor on
+  the same lock file holds it: nothing placed, the file stays `pending`, and the same pass succeeds
+  once the holder releases), and
+  `test_a_store_that_cannot_lock_warns_once_and_keeps_the_datastore_fence`. One existing test,
+  `test_ots.py::test_stamp_pending_staging_dir_failure_does_not_abort_later_chunks`, had its blanket
+  `os.mkdir` break narrowed to the staging dir it names — a global break also stopped the new lock
+  file being created, which is a different failure with a different (correct) answer.
+  Design D10 gains "The fence is check-then-act, so the last rung is a lock at the resource" and
+  the full ladder (claim → reclamation → guarded writes → keepalive → fence → resource lock with a
+  post-acquisition re-check); the `ots-notarization` delta gains "Proof placement for one collection
+  is serialized at the proof store itself" with four scenarios.
+
 ## 5. Gates
 
 - [x] 5.1 **`openspec-verifier` subagent** audits the implementation against the spec deltas.

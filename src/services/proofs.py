@@ -13,7 +13,7 @@ import logging
 import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select, update
@@ -128,6 +128,96 @@ async def _adopt_or_verdict(
     return False, verdict
 
 
+async def _stamp_one_batch(
+    chunk: list[tuple[FileEntry, Path, Path]],
+    chunk_verdicts: list[str | None],
+    *,
+    collection_id: int,
+    calendars: list[str],
+    staging: Path,
+    store_root: Path,
+    now: datetime,
+    stamped: int,
+    skipped: int,
+    deferred: int,
+) -> tuple[int, int, int]:
+    """Place one batch of proofs and record the rows; return updated (stamped, skipped, deferred).
+
+    Extracted from :func:`stamp_pending` unchanged, so the whole inspect → preserve → place →
+    record sequence for a batch is one call that can be wrapped in the collection's proof-store lock
+    (design D10). The row updates stay in the caller's session and are committed by its ``progress``
+    callback, exactly as before.
+    """
+    # Offload the blocking `ots` subprocess (process spawn + calendar round-trip) to a worker
+    # thread so the event loop stays free to serve the panel — mirrors scanner hashing.
+    try:
+        outcomes = await asyncio.to_thread(
+            ots.stamp_batch_via_symlink,
+            [(real, out) for _entry, real, out in chunk],
+            calendars,
+            staging,
+            store_root=store_root,
+            verdicts=chunk_verdicts,
+        )
+    except ots.OtsError as exc:
+        # A batch-level failure (e.g. the shared staging dir cannot be created) says nothing
+        # about the individual files. Degrade to the per-file fallback below, which classifies
+        # each one permanent vs. transient — and, crucially, never abort the later chunks or
+        # propagate to the caller (a scan must not fail because stamping could not run).
+        log.warning("batch stamp failed for collection %s: %s", collection_id, exc)
+        outcomes = [None] * len(chunk)
+    for (entry, real, out), outcome, verdict in zip(chunk, outcomes, chunk_verdicts):
+        if outcome is None:
+            # Isolate the failure: retry just this file on its own before giving up on it.
+            try:
+                outcome = await asyncio.to_thread(
+                    ots.stamp_via_symlink, real, out, calendars, staging,
+                    store_root=store_root, verdict=verdict,
+                )
+            except ots.OtsPathError as exc:
+                # The proof output path can never be written (typically ENAMETOOLONG — a
+                # multi-byte name plus ``.ots`` past the filesystem's per-name byte limit). Skip
+                # it and drop it out of `pending` to `none` so a normal scan does not re-queue and
+                # re-fail it every pass (a bad file used to abort the whole batch and re-run the
+                # tree). It is left unstamped-and-untracked-for-proof, exactly like an
+                # un-storable-path skip in the scanner; a `stamp --all` can retry it cheaply.
+                log.warning("skip stamp, unwritable proof path for %s: %s", real, exc)
+                entry.ots_state = "none"
+                entry.ots_path = None  # no proof stored; never leave a stale pointer behind
+                # …and no stamp time either: a file renamed onto an un-writable path after an
+                # earlier stamp would otherwise keep the OLD content's timestamp with no proof
+                # to back it, which the panel renders as trust metadata ("notarized on …").
+                # `none` must mean nothing is claimed. The monitored `status` is untouched —
+                # this is a notarization skip, not a re-baseline.
+                entry.ots_stamped_at = None
+                # …and no provenance: `ots_digest` records the digest of a proof Cairn placed at
+                # `ots_path`, so with no proof there is nothing for it to be a record of.
+                entry.ots_digest = None
+                skipped += 1
+                continue
+            except ots.OtsError as exc:
+                log.warning("stamp failed for %s: %s", real, exc)
+                continue
+        if outcome.kind == "deferred":
+            # A same-digest anchored proof neither confirmed nor disproven (the backend was
+            # unreachable). Both artifacts survive on disk; the row is left EXACTLY as it was —
+            # `pending`, no path, no state, no provenance, no stamp time — so an outage produces
+            # no recorded claim and the next pass that reaches the backend decides the case.
+            deferred += 1
+            continue
+        entry.ots_path = str(out)
+        entry.ots_digest = outcome.digest
+        if outcome.kind == "kept":
+            # An existing anchored proof the caller CONFIRMED was kept canonical. Record what it
+            # is, and leave `ots_stamped_at` alone — no submission happened here (design D1).
+            entry.ots_state = "complete"
+        else:
+            entry.ots_state = outcome.state or "incomplete"
+            entry.ots_stamped_at = now
+        stamped += 1
+    return stamped, skipped, deferred
+
+
 async def stamp_pending(
     session: AsyncSession,
     collection: Collection,
@@ -169,6 +259,16 @@ async def stamp_pending(
     that exist on disk would destroy evidence to tidy up bookkeeping. The fence is checked between
     batches (a batch is one ``ots`` call and one calendar round-trip, so the check is free by
     comparison) and nothing is committed after it fires.
+
+    A fence read alone is still check-then-act, though: a reclamation landing in the gap between
+    "the lease is held" and the batch's ``os.replace`` puts two placers on one canonical path. So
+    each batch's placement ALSO runs inside the collection's proof-store lock
+    (:class:`ots.CollectionProofLock`, ``<proof_store>/<collection_id>/.lock``) and the lease is
+    re-read **after** the lock is taken: whichever placer wins the lock does its inspect → preserve
+    → place → record turn alone, and the one whose claim was reclaimed finds it gone on the
+    re-read and raises before touching anything (design D10). The lock is taken per BATCH, never
+    across the whole pass, so a stale holder can delay a live one by one calendar round-trip at
+    most rather than by hours.
     """
     settings = settings or get_settings()
     # Read the identity up front, as a plain local: the fence below rolls the session back, which
@@ -226,98 +326,84 @@ async def stamp_pending(
     stamped = adopted
     skipped = 0  # files whose proof path can never be written (e.g. name past the FS byte limit)
     deferred = 0  # same-digest anchored proofs nothing could confirm; nothing recorded, still pending
+    batches = (len(work) + batch_size - 1) // batch_size
+
+    async def _fence(batch_no: int, stage: str) -> None:
+        """Stop the pass unless ``run_id`` still holds the collection's claim (design D10).
+
+        Called twice per batch: once before the lock is taken (cheap, so a reclaimed pass does not
+        queue for a resource it may not touch) and once after (authoritative — the reclamation may
+        have landed while this pass waited for the lock).
+        """
+        if run_id is None or await collections.lease_held(run_id):
+            return
+        log.warning(
+            "collection %s: the operation claim (run %s) was RECLAIMED mid-stamp — stopping %s "
+            "batch %d of %d. The %d proof(s) already placed stand; the rest stay pending",
+            collection_id,
+            run_id,
+            stage,
+            batch_no,
+            batches,
+            stamped,
+        )
+        # Discard anything this call has staged but not yet committed (the adoption pass's row
+        # updates, if the fence fires before the first `progress` write): nothing commits after
+        # the fence sees a reclamation. Proofs already ON DISK are untouched — they were placed
+        # under a valid lease, `_place_proof` never destroys a proof, and the next pass re-reads
+        # and adopts or re-records them.
+        await session.rollback()
+        raise collections.LeaseLost(
+            f"the operation claim for collection {collection_id} (run {run_id}) was reclaimed "
+            f"mid-stamp"
+        )
+
     for start in range(0, len(work), batch_size):
         chunk = work[start : start + batch_size]
         chunk_verdicts = verdicts[start : start + batch_size]
+        batch_no = start // batch_size + 1
         # The fence, immediately before this chunk mutates the proof store (design D10). A caller
         # that named its claim gets it checked; one that did not (a direct test call) is unchanged.
-        if run_id is not None and not await collections.lease_held(run_id):
-            log.warning(
-                "collection %s: the operation claim (run %s) was RECLAIMED mid-stamp — stopping "
-                "before batch %d of %d. The %d proof(s) already placed stand; the rest stay pending",
-                collection_id,
-                run_id,
-                start // batch_size + 1,
-                (len(work) + batch_size - 1) // batch_size,
-                stamped,
-            )
-            # Discard anything this call has staged but not yet committed (the adoption pass's row
-            # updates, if the fence fires before the first `progress` write): nothing commits after
-            # the fence sees a reclamation. Proofs already ON DISK are untouched — they were placed
-            # under a valid lease, `_place_proof` never destroys a proof, and the next pass re-reads
-            # and adopts or re-records them.
-            await session.rollback()
-            raise collections.LeaseLost(
-                f"the operation claim for collection {collection_id} (run {run_id}) was reclaimed "
-                f"mid-stamp"
-            )
-        # Offload the blocking `ots` subprocess (process spawn + calendar round-trip) to a worker
-        # thread so the event loop stays free to serve the panel — mirrors scanner hashing.
+        await _fence(batch_no, "before")
+        # …and the fence AT the resource. The read above is check-then-act on its own: a
+        # reclamation landing between it and the `os.replace` below would put this pass and the
+        # replacement claimant on one canonical path at once. The collection's proof lock makes
+        # the two take turns, and the re-read inside it makes the loser abort (design D10).
+        lock = ots.CollectionProofLock(store_root, collection_id)
         try:
-            outcomes = await asyncio.to_thread(
-                ots.stamp_batch_via_symlink,
-                [(real, out) for _entry, real, out in chunk],
-                calendars,
-                staging,
-                store_root=store_root,
-                verdicts=chunk_verdicts,
-            )
+            await asyncio.to_thread(lock.acquire)
         except ots.OtsError as exc:
-            # A batch-level failure (e.g. the shared staging dir cannot be created) says nothing
-            # about the individual files. Degrade to the per-file fallback below, which classifies
-            # each one permanent vs. transient — and, crucially, never abort the later chunks or
-            # propagate to the caller (a scan must not fail because stamping could not run).
-            log.warning("batch stamp failed for collection %s: %s", collection.id, exc)
-            outcomes = [None] * len(chunk)
-        for (entry, real, out), outcome, verdict in zip(chunk, outcomes, chunk_verdicts):
-            if outcome is None:
-                # Isolate the failure: retry just this file on its own before giving up on it.
-                try:
-                    outcome = await asyncio.to_thread(
-                        ots.stamp_via_symlink, real, out, calendars, staging,
-                        store_root=store_root, verdict=verdict,
-                    )
-                except ots.OtsPathError as exc:
-                    # The proof output path can never be written (typically ENAMETOOLONG — a
-                    # multi-byte name plus ``.ots`` past the filesystem's per-name byte limit). Skip
-                    # it and drop it out of `pending` to `none` so a normal scan does not re-queue and
-                    # re-fail it every pass (a bad file used to abort the whole batch and re-run the
-                    # tree). It is left unstamped-and-untracked-for-proof, exactly like an
-                    # un-storable-path skip in the scanner; a `stamp --all` can retry it cheaply.
-                    log.warning("skip stamp, unwritable proof path for %s: %s", real, exc)
-                    entry.ots_state = "none"
-                    entry.ots_path = None  # no proof stored; never leave a stale pointer behind
-                    # …and no stamp time either: a file renamed onto an un-writable path after an
-                    # earlier stamp would otherwise keep the OLD content's timestamp with no proof
-                    # to back it, which the panel renders as trust metadata ("notarized on …").
-                    # `none` must mean nothing is claimed. The monitored `status` is untouched —
-                    # this is a notarization skip, not a re-baseline.
-                    entry.ots_stamped_at = None
-                    # …and no provenance: `ots_digest` records the digest of a proof Cairn placed at
-                    # `ots_path`, so with no proof there is nothing for it to be a record of.
-                    entry.ots_digest = None
-                    skipped += 1
-                    continue
-                except ots.OtsError as exc:
-                    log.warning("stamp failed for %s: %s", real, exc)
-                    continue
-            if outcome.kind == "deferred":
-                # A same-digest anchored proof neither confirmed nor disproven (the backend was
-                # unreachable). Both artifacts survive on disk; the row is left EXACTLY as it was —
-                # `pending`, no path, no state, no provenance, no stamp time — so an outage produces
-                # no recorded claim and the next pass that reaches the backend decides the case.
-                deferred += 1
-                continue
-            entry.ots_path = str(out)
-            entry.ots_digest = outcome.digest
-            if outcome.kind == "kept":
-                # An existing anchored proof the caller CONFIRMED was kept canonical. Record what it
-                # is, and leave `ots_stamped_at` alone — no submission happened here (design D1).
-                entry.ots_state = "complete"
-            else:
-                entry.ots_state = outcome.state or "incomplete"
-                entry.ots_stamped_at = now
-            stamped += 1
+            # Someone else holds the lock (or it cannot be taken at all). Transient by
+            # construction: nothing was placed and every remaining file stays `pending`. Stop the
+            # pass rather than re-queueing for every later batch — whatever holds the resource will
+            # still hold it, so retrying would burn one timeout per batch to make no progress.
+            log.warning(
+                "collection %s: stopping the stamp pass at batch %d of %d — %s",
+                collection_id,
+                batch_no,
+                batches,
+                exc,
+            )
+            break
+        try:
+            await _fence(batch_no, "after taking the proof-store lock for")
+            stamped, skipped, deferred = await _stamp_one_batch(
+                chunk,
+                chunk_verdicts,
+                collection_id=collection_id,
+                calendars=calendars,
+                staging=staging,
+                store_root=store_root,
+                now=now,
+                stamped=stamped,
+                skipped=skipped,
+                deferred=deferred,
+            )
+        finally:
+            # Releasing is a non-blocking syscall on a descriptor the process owns, so it needs no
+            # worker thread — and the lock lives on the file description, not on the thread that
+            # took it, so releasing here is the same lock the worker thread acquired.
+            lock.release()
         if progress is not None:
             # Persist progress per batch (the callback commits) so the badge advances live.
             await progress(stamped)
@@ -325,14 +411,14 @@ async def stamp_pending(
     if skipped:
         log.warning(
             "collection %s: skipped %d file(s) with an unwritable proof path (set ots_state=none)",
-            collection.id,
+            collection_id,
             skipped,
         )
     if deferred:
         log.warning(
             "collection %s: deferred %d proof placement(s) — the existing proof's anchor could not "
             "be checked, so both proofs were kept and the files stay pending for the next pass",
-            collection.id,
+            collection_id,
             deferred,
         )
     await session.commit()
@@ -538,43 +624,76 @@ async def upgrade_incomplete(
     whose lease was reclaimed is a second writer over another operation's proofs. The claim is
     re-read before each proof; a lost one raises :class:`collections.LeaseLost` and the proofs
     already upgraded (and already committed by ``progress``) stand.
+
+    And the same resource lock closes the same check-then-act gap: each rewrite happens inside the
+    proof-store lock for **that row's** collection (:class:`ots.CollectionProofLock`, so a
+    fleet-wide pass locks each collection only while it is working on it), with the lease re-read
+    after the lock is taken. A pass whose claim was reclaimed while it waited for the lock aborts
+    there instead of rewriting a proof the new claimant is placing (design D10). The lock is held
+    per proof, never across the pass, so the daily multi-hour upgrade can delay another placer by
+    one ``ots upgrade`` at most.
     """
     settings = settings or get_settings()
+    store_root = Path(settings.proof_store_path)
     stmt = select(FileEntry).where(FileEntry.ots_state == "incomplete")
     if collection is not None:
         stmt = stmt.where(FileEntry.collection_id == collection.id)
     files = list(await session.scalars(stmt))
 
     upgraded = still = processed = 0
+
+    async def _fence(stage: str) -> None:
+        """Stop the pass unless ``run_id`` still holds its claim — before AND after the lock."""
+        if run_id is None or await collections.lease_held(run_id):
+            return
+        log.warning(
+            "the operation claim (run %s) was RECLAIMED mid-upgrade — stopping %s after %d "
+            "proof(s); those already upgraded stand and the rest stay incomplete",
+            run_id,
+            stage,
+            processed,
+        )
+        await session.rollback()  # nothing commits after the fence fires
+        raise collections.LeaseLost(
+            f"the operation claim (run {run_id}) was reclaimed mid-upgrade"
+        )
+
     for entry in files:
         # The fence, before this proof is rewritten (design D10). One SELECT against a pass whose
         # per-proof cost is a subprocess spawn plus calendar traffic.
-        if run_id is not None and not await collections.lease_held(run_id):
-            log.warning(
-                "the operation claim (run %s) was RECLAIMED mid-upgrade — stopping after %d "
-                "proof(s); those already upgraded stand and the rest stay incomplete",
-                run_id,
-                processed,
-            )
-            await session.rollback()  # nothing commits after the fence fires
-            raise collections.LeaseLost(
-                f"the operation claim (run {run_id}) was reclaimed mid-upgrade"
-            )
+        await _fence("before the next proof")
         processed += 1
         complete = False
         if not entry.ots_path or not Path(entry.ots_path).exists():
             log.warning("incomplete proof has no .ots on disk: %s", entry.ots_path)
         else:
+            # The fence AT the resource: `ots upgrade` rewrites the `.ots` in place, so this pass
+            # and a replacement claimant placing over the same path must not overlap. Locked per
+            # ROW's collection, so a fleet-wide pass never holds two collections at once.
+            lock = ots.CollectionProofLock(store_root, entry.collection_id)
             try:
-                # Off the event loop: `ots upgrade` spawns a process and contacts the calendars.
-                complete = await asyncio.to_thread(ots.upgrade, entry.ots_path)
+                await asyncio.to_thread(lock.acquire)
             except ots.OtsError as exc:
-                log.warning("upgrade failed for %s: %s", entry.ots_path, exc)
-            if entry.ots_digest is None:
-                # Corroborated provenance backfill (design D3). Offline, never raises, and cannot
-                # change the upgrade outcome decided above.
-                facts = await asyncio.to_thread(ots.read_proof_facts, entry.ots_path)
-                _backfill_provenance(entry, facts)
+                # Transient: nothing was rewritten and every remaining proof stays `incomplete`.
+                # Stop rather than paying one timeout per proof for a resource someone else holds.
+                # This row was counted as processed a moment ago and was not: hand the count back.
+                processed -= 1
+                log.warning("stopping the upgrade pass after %d proof(s) — %s", processed, exc)
+                break
+            try:
+                await _fence("after taking the proof-store lock")
+                try:
+                    # Off the event loop: `ots upgrade` spawns a process and contacts the calendars.
+                    complete = await asyncio.to_thread(ots.upgrade, entry.ots_path)
+                except ots.OtsError as exc:
+                    log.warning("upgrade failed for %s: %s", entry.ots_path, exc)
+                if entry.ots_digest is None:
+                    # Corroborated provenance backfill (design D3). Offline, never raises, and
+                    # cannot change the upgrade outcome decided above.
+                    facts = await asyncio.to_thread(ots.read_proof_facts, entry.ots_path)
+                    _backfill_provenance(entry, facts)
+            finally:
+                lock.release()
         if complete:
             entry.ots_state = "complete"
             upgraded += 1

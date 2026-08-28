@@ -844,3 +844,55 @@ found lost.
 - **WHEN** a stamping pass runs to completion holding the collection's claim
 - **THEN** every pending file SHALL be stamped and recorded exactly as it was before the
   re-confirmation was introduced
+
+### Requirement: Proof placement for one collection is serialized at the proof store itself
+
+Proof mutation SHALL be serialized at the resource itself: every placement of a stamped proof and
+every rewrite of an existing proof SHALL be performed while holding an exclusive advisory lock over
+that collection's proof subtree, and the operation claim SHALL be re-confirmed **after** the lock is
+held and before anything is mutated.
+
+Re-confirming the operation claim before a placement is otherwise a check followed by an act, and
+the two are not one operation: a claim reclaimed in the interval between them leaves the original
+pass and the replacement claimant both placing proofs for the same collection, each finding the
+canonical path free and each replacing it, with one submission destroyed and no record that it
+existed. A pass that finds its claim no longer held at that point SHALL
+release the lock and stop without mutating anything, exactly as the earlier re-confirmation does.
+
+The lock SHALL be held per unit of work — one batch of placements, one rewritten proof — and never
+for the duration of a pass, so that an operation whose claim has already been reclaimed can delay
+the operation that legitimately holds the collection by no more than a single unit. Waiting for the
+lock SHALL be bounded, and exhausting that wait SHALL be treated as a transient failure: no proof is
+placed, no queued file is dropped from the stamp queue, and the files involved stay queued for a
+later pass.
+
+Where the proof store's filesystem does not support advisory locking at all, the system SHALL log
+one warning naming that store and SHALL continue with the datastore claim and its re-confirmation
+alone, rather than refusing to notarize. Only the filesystem's explicit "locking is not supported"
+answers SHALL be treated this way; every other locking failure SHALL remain a transient failure.
+
+#### Scenario: Two racing placers take their turns instead of overwriting each other
+
+- **WHEN** an operation's claim is reclaimed after it has re-confirmed the claim but before it places
+  a proof, and the replacement claimant places a proof for the same file
+- **THEN** exactly one proof SHALL be canonical at that file's proof path, it SHALL be the one placed
+  by the operation that held the claim, and no proof SHALL have been superseded
+
+#### Scenario: The placer whose claim was reclaimed aborts after taking the lock
+
+- **WHEN** a pass takes the collection's placement lock and the claim it runs under has been
+  reclaimed in the meantime
+- **THEN** it SHALL place no proof, SHALL release the lock, and SHALL report the reclamation the same
+  way the pre-placement re-confirmation does
+
+#### Scenario: A second placer holding the lock is waited for, then given up on
+
+- **WHEN** another placer holds the collection's placement lock for longer than the bounded wait
+- **THEN** the pass SHALL place nothing, SHALL leave every file it did not place queued for stamping,
+  SHALL NOT record any file as unstampable, and SHALL succeed on a later pass once the lock is free
+
+#### Scenario: A proof store that cannot lock keeps notarizing
+
+- **WHEN** the proof store's filesystem answers that advisory locking is unsupported
+- **THEN** the system SHALL warn once for that store, SHALL continue placing and recording proofs
+  under the datastore claim alone, and SHALL NOT repeat the warning for subsequent placements

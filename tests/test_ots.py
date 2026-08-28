@@ -965,8 +965,18 @@ async def test_stamp_pending_staging_dir_failure_does_not_abort_later_chunks(cai
     monkeypatch.setattr(ots, "stamp_via_symlink", counting_single)
     monkeypatch.setattr(ots, "_run_ots", _batch_fake([]))
 
-    def boom_mkdir(*args, **kwargs):  # noqa: ANN002, ANN003
-        raise PermissionError(_errno.EACCES, "Permission denied")
+    # Break the creation of the SHARED STAGING DIR specifically — the batch-level failure this test
+    # is about. A blanket `os.mkdir` patch would also stop the collection's placement lock
+    # (`<proof_store>/<cid>/.lock`, design D10) from being created, which is a different failure
+    # with a different (and correct) answer — the pass stops instead of walking doomed chunks — and
+    # would leave this regression asserting something it no longer exercises.
+    staging = str(proofs.staging_dir(get_settings()))
+    real_mkdir = os.mkdir
+
+    def boom_mkdir(path, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if str(path) == staging:
+            raise PermissionError(_errno.EACCES, "Permission denied")
+        return real_mkdir(path, *args, **kwargs)
 
     monkeypatch.setattr(os, "mkdir", boom_mkdir)
 

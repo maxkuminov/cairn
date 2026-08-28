@@ -36,6 +36,7 @@ import binascii
 import contextlib
 import datetime
 import errno
+import fcntl
 import json
 import logging
 import os
@@ -43,6 +44,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -598,6 +600,180 @@ def _preserve_proof(
     # Only now may the only other copy go away.
     os.unlink(source)
     return candidate
+
+
+# --- Placement serialization: the fence AT the resource (design D10) ---------------------------
+
+# The lock file guarding one collection's proof subtree: ``<proof_store>/<collection_id>/.lock``.
+# It lives in the collection's own proof directory -- outside the ``.staging`` and ``.superseded``
+# namespaces -- and can never be mistaken for a proof: every proof Cairn writes is named
+# ``<relpath>.ots``, and this name has no ``.ots`` suffix. It is never read, never parsed and never
+# archived; only its lock state matters, so an empty file is the whole of it.
+COLLECTION_LOCK_NAME = ".lock"
+
+# How long a placer waits for that lock before giving up. The wait is BOUNDED so a wedged holder can
+# never stall a pass forever, and a timeout is TRANSIENT (:class:`OtsError`): nothing is placed, the
+# files stay ``pending``/``incomplete``, and the next pass takes them. Sixty seconds is far longer
+# than any real critical section (a local parse plus one or two renames) and far shorter than the
+# 15-minute lease interval, so a timeout means "someone else genuinely holds the resource", never
+# "this placement was slow".
+PLACEMENT_LOCK_TIMEOUT_SECONDS = 60.0
+
+# The wait is a poll, not a blocking ``flock`` plus a signal: ``signal.alarm`` only works on the
+# main thread and these acquisitions run in a worker thread (``asyncio.to_thread`` at the call
+# sites), so an alarm-based timeout would silently never fire.
+_LOCK_POLL_SECONDS = 0.05
+
+# ``flock`` answers with exactly one of these when the FILESYSTEM cannot lock at all (some network
+# and FUSE stores). Deterministic, exactly like :data:`_DIR_SYNC_UNSUPPORTED`: it answers the same
+# on every retry, so classifying it transient would wedge stamping on such a store forever. Every
+# OTHER errno (EIO, ENOSPC, EACCES, ...) stays a real, transient failure.
+_FLOCK_UNSUPPORTED = frozenset(
+    {
+        errno.ENOLCK,
+        errno.ENOSYS,
+        errno.EINVAL,
+        errno.ENOTSUP,
+        getattr(errno, "EOPNOTSUPP", errno.ENOTSUP),
+    }
+)
+
+# The lock is simply held by someone else. Not a failure -- wait and retry until the deadline.
+_LOCK_CONTENDED = frozenset({errno.EWOULDBLOCK, errno.EAGAIN})
+
+# Proof stores (by root path) whose filesystem cannot lock. Detected LAZILY AND IN-BAND on the first
+# acquisition actually attempted for that store -- no probe, no startup check, no schema, no
+# setting. Process memory only, exactly like :data:`_BEST_EFFORT_DIR_SYNC`.
+_BEST_EFFORT_PLACEMENT_LOCK: set[str] = set()
+
+
+def collection_lock_path(store_root: str | os.PathLike[str], collection_id: str | int) -> Path:
+    """``<proof_store>/<collection_id>/.lock`` -- the placement lock for one collection's proofs."""
+    return Path(store_root) / str(collection_id) / COLLECTION_LOCK_NAME
+
+
+class CollectionProofLock:
+    """An advisory, cross-process lock over one collection's proof subtree (design D10).
+
+    The DB claim (:func:`src.services.collections.claim_run`) serializes Cairn's *operations*; this
+    serializes *mutation of the resource itself*. It exists because the lease fence is a
+    check-then-act: a pass can read ``lease_held() is True``, be reclaimed a microsecond later, and
+    walk into placement beside the replacement claimant -- two writers, one canonical path, one
+    ``os.replace`` each, and the loser's proof destroyed with no trace. Holding this lock across the
+    placement makes the two take their turns, and the post-acquisition re-read of the lease (at the
+    call sites) makes the one that lost its claim abort instead of writing.
+
+    ``fcntl.flock`` is the right primitive here because Cairn is deployed as **one machine** (a
+    self-hosted app plus a host CLI over one proof-store filesystem, DESIGN.md): container and host
+    share one kernel and one filesystem, so an advisory lock on a file in that store is visible to
+    both. It is NOT a substitute for the DB claim -- the claim is what serializes across *hosts*
+    sharing a datastore -- it is the last rung of the ladder below it.
+
+    The lock lives on the open file DESCRIPTION, not on a thread, so acquiring it in one worker
+    thread and releasing it from another (or from the event loop) is correct and deliberate: the
+    call sites acquire through ``asyncio.to_thread`` because the wait can block, and release inline
+    because ``LOCK_UN`` cannot.
+
+    Failure handling follows the module's classification rule and :func:`_fsync_dir`'s errno
+    discipline:
+
+    * the lock file cannot be created/opened -> transient :class:`OtsError` (the store is writable
+      by contract; if it is not, the placement about to happen would fail anyway);
+    * ``flock`` says the filesystem cannot lock -> **degrade**: one WARNING per proof store, then
+      proceed with the datastore fence alone (accepted limitation);
+    * the deadline passes with the lock still held elsewhere -> transient :class:`OtsError`;
+    * any other errno -> transient :class:`OtsError`.
+
+    Never a permanent (:class:`OtsPathError`) verdict: the lock is not the final output path, so it
+    can never drop a file out of the stamp queue.
+    """
+
+    def __init__(
+        self,
+        store_root: str | os.PathLike[str],
+        collection_id: str | int,
+        *,
+        timeout: float | None = None,
+    ) -> None:
+        self.path = collection_lock_path(store_root, collection_id)
+        self._store_key = str(Path(store_root))
+        # Read the module constant at call time rather than binding it as a default: the call sites
+        # never pass a timeout, and a default bound at import would make the knob unturnable.
+        self._timeout = PLACEMENT_LOCK_TIMEOUT_SECONDS if timeout is None else timeout
+        self._fd: int | None = None
+        #: True when this store's filesystem cannot lock and the lock degraded to a no-op.
+        self.degraded = False
+
+    def acquire(self) -> None:
+        """Take the lock, waiting up to ``timeout``. Raises :class:`OtsError` on failure.
+
+        Safe to call from a worker thread; the caller must pair it with :meth:`release` in a
+        ``finally``.
+        """
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(self.path), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644)
+        except OSError as exc:
+            raise OtsError(
+                f"cannot open the proof placement lock {str(self.path)!r}: {exc}"
+            ) from exc
+
+        if self._store_key in _BEST_EFFORT_PLACEMENT_LOCK:
+            os.close(fd)
+            self.degraded = True
+            return
+
+        deadline = time.monotonic() + self._timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in _LOCK_CONTENDED:
+                    if time.monotonic() >= deadline:
+                        os.close(fd)
+                        raise OtsError(
+                            f"timed out after {self._timeout:g}s waiting for the proof placement "
+                            f"lock {str(self.path)!r}; another placer holds it"
+                        ) from exc
+                    time.sleep(_LOCK_POLL_SECONDS)
+                    continue
+                os.close(fd)
+                if exc.errno in _FLOCK_UNSUPPORTED:
+                    _BEST_EFFORT_PLACEMENT_LOCK.add(self._store_key)
+                    log.warning(
+                        "proof store %s: the filesystem does not support advisory locking (%s), so "
+                        "proof placement cannot be serialized at the resource; Cairn falls back to "
+                        "the datastore operation claim alone. Two Cairn processes racing over one "
+                        "proof path on this store are guarded by that claim only. Proceeding.",
+                        self._store_key,
+                        exc.strerror or exc,
+                    )
+                    self.degraded = True
+                    return
+                raise OtsError(
+                    f"cannot take the proof placement lock {str(self.path)!r}: {exc}"
+                ) from exc
+            self._fd = fd
+            return
+
+    def release(self) -> None:
+        """Release the lock. Never raises -- it runs in a ``finally`` beside a classified error."""
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        try:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+    def __enter__(self) -> CollectionProofLock:
+        self.acquire()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.release()
 
 
 def _path_occupied(path: Path) -> bool:

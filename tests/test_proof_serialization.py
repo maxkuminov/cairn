@@ -685,3 +685,285 @@ def test_a_reclaimed_upgrade_pass_stops_and_leaves_the_reclamation_state(cairn_e
 
     asyncio.run(go())
     _dispose_engine()
+
+
+# ==============================================================================================
+# 5.3p — the fence is a check-then-act, so the last rung is a lock AT the resource
+# ==============================================================================================
+#
+# `lease_held()` reads the claim and returns; the `os.replace` happens some milliseconds later,
+# after a calendar round-trip. A reclamation landing in that window puts TWO placers on one
+# canonical proof path with both of them believing they hold the collection: each finds the path
+# free, each replaces, and the first submission is gone with no trace it ever existed. No amount of
+# re-reading the datastore closes that window — the check and the act are different operations.
+#
+# So the last rung of the ladder is a lock on the resource itself: an advisory `flock` on
+# `<proof_store>/<collection_id>/.lock`, held across the batch's placement, with the lease re-read
+# AFTER it is taken. The winner of the lock does its turn alone; the loser discovers on the re-read
+# that its claim is gone and stops without writing.
+
+
+def _placing_batch(marker: str, calls: list[str] | None = None):
+    """A `stamp_batch_via_symlink` stand-in that goes through the REAL placement rules.
+
+    Only the calendar is faked: each member gets a staged file of recognisable bytes, which
+    `ots._place_proof` then inspects, preserves-if-occupied and places. So an assertion about the
+    `.superseded` archive family is an assertion about what production would have preserved.
+    """
+    from src.services import ots
+
+    def fake_batch(pairs, calendars, staging, *, store_root=None, verdicts=None):
+        outcomes = []
+        staging = Path(staging)
+        staging.mkdir(parents=True, exist_ok=True)
+        for i, (_real, out) in enumerate(pairs):
+            if calls is not None:
+                calls.append(marker)
+            staged = staging / f"{marker}-{i}-{Path(out).name}"
+            staged.write_bytes(f"proof placed by {marker}".encode())
+            outcomes.append(ots._place_proof(staged, Path(out), store_root=store_root))
+        return outcomes
+
+    return fake_batch
+
+
+def _archive_families(store: Path, cid: int) -> list[Path]:
+    """Every preserved proof under `<proof_store>/.superseded/<cid>/` — empty means nothing was
+    ever superseded, which is the only acceptable answer when one placer never got to write."""
+    from src.services import ots
+
+    root = ots.superseded_root(store, cid)
+    return sorted(f for f in root.rglob("*") if f.is_file()) if root.exists() else []
+
+
+def test_a_reclamation_after_the_fence_cannot_put_two_placers_on_one_proof_path(
+    cairn_env, monkeypatch, no_calendar
+):
+    """The race the DB fence alone cannot see: reclaimed AFTER `lease_held` answered, BEFORE placing.
+
+    `lease_held` is patched to reclaim the collection at the exact instant it is about to return
+    ``True`` — the window between the check and the act — and to let the replacement claimant run a
+    complete stamp of the same file under its own, valid claim. The original pass then walks into
+    placement believing it still owns the collection, which is precisely the two-writer state the
+    claim exists to exclude.
+
+    What must hold afterwards: exactly ONE canonical proof, and it is the one placed by the operation
+    that actually held the claim; the loser raised `LeaseLost` instead of writing; and nothing was
+    superseded, because the loser never got as far as needing to preserve anything.
+    """
+    root = cairn_env / "raced"
+
+    async def go():
+        from sqlalchemy import update as sql_update
+
+        from src.database import get_sessionmaker
+        from src.models.db import Collection, FileEntry, Run
+        from src.services import collections as coll
+        from src.services import proofs
+        from src.services.scanner import _utcnow
+
+        cid = await _seed_collection_with_pending_file(root, b"the only copy")
+        store = cairn_env / "proofs"
+        canonical = store / str(cid) / "doc.txt.ots"
+
+        placed: list[str] = []
+        monkeypatch.setattr(
+            proofs.ots, "stamp_batch_via_symlink", _placing_batch("A", placed)
+        )
+
+        ids: dict[str, int] = {}
+        real_lease_held = coll.lease_held
+
+        async def racing_lease_held(run_id):
+            held = await real_lease_held(run_id)
+            if run_id != ids.get("a") or ids.get("raced"):
+                return held
+            ids["raced"] = 1
+            # The answer for A is computed and about to be returned as True. NOW the reaper judges
+            # A abandoned and revokes its claim — the write `reclaim_stale_claim` and the sweep both
+            # make — and the replacement claimant takes the freed slot and stamps the same file.
+            async with get_sessionmaker()() as other:
+                await other.execute(
+                    sql_update(Run)
+                    .where(Run.id == ids["a"])
+                    .values(result="interrupted", finished=_utcnow())
+                )
+                await other.commit()
+            async with get_sessionmaker()() as b_session:
+                monkeypatch.setattr(
+                    proofs.ots, "stamp_batch_via_symlink", _placing_batch("B", placed)
+                )
+                collection_b = await b_session.get(Collection, cid)
+                run_b = Run(collection_id=cid, kind="stamp", started=_utcnow(), result="running")
+                assert await coll.claim_run(b_session, run_b) is not None
+                assert await proofs.stamp_pending(b_session, collection_b, run_id=run_b.id) == 1
+                monkeypatch.setattr(
+                    proofs.ots, "stamp_batch_via_symlink", _placing_batch("A", placed)
+                )
+            return held
+
+        monkeypatch.setattr(coll, "lease_held", racing_lease_held)
+
+        async with get_sessionmaker()() as s:
+            collection = await s.get(Collection, cid)
+            run_a = Run(collection_id=cid, kind="stamp", started=_utcnow(), result="running")
+            assert await coll.claim_run(s, run_a) is not None
+            ids["a"] = run_a.id
+            with pytest.raises(coll.LeaseLost):
+                await proofs.stamp_pending(s, collection, run_id=run_a.id)
+
+        assert ids.get("raced"), "the race seam never fired; this test proved nothing"
+        assert placed == ["B"], (
+            f"the pass that lost its claim still placed a proof: {placed}"
+        )
+        assert canonical.read_bytes() == b"proof placed by B", (
+            "the loser's proof is canonical — a submission was destroyed by the second writer"
+        )
+        assert _archive_families(store, cid) == [], (
+            "something had to be superseded, so two placers reached one canonical path"
+        )
+
+        async with get_sessionmaker()() as s:
+            fe = await s.scalar(select(FileEntry).where(FileEntry.collection_id == cid))
+            assert fe.ots_state == "incomplete" and fe.ots_path == str(canonical)
+
+    asyncio.run(go())
+    _dispose_engine()
+
+
+def test_a_second_placer_is_excluded_by_the_lock_and_gives_up_transiently(
+    cairn_env, monkeypatch, no_calendar
+):
+    """The lock is real: while another placer holds it, this pass places nothing and stays pending.
+
+    The holder here is a plain second file descriptor on the same lock file — which is exactly what
+    the host `cairn stamp` process is to the container's scheduler: a different opener of one file
+    on one shared filesystem. The wait is bounded, and running out of it is TRANSIENT: nothing is
+    placed, nothing is dropped to `none`, and the next pass takes the file.
+    """
+    root = cairn_env / "excluded"
+
+    async def go():
+        from src.database import get_sessionmaker
+        from src.models.db import Collection, FileEntry
+        from src.services import ots, proofs
+
+        cid = await _seed_collection_with_pending_file(root, b"contended")
+        store = cairn_env / "proofs"
+
+        placed: list[str] = []
+        monkeypatch.setattr(ots, "stamp_batch_via_symlink", _placing_batch("A", placed))
+        # A bounded wait is the point; sixty real seconds in a test is not.
+        monkeypatch.setattr(ots, "PLACEMENT_LOCK_TIMEOUT_SECONDS", 0.2)
+
+        other_process = ots.CollectionProofLock(store, cid)
+        other_process.acquire()
+        try:
+            async with get_sessionmaker()() as s:
+                collection = await s.get(Collection, cid)
+                assert await proofs.stamp_pending(s, collection) == 0
+        finally:
+            other_process.release()
+
+        assert placed == [], "the pass placed a proof while another placer held the lock"
+        assert not (store / str(cid) / "doc.txt.ots").exists()
+
+        async with get_sessionmaker()() as s:
+            fe = await s.scalar(select(FileEntry).where(FileEntry.collection_id == cid))
+            assert fe.ots_state == "pending", "a contended lock must never drop a file to `none`"
+
+        # And once the holder is gone the very same pass succeeds — the refusal was transient.
+        async with get_sessionmaker()() as s:
+            collection = await s.get(Collection, cid)
+            assert await proofs.stamp_pending(s, collection) == 1
+        assert placed == ["A"]
+
+    asyncio.run(go())
+    _dispose_engine()
+
+
+def test_a_store_that_cannot_lock_warns_once_and_keeps_the_datastore_fence(
+    cairn_env, monkeypatch, no_calendar, caplog
+):
+    """Accepted limitation: a proof store whose filesystem has no `flock` degrades, it does not stop.
+
+    Some network stores (CIFS/SMB, some FUSE mounts, NFS without a lock daemon) accept every write
+    Cairn makes and refuse advisory locking outright. That answer is DETERMINISTIC — the same errno
+    forever — so treating it as transient would wedge notarization permanently on such a store: a
+    concurrency nicety costing the notary its ability to notarize. Same errno discipline as the
+    directory-sync degrade: one WARNING per proof store, then proceed on the datastore fence alone.
+    """
+    import logging
+
+    # `alembic`'s `fileConfig` disables already-created `cairn.*` loggers, so a caplog assertion
+    # would otherwise see nothing and pass for the wrong reason.
+    ots_log = logging.getLogger("cairn.ots")
+    ots_log.disabled = False
+    ots_log.propagate = True
+
+    root = cairn_env / "nolocks"
+
+    async def go():
+        import errno
+
+        from src.database import get_sessionmaker
+        from src.models.db import Collection, FileEntry
+        from src.services import ots, proofs
+        from src.services.scanner import _utcnow
+
+        cid = await _seed_collection_with_pending_file(root, b"unlockable")
+        store = cairn_env / "proofs"
+        # A second pending file, so the pass takes the lock twice and the warning can repeat.
+        (root / "two.txt").write_bytes(b"unlockable too")
+        now = _utcnow()
+        async with get_sessionmaker()() as s:
+            s.add(
+                FileEntry(
+                    collection_id=cid,
+                    relpath="two.txt",
+                    size=14,
+                    status="new",
+                    ots_state="pending",
+                    first_seen=now,
+                    last_checked=now,
+                )
+            )
+            await s.commit()
+
+        # Process memory, so give the test its own set rather than poisoning the next test's store.
+        seen: set[str] = set()
+        monkeypatch.setattr(ots, "_BEST_EFFORT_PLACEMENT_LOCK", seen)
+        monkeypatch.setattr(proofs.get_settings(), "ots_stamp_batch_size", 1, raising=False)
+
+        def no_locks(fd, op):
+            raise OSError(errno.ENOLCK, "No locks available")
+
+        monkeypatch.setattr(ots.fcntl, "flock", no_locks)
+
+        placed: list[str] = []
+        monkeypatch.setattr(ots, "stamp_batch_via_symlink", _placing_batch("A", placed))
+
+        with caplog.at_level(logging.WARNING, logger="cairn.ots"):
+            async with get_sessionmaker()() as s:
+                collection = await s.get(Collection, cid)
+                assert await proofs.stamp_pending(s, collection) == 2
+
+        assert placed == ["A", "A"], "a store that cannot lock stopped notarizing"
+        warnings = [
+            r for r in caplog.records if "does not support advisory locking" in r.getMessage()
+        ]
+        assert len(warnings) == 1, (
+            f"the degrade warned {len(warnings)} times; it must warn once per proof store"
+        )
+        assert seen == {str(store)}, "the store was not recorded as unlockable"
+
+        async with get_sessionmaker()() as s:
+            states = set(
+                await s.scalars(
+                    select(FileEntry.ots_state).where(FileEntry.collection_id == cid)
+                )
+            )
+            assert states == {"incomplete"}
+
+    asyncio.run(go())
+    _dispose_engine()

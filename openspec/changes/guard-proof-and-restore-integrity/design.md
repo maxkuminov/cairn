@@ -856,6 +856,7 @@ immediately before each point where an operation commits or mutates proofs:
 | `proofs.stamp_pending`, before each batch's placement | the proof store, per calendar round-trip |
 | `proofs.upgrade_incomplete`, before each proof | `ots upgrade` rewrites the `.ots` in place |
 | `collections.finalize_if_held`, fused into the terminal UPDATE's `WHERE` | the run record |
+| the collection proof lock + a **second** `lease_held` inside it (below) | the canonical proof path itself, against the gap between the check and the act |
 
 It reads in its **own session** deliberately. The operation's session has usually been inside one
 transaction since well before the reclamation was committed by another connection, so a read there
@@ -883,11 +884,77 @@ would **refresh the dead-man's switch for a pass it never finished** — a false
 the kind Cairn exists to prevent. A scan that loses its lease reports `skipped`, the same word a
 refused claim uses, so `cairn scan` exits non-zero rather than recording a clean integrity pass.
 
+### The fence is check-then-act, so the last rung is a lock at the resource
+
+`lease_held()` reads the claim and returns; the `os.replace` happens milliseconds later, on the far
+side of a calendar round-trip. A reclamation landing in *that* window — the check has answered
+"held", the act has not happened yet — puts two placers on one canonical proof path with both of
+them believing they own the collection: each finds the path free, each replaces, and the first
+submission is gone with no trace it existed. Re-reading the datastore more often does not close the
+window; the check and the act are different operations, and no amount of checking makes them one.
+
+So the ladder ends **at the resource**. Each stamp batch's placement and each `ots upgrade` runs
+inside an advisory `fcntl.flock(LOCK_EX)` on `<proof_store>/<collection_id>/.lock`
+(`ots.CollectionProofLock`), and the lease is re-read **after** the lock is taken:
+
+* the placer that wins the lock does its whole inspect → preserve → place → record turn alone;
+* the placer that lost its claim while waiting finds it gone on the post-acquisition re-read and
+  raises `LeaseLost` **without writing** — the loser aborts, the winner proceeds;
+* whichever order the two arrive in, exactly one canonical proof exists at the end and nothing was
+  superseded that did not have to be.
+
+Full ladder, in the order a claim passes through it: **claim → reclamation of an abandoned claim →
+guarded writes → keepalive → fence → resource lock with a post-acquisition re-check.** Each rung
+closes a hole the one above it cannot see, and the lock is the only one that is not check-then-act.
+
+**Why `flock` is the right primitive, and where the DB claim is still the one that matters.** Cairn
+is deployed as *one machine* (DESIGN.md: self-hosted; the container and the host `cairn` CLI share
+one kernel and one filesystem, and the proof store is one filesystem visible to both), so an
+advisory lock on a file in that store is visible to every process that can write a proof — it
+crosses the container/host boundary for exactly the same reason the proofs themselves do. It is
+**not** a replacement for the DB claim: the claim is what serializes across *hosts* sharing a
+datastore, and it is what makes an operation refusable, reportable and reclaimable. The lock only
+serializes the last few milliseconds that the claim cannot.
+
+**Held per unit of work, never per pass.** The lock is taken and released per stamp batch and per
+upgraded proof, not around a whole pass. Holding it for the duration would invert the outcome the
+design wants: a *stale* holder grinding through a multi-hour upgrade would block the *live*
+claimant until it timed out. Per unit, the worst a stale holder can cost a live one is one calendar
+round-trip, and the stale one aborts at its next re-check.
+
+**A wait is bounded and a timeout is transient.** Acquisition waits up to
+`PLACEMENT_LOCK_TIMEOUT_SECONDS` (60s, far above any real critical section and far below the
+15-minute lease interval) by polling `LOCK_EX|LOCK_NB` — a blocking `flock` plus `signal.alarm`
+would silently never fire, because these acquisitions run in a worker thread (`asyncio.to_thread`,
+so the wait never blocks the event loop) and `alarm` only works on the main thread. Running out of
+the wait raises a *transient* `OtsError`: nothing is placed, no file is dropped to `ots_state=none`,
+and the pass **stops** rather than re-queueing for every later batch — whatever holds the resource
+still holds it, so retrying per batch would buy one timeout per batch and no progress. The lock is
+never a permanent (`OtsPathError`) verdict; it is not the final output path and must never be able
+to drop a file out of the stamp queue. The lock file itself can never be mistaken for a proof —
+every proof Cairn writes is `<relpath>.ots`, and it is never read, parsed or archived.
+
+**Accepted limitation — a store that cannot lock.** Some writable stores (CIFS/SMB, some FUSE
+mounts, NFS with no lock daemon) accept every write Cairn makes and refuse advisory locking with
+`ENOLCK`/`ENOSYS`/`EINVAL`/`ENOTSUP`/`EOPNOTSUPP`. That answer is *deterministic* — the same errno
+forever — so it gets the same errno discipline as `_fsync_dir`'s directory-sync degrade: exactly
+those errnos, detected lazily and in-band on the first acquisition for that store, produce **one**
+WARNING naming the store and then proceed with the datastore fence alone. Every other errno stays a
+real transient failure. Treating it as transient instead would wedge notarization permanently on
+such a store — a concurrency nicety costing the notary its ability to notarize — and probing at
+startup would answer a question about a filesystem before anyone had asked it. On such a store the
+guarantee degrades to exactly what shipped before this rung: two Cairn processes racing over one
+proof path are held apart by the DB claim, keepalive and fence, and the check-then-act window is
+open again.
+
 **What this does not claim to solve.** The claim serializes Cairn against Cairn. It is not a defence
 against a second, unrelated process writing into the proof store, nor against two Cairn deployments
 pointed at one proof store with *different* databases — that configuration has no shared claim to
-take and is out of scope (the proof store is documented as owned by one deployment). Within one
-deployment, which is every supported topology, inspect→archive→place→record is single-writer.
+take and is out of scope (the proof store is documented as owned by one deployment). The resource
+lock narrows even that: two deployments sharing a proof store on a lock-capable filesystem would at
+least not interleave inside one placement, though nothing would stop them superseding each other's
+proofs between placements. Within one deployment, which is every supported topology,
+inspect→archive→place→record is single-writer.
 
 ## D9 — file ownership for the parallel slices
 
