@@ -25,7 +25,13 @@ candidate rows MAY be found by case-insensitive comparison, but the deferral SHA
 by comparing the on-disk identity of the member's output path against the recorded pointer's
 entry, so a case-sensitive store (where the two spellings are genuinely distinct slots) is never
 falsely deferred, and a case-insensitive store can never stamp over a referenced proof through a
-respelled path.
+respelled path. *Accepted limitation:* filesystem identity (device and inode) cannot
+distinguish one directory entry from two hard links to one file — which Cairn's own relocation
+can leave behind across a crash — so the alias check MAY over-defer a member whose slot is
+genuinely distinct on a case-sensitive store while such a leftover link exists. The failure
+direction is conservative and loud (a warned, retried deferral; nothing displaced, nothing
+lost), and `cairn upgrade` converges the blocker or clears the leftover, after which the member
+stamps normally.
 
 The window between the guard and placement is closed by the existing lease fencing, and the
 delta SHALL be implemented so that linkage holds: a move reconciliation that would newly
