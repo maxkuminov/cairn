@@ -29,8 +29,8 @@
                — and it arrives pre-filled when the operator came from the top-bar search (design
                D1/D2), so the query that produced the rows below is visible and refinable. #}
             <input type="search" name="q" autofocus value="{{ q }}"
-                   aria-label="Search tracked files by path or collection"
-                   placeholder="Search {{ '{:,}'.format(total_tracked) }} tracked files by path or collection…"
+                   aria-label="Search tracked files by file name or path"
+                   placeholder="Search {{ '{:,}'.format(total_tracked) }} tracked files by file name or path…"
                    hx-get="/verify/search" hx-trigger="keyup changed delay:200ms, search"
                    hx-target="#verify-results" hx-swap="outerHTML" />
           </div>

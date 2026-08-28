@@ -1153,7 +1153,7 @@ def test_search_copy_describes_tracked_files_for_an_all_unstamped_owner(cairn_en
         hit = client.get("/verify/search", params={"q": "a.txt"}).text
         miss = client.get("/verify/search", params={"q": "zzz"}).text
 
-    assert "Search 3 tracked files by path or collection" in page
+    assert "Search 3 tracked files by file name or path" in page
     assert "files with proofs" not in page
     assert "1 match" in hit and "a.txt" in hit
     assert "No tracked files match “zzz”" in miss
