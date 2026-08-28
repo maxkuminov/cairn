@@ -10,7 +10,7 @@
 <div id="verify-results">
   <div style="padding:0 18px 6px;font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-3)">
     {% if q %}
-      {% if truncated %}Showing {{ shown }} of {{ match_count }} matches{% else %}{{ match_count }} match{{ "" if match_count == 1 else "es" }}{% endif %}
+      {% if truncated %}Showing {{ shown }} of {{ "{:,}".format(match_count) }} matches{% else %}{{ "{:,}".format(match_count) }} match{{ "" if match_count == 1 else "es" }}{% endif %}
     {% else %}Recent proofs{% endif %}
   </div>
   <div style="max-height:420px;overflow-y:auto;padding-bottom:6px">
@@ -33,7 +33,7 @@
          cap, which is what the file browser (paginated) is named for. #}
       <div class="info-strip" style="border-radius:0;background:transparent;border-top:1px solid var(--border)">
         {{ m.icon("info", size=14, cls="text-3") }}
-        <span>Only the first {{ shown }} of {{ match_count }} matching files are listed, in path order. Narrow the search, or open a collection and page through its file browser.</span>
+        <span>Only the first {{ shown }} of {{ "{:,}".format(match_count) }} matching files are listed, in path order. Narrow the search, or open a collection and page through its file browser.</span>
       </div>
     {% endif %}
     {% if not results %}

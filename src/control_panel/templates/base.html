@@ -122,8 +122,12 @@
              come back "no matches", which an operator reads as "this digest is not tracked"). #}
           <form class="topbar__search" action="/verify" method="get" role="search">
             {{ m.icon("search", size=16) }}
+            {#- On the verify page the chrome box keeps the submitted query: after a top-bar
+                search the operator otherwise faces two stacked search inputs where the one they
+                just typed into looks like it did nothing. Everywhere else it starts blank. -#}
             <input type="search" name="q" placeholder="Search files and paths…"
-                   aria-label="Search files and paths" />
+                   aria-label="Search files and paths"
+                   value="{{ request.query_params.get('q', '') if request.url.path == '/verify' else '' }}" />
           </form>
           <div class="topbar__spacer"></div>
 
