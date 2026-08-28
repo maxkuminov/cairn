@@ -68,6 +68,32 @@ async def _seed_missing_file_with_event(cid: int, relpath: str = "2019/IMG_4421.
         await s.commit()
 
 
+async def _seed_missing_and_modified(cid: int, *, missing: int, modified: int) -> None:
+    """Populate both of the review page's populations, so both scoped actions are applicable."""
+    from src.database import get_sessionmaker
+    from src.models.db import Event, FileEntry
+
+    now = datetime.now(timezone.utc)
+    async with get_sessionmaker()() as s:
+        for i in range(missing):
+            fe = FileEntry(
+                collection_id=cid, relpath=f"gone/{i}.jpg", size=4321, sha256="d" * 64,
+                status="missing", ots_state="complete", first_seen=now, last_checked=now,
+            )
+            s.add(fe)
+            await s.commit()
+            s.add(Event(collection_id=cid, file_id=fe.id, kind="missing", detected_at=now))
+        for i in range(modified):
+            fe = FileEntry(
+                collection_id=cid, relpath=f"edited/{i}.txt", size=99, sha256="e" * 64,
+                status="modified", ots_state="complete", first_seen=now, last_checked=now,
+            )
+            s.add(fe)
+            await s.commit()
+            s.add(Event(collection_id=cid, file_id=fe.id, kind="modified", detected_at=now))
+        await s.commit()
+
+
 async def _seed_ok_file(cid: int) -> None:
     """One indexed, healthy file: the collection is genuinely "all clear", not merely empty."""
     from src.database import get_sessionmaker
@@ -100,8 +126,9 @@ async def _seed_ok_file_and_open_event(cid: int) -> None:
 def _render_review(**overrides) -> str:
     """Render `collection_review.html` directly against a full, hand-built page context.
 
-    The route publishes `population_fp` / `stale`; this renders the template's half of that
-    contract independently, so the degraded (key-absent) render can be asserted too.
+    The route publishes one fingerprint per scoped form (`adopt_fp` / `stop_fp`), the counts their
+    labels carry, and `stale`; this renders the template's half of that contract independently, so
+    the degraded (key-absent) render can be asserted too.
     """
     from starlette.requests import Request
 
@@ -125,6 +152,7 @@ def _render_review(**overrides) -> str:
         },
         "items": [], "total_issues": 1, "shown": 0, "truncated": False, "root": "/data/photos",
         "copy_relpaths": "a/b.jpg", "copy_count": 1, "copy_truncated": False, "review_open": 1,
+        "adopt_count": 0, "stop_count": 1, "adopt_fp": "", "stop_fp": "",
     }
     ctx.update(overrides)
     return templates.get_template("collection_review.html").render(ctx)
@@ -344,10 +372,103 @@ def test_recovery_step_three_names_where_scan_now_lives(cairn_env):
     assert "Couldn't copy" in body
 
 
-# --- design D14: the two keys this template renders for the accept guard ----------------------
+# --- #16 / design D5+D9: the scoped verb stack, its live counts and its forbidden copy --------
+
+# Both strings sound reasonable and both are false, so both are asserted absent rather than left to
+# a reviewer's eye: a rescan matches the digest the scan already recorded, so an adopted change is
+# never re-raised; and no path in the product deletes a proof — what is lost is the *link* to it.
+FORBIDDEN = ["reversible by a rescan", "proofs will be deleted"]
 
 
-def test_accept_form_is_the_loud_button_and_carries_the_population_field(cairn_env):
+def test_the_review_page_offers_one_action_per_population_with_its_live_count(cairn_env):
+    root = cairn_env / "photos"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _seed_missing_and_modified(cid, missing=2, modified=3)
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/collection/1/review").text
+
+    assert "Adopt 3 changed files" in body
+    assert "Stop tracking 2 missing files" in body
+    assert "/collection/1/review/adopt-changed" in body
+    assert "/collection/1/review/stop-tracking" in body
+    # The one control that acted on three populations at once is gone, route and all.
+    assert "Accept all changes" not in body
+    assert "/collection/1/review/accept" not in body
+    # Styled by consequence (#16): the record-deleting one is loud, adopting is subdued.
+    assert 'class="btn btn--danger btn--full"' in body
+    assert 'class="btn btn--subtle btn--full"' in body
+    # Each carries its own confirm naming its own consequence...
+    assert "Adopt 3 changed files?" in body
+    assert "Stop tracking 2 missing files?" in body
+    # ...and its own fingerprint, minted for its own form.
+    fps = re.findall(r'name="population_fp" value="([0-9a-f]{64})"', body)
+    assert len(fps) == len(set(fps)) and len(fps) >= 2
+    for bad in FORBIDDEN:
+        assert bad not in body
+
+
+def test_an_empty_population_is_offered_no_action(cairn_env):
+    """A button whose count is zero is an invitation to act on nothing."""
+    root = cairn_env / "photos"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _seed_missing_and_modified(cid, missing=1, modified=0)
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/collection/1/review").text
+
+    assert "Stop tracking 1 missing file" in body
+    assert "Adopt" not in body
+    assert "/collection/1/review/adopt-changed" not in body
+
+
+def test_the_button_counts_are_singular_where_the_population_is_one(cairn_env):
+    root = cairn_env / "photos"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _seed_missing_and_modified(cid, missing=1, modified=1)
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/collection/1/review").text
+
+    assert "Adopt 1 changed file" in body and "Adopt 1 changed files" not in body
+    assert "Stop tracking 1 missing file" in body and "Stop tracking 1 missing files" not in body
+
+
+def test_each_row_carries_its_own_accept_control(cairn_env):
+    """#30: one legitimate edit and one suspicious deletion resolve separately."""
+    root = cairn_env / "photos"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _seed_missing_and_modified(cid, missing=1, modified=1)
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/collection/1/review").text
+
+    assert "Stop tracking this file" in body
+    assert "Adopt this change" in body
+    assert re.search(r'action="/collection/1/file/\d+/accept"', body)
+    # Not visually interchangeable with the row's Mark reviewed, which changes nothing (design D10).
+    assert "btn--warn-outline" in body
+    row_ack = re.search(
+        r'<button class="btn btn--sm ([^"]*)"[^>]*hx-post="/events/\d+/ack\?view=review"', body
+    )
+    assert row_ack and "btn--subtle" in row_ack.group(1)
+    for bad in FORBIDDEN:
+        assert bad not in body
+
+
+def test_recovery_guidance_names_the_stop_tracking_action_by_its_label(cairn_env):
     root = cairn_env / "photos"
     root.mkdir()
 
@@ -358,20 +479,16 @@ def test_accept_form_is_the_loud_button_and_carries_the_population_field(cairn_e
     with _make_client(cairn_env, seed) as client:
         body = client.get("/collection/1/review").text
 
-    # Un-inverted (design D8): the destructive control is the loud one.
-    assert 'class="btn btn--danger btn--full"' in body
-    # The route publishes a real fingerprint, so the rendered form carries one (design D14). The
-    # POST fails closed on an absent or empty field, so an empty value here would refuse accepts.
-    field = re.search(r'name="population_fp" value="([^"]*)"', body)
-    assert field, "the accept form does not carry a population_fp field"
-    assert re.fullmatch(r"[0-9a-f]{64}", field.group(1))
+    assert "<strong>Stop tracking</strong>" in body
+    assert "Accept all changes" not in body
 
 
-def test_population_fp_is_rendered_when_the_route_publishes_it(cairn_env):
-    html = _render_review(population_fp="a" * 64)
+def test_the_scoped_fingerprints_are_rendered_when_the_route_publishes_them(cairn_env):
+    html = _render_review(adopt_count=2, stop_count=1, adopt_fp="a" * 64, stop_fp="b" * 64)
     assert f'name="population_fp" value="{"a" * 64}"' in html
+    assert f'name="population_fp" value="{"b" * 64}"' in html
     # Absent from the context, the field is still there and still fails closed at the route.
-    assert 'name="population_fp" value=""' in _render_review()
+    assert 'name="population_fp" value=""' in _render_review(adopt_count=1, stop_count=1)
 
 
 def test_stale_banner_renders_only_when_the_route_says_stale(cairn_env):

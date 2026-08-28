@@ -128,18 +128,24 @@ def _make_client(cairn_env, seed_coro):
     return TestClient(app)
 
 
-def _population_fp(collection_id: int, scope: str) -> str:
-    """The fingerprint the page publishes for an accept-family form (fix-ux-audit-sprint1, D14).
+def _population_fp(collection_id: int, form: str, file_id: int | None = None) -> str:
+    """The fingerprint the page publishes for one accept form (fix-ux-audit-sprint1 D14, #16, #30).
 
-    Both accept routes recompute it under the write lock and refuse on any drift, so a POST without
-    it fails closed. Computed through the production helper on a throwaway engine, so it can run
-    while a TestClient is live.
+    Every accept route recomputes it under the write lock and refuses on any drift, so a POST
+    without it fails closed. Minted the way the page mints it — the wide read for that page,
+    narrowed purely to the form's own population — on a throwaway engine, so it can run while a
+    TestClient is live.
     """
     from sqlalchemy import event as sa_event
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
     from src.config import get_settings
-    from src.control_panel.routes import _population_fingerprint, _read_population
+    from src.control_panel.routes import (
+        _FP_FORMS,
+        _narrow,
+        _population_fingerprint,
+        _read_population,
+    )
     from src.database import _configure_sqlite
     from src.models.db import Collection
 
@@ -149,8 +155,10 @@ def _population_fp(collection_id: int, scope: str) -> str:
         try:
             async with AsyncSession(engine, expire_on_commit=False) as s:
                 collection = await s.get(Collection, collection_id)
+                read_scope, statuses = _FP_FORMS[form]
+                pop = await _read_population(s, collection, read_scope)
                 return _population_fingerprint(
-                    collection, await _read_population(s, collection, scope)
+                    collection, _narrow(pop, form, statuses, file_id=file_id)
                 )
         finally:
             await engine.dispose()
@@ -505,7 +513,12 @@ def test_ack_all_button_hidden_when_nothing_open(cairn_env):
 # --- accept ---------------------------------------------------------------------------------
 
 
-def test_accept_sets_files_ok(cairn_env):
+def test_the_two_scoped_verbs_together_clear_the_review_page(cairn_env):
+    """What the retired "Accept all changes" did to `modified` + `missing`, now as two named verbs.
+
+    Each is submitted with its own fingerprint and acts on its own population only; the `ok` files
+    are untouched by both, and no third population is swept up.
+    """
     root = cairn_env / "accept"
     root.mkdir()
 
@@ -515,8 +528,15 @@ def test_accept_sets_files_ok(cairn_env):
 
     with _make_client(cairn_env, seed) as client:
         token = _csrf_token(client)
-        r = client.post("/collection/1/review/accept",
-                        data={"population_fp": _population_fp(1, "review-accept")},
+        r = client.post("/collection/1/review/adopt-changed",
+                        data={"population_fp": _population_fp(1, "adopt-changed")},
+                        headers={"X-CSRF-Token": token},
+                        follow_redirects=False)
+        assert r.status_code == 303
+        # The second form is minted from the page as it stands AFTER the first verb ran, which is
+        # what a real operator's reloaded review page carries.
+        r = client.post("/collection/1/review/stop-tracking",
+                        data={"population_fp": _population_fp(1, "stop-tracking")},
                         headers={"X-CSRF-Token": token},
                         follow_redirects=False)
         assert r.status_code == 303
@@ -1024,7 +1044,7 @@ def test_review_page_lists_missing_file_with_story_and_recovery(cairn_env):
         assert "Gone from disk" in body                      # what-happened story
         assert "proof of prior existence kept" in body       # notarized note
         assert "Copy paths" in body and "Copy full paths" in body  # recovery affordance
-        assert "/collection/1/review/accept" in body         # bulk accept
+        assert "/collection/1/review/stop-tracking" in body  # the scoped bulk verb for `missing`
         assert "/collection/1/review/ack-all" in body        # bulk acknowledge
         assert "2019/IMG_4421.jpg" in body                   # recovery copy list payload
         # The two bulk actions are disambiguated, not two look-alike buttons: each carries a
@@ -1098,7 +1118,7 @@ def test_review_acknowledge_marks_event_and_refreshes_counts(cairn_env):
     assert _run_check(check) is not None
 
 
-def test_review_accept_clears_issues_and_stays_on_review(cairn_env):
+def test_stop_tracking_clears_issues_and_stays_on_review(cairn_env):
     root = cairn_env / "photos"
     root.mkdir()
 
@@ -1111,8 +1131,8 @@ def test_review_accept_clears_issues_and_stays_on_review(cairn_env):
 
     with _make_client(cairn_env, seed) as client:
         token = _csrf_token(client)
-        r = client.post("/collection/1/review/accept",
-                        data={"population_fp": _population_fp(1, "review-accept")},
+        r = client.post("/collection/1/review/stop-tracking",
+                        data={"population_fp": _population_fp(1, "stop-tracking")},
                         headers={"X-CSRF-Token": token},
                         follow_redirects=False)
         assert r.status_code == 303

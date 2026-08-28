@@ -23,11 +23,38 @@
     </div>
   </div>
   <div class="review-row__action">
+    {# Per-row accept (#30 / design D6+D10). Rendered only with a fingerprint to carry: the row's
+       own, sliced from the same snapshot the row was rendered from, so this form is bound to THIS
+       record's generation and cannot validate a POST at another row's address. The endpoint fails
+       closed on an absent field, so a context without one simply offers no control.
+       Styled apart from Mark reviewed on purpose: `btn--subtle` is already the row's
+       changes-nothing control, so a look-alike accept beside it is the exact collision the
+       contrast card exists to prevent. The path rides a data attribute rather than the confirm
+       string so a quote in a filename cannot break the confirm. #}
+    {% if it.fp and csrf_token %}
+      <form method="post" action="/collection/{{ c.id }}/file/{{ it.id }}/accept" style="display:inline"
+            data-relpath="{{ it.relpath }}"
+            onsubmit="return confirm({% if it.status == 'missing' %}'Stop tracking ' + this.dataset.relpath + '? Its record is permanently removed from Cairn — path, first-seen date, and the link to its timestamp proof. Nothing on disk is deleted and the .ots proof file stays in the proof store.'{% else %}'Adopt the current contents of ' + this.dataset.relpath + ' as correct from now on? This change will not be reported again.'{% endif %});">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="population_fp" value="{{ it.fp }}" />
+        {% if it.status == 'missing' %}
+          <button class="btn btn--sm btn--danger" type="submit"
+                  title="Permanently removes this file from Cairn's records — its path, first-seen date, and the link to its timestamp proof. Nothing on disk is deleted and the .ots proof file stays in the proof store.">
+            {{ m.icon('minusCircle', size=14, stroke=2) }} Stop tracking this file
+          </button>
+        {% else %}
+          <button class="btn btn--sm btn--warn-outline" type="submit"
+                  title="Treats the current contents as correct from now on. Cairn recorded and notarized the new contents when it detected the change; this stops the alert. You won't be told about this change again.">
+            {{ m.icon('refresh', size=14, stroke=2) }} Adopt this change
+          </button>
+        {% endif %}
+      </form>
+    {% endif %}
     {% if it.acked %}
       <span class="pill pill--soft pill--muted pill--sm">{{ m.icon('check', size=12, stroke=2) }} Reviewed</span>
     {% else %}
       {# Style un-inverted (design D8): marking a row reviewed is a reading-log write that changes
-         nothing about the file, so it is never the loud button — the destructive Accept-all is.
+         nothing about the file, so it is never the loud button — the accept beside it is.
          The hint rides as this control's tooltip and is shown once in full above the list;
          repeating the paragraph on up to 500 rows would bury it. #}
       <button class="btn btn--sm btn--subtle"

@@ -304,6 +304,13 @@
 .btn--subtle { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
 .btn--ghost { background: transparent; color: var(--text-2); border: 1px solid transparent; }
 .btn--danger { background: var(--danger); color: #fff; border: 1px solid transparent; }
+/* Per-row Adopt (design D10). `btn--subtle` is already the row's Mark-reviewed control — which
+   changes nothing about the file — so a `btn--subtle` per-row accept would be visually identical
+   to it, the exact collision the contrast card exists to prevent. Amber-outlined over the existing
+   `--warn` token: distinct at a glance, quieter than the record-deleting `btn--danger`, no new
+   colour. */
+.btn--warn-outline { background: transparent; color: var(--warn); border: 1px solid color-mix(in oklch, var(--warn) 55%, var(--border)); }
+.btn--warn-outline:hover { background: var(--warn-soft); }
 
 /* ---------- Field / input ---------- */
 .field { display: block; }
@@ -896,6 +903,7 @@
 .resolve__chip { width: 31px; height: 31px; border-radius: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .resolve__chip--ack { color: var(--accent); background: var(--accent-soft); }
 .resolve__chip--accept { color: var(--warn); background: var(--warn-soft); }
+.resolve__verb + .resolve__verb { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 .resolve__opt-title { font-weight: 600; font-size: 13.5px; color: var(--text); margin-bottom: 5px; }
 .resolve__opt-desc { font-size: 12.5px; line-height: 1.6; color: var(--text-2); flex: 1; }
 .resolve__opt form { margin-top: auto; }

@@ -83,39 +83,39 @@ Standing guardrails for both slices:
 
 ## 2. Slice B — panel routes + templates (`routes.py`, templates, CSS, tests)
 
-- [ ] 2.1 Split `_FP_SCOPES` into read scopes (`baseline-new` → `new`; `review` → `missing`,
+- [x] 2.1 Split `_FP_SCOPES` into read scopes (`baseline-new` → `new`; `review` → `missing`,
   `modified`) and form scopes (`baseline-new`, `adopt-changed`, `stop-tracking`, `accept-file`), per
   design D2. Retire `review-accept`.
-- [ ] 2.2 Add `file_id` to `_PopEvent` (event leg selects `Event.file_id` into the spare `n2`
+- [x] 2.2 Add `file_id` to `_PopEvent` (event leg selects `Event.file_id` into the spare `n2`
   slot) and add the pure `_narrow(pop, form, statuses, file_id=None)` helper. For `adopt-changed`,
   `stop-tracking` and `accept-file`, the event component of a narrowed population covers only the
   events of its files; **`baseline-new` is the explicit exception** — it passes the wide read's
   entire open-event set through unchanged, so the collection-wide no-open-events assertion stays
   cryptographically bound (design D2/D3).
-- [ ] 2.3 `_population_fingerprint`: unchanged encoding, reading the narrowed population's scope
+- [x] 2.3 `_population_fingerprint`: unchanged encoding, reading the narrowed population's scope
   field; the `accept-file` form additionally carries `file={id}` in the header. Keep the
   `baseline-new` `issues=` assertion (design D5).
-- [ ] 2.4 `_guarded_accept(session, collection, user, form, submitted_fp, file_id=None)`: same
+- [x] 2.4 `_guarded_accept(session, collection, user, form, submitted_fp, file_id=None)`: same
   write-lock-first / recount / compare / act sequence, same refusal paths (empty fp, in-flight
   operation, lock contention, mismatch), now reading the form's **read** scope and applying the same
   `_narrow`. It calls `accept_collection(scope=…)` or `accept_file`.
-- [ ] 2.5 New routes `POST /collection/{id}/review/adopt-changed`, `POST
+- [x] 2.5 New routes `POST /collection/{id}/review/adopt-changed`, `POST
   /collection/{id}/review/stop-tracking`, `POST /collection/{id}/file/{file_id}/accept` (CSRF,
   `_get_owned_collection`, 303 back to review; refusal → `?stale=1`). **Delete**
   `collection_review_accept`.
-- [ ] 2.6 `collection_review` publishes, from its single existing snapshot: the two bulk
+- [x] 2.6 `collection_review` publishes, from its single existing snapshot: the two bulk
   fingerprints, a per-row fingerprint on each rendered item, and the two counts the button labels
   use (design D9). No additional query.
-- [ ] 2.7 `collection_review.html`: the contrast card's right column becomes the stack of applicable
+- [x] 2.7 `collection_review.html`: the contrast card's right column becomes the stack of applicable
   scoped buttons with #16's exact labels, hints, styles and per-button confirms; the single "Accept
   all changes" form is gone; the recovery panel's instruction is retargeted at *Stop tracking*.
   Neither forbidden string appears.
-- [ ] 2.8 `partials/review_row.html`: per-row *Adopt this change* / *Stop tracking this file* with
+- [x] 2.8 `partials/review_row.html`: per-row *Adopt this change* / *Stop tracking this file* with
   its own confirm and hidden `population_fp`; **Mark reviewed** keeps its htmx swap unchanged.
   `panel.css`: the one new modifier (design D10).
-- [ ] 2.9 `collection_detail.html`: reconcile the comment block — the existing form **is** the
+- [x] 2.9 `collection_detail.html`: reconcile the comment block — the existing form **is** the
   baseline scope; its label and light confirm already match #16's baseline row. No behaviour change.
-- [ ] 2.10 Re-point the D14 suite in `tests/test_ux_dashboard.py` **per the matrix below**. The
+- [x] 2.10 Re-point the D14 suite in `tests/test_ux_dashboard.py` **per the matrix below**. The
   event term is not the same for every verb (design D2/D3), so the suite does **not** blanket-run
   every scenario against every verb: a blanket re-point would assert that a scoped verb refuses on
   drift it cannot reach, which is what the delta's *"is not refused by drift it cannot reach"*
@@ -155,13 +155,13 @@ Standing guardrails for both slices:
   address ⇒ refuse, mutate neither row — including where A and B share status, digest and size, so
   only the `file={id}` header term separates them. (delta: *A per-file form does not validate a
   submission at another row*)
-- [ ] 2.11 New route tests, beyond the 2.10 matrix: an adopt submission **is** refused when a file
+- [x] 2.11 New route tests, beyond the 2.10 matrix: an adopt submission **is** refused when a file
   enters or leaves the `modified` set; a per-file submission is refused when that row was already
   accepted, and when it went `missing -> ok` between render and submit; a per-file POST at a row
   belonging to another collection or another user 404s; a **detached** open event
   (`file_id IS NULL`) refuses `baseline-new` and is invisible to the three narrowed verbs
   (design D3).
-- [ ] 2.12 `tests/test_ux_review.py`: the review page renders the applicable buttons with their live
+- [x] 2.12 `tests/test_ux_review.py`: the review page renders the applicable buttons with their live
   counts, renders none whose count is zero, renders no "Accept all changes", and contains neither
   forbidden string.
 - [ ] 2.13 `PYTHONPATH=. pytest -q` + `ruff check .` green. Commit.

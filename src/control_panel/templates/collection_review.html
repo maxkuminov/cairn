@@ -2,10 +2,11 @@
 {% import "_macros.html" as m %}
 {% block title %}Review — {{ c.name }} · Cairn{% endblock %}
 {% block content %}
-{# `population_fp` and `stale` are published by the route (design D14 / D12's context contract).
-   Both are read defensively here so this page still renders if it is ever reached from a context
-   that does not set them; the POST guard fails closed on an absent or empty fingerprint, so a
-   half-configured render refuses accepts rather than accepting them unguarded. #}
+{# `adopt_fp` / `stop_fp` / `adopt_count` / `stop_count` / `stale` are published by the route
+   (design D14/D9 / D12's context contract), all sliced from the one snapshot this page's rows,
+   counts and copy list come from. Every one is read defensively so this page still renders from a
+   context that does not set them; the POST guard fails closed on an absent or empty fingerprint,
+   so a half-configured render refuses accepts rather than accepting them unguarded. #}
 {%- macro mark_all_reviewed(cid, n, token) -%}
   <form method="post" action="/collection/{{ cid }}/review/ack-all">
     <input type="hidden" name="csrf_token" value="{{ token }}" />
@@ -21,9 +22,12 @@
        situation the page then contradicts, and offered recovery instructions for nothing. #}
     {% if (total_issues or 0) > 0 or (review_open or 0) > 0 %}
     <div class="page-header__sub">
+      {# The intro names no verb that may not be rendered: each accept action appears only when its
+         own population is non-empty, so enumerating them here would advertise a control that is
+         not on the page. #}
       Files in <strong>{{ c.name }}</strong> that went missing or changed. Recover anything you want
-      back, then clear the alerts — <strong>Mark reviewed</strong> to just note them, or
-      <strong>Accept</strong> to make the current state your new baseline.
+      back, then clear the alerts — <strong>Mark reviewed</strong> to just note them, or use the
+      action below that names what you want done. Each acts only on the files it names.
     </div>
     {% endif %}
   </div>
@@ -137,7 +141,7 @@
       match are cleared; a file whose contents differ — the wrong snapshot, a truncated restore —
       closes the now-obsolete <em>missing</em> alert and replaces it with a new
       <em>came back changed</em> alert. Or
-      <strong>Accept all changes</strong> to stop tracking what's gone for good.
+      <strong>Stop tracking</strong> the files that are gone for good.
       {# Point at a route that exists: `cairn status` is not implemented, and the filtered file
          browser (already linked at the foot of the list) is where the full set actually lives. #}
       {% if copy_truncated %}<br />The buttons copy the first {{ "{:,}".format(copy_count) }} of {{ "{:,}".format(total_issues) }} paths — open the <a href="/collection/{{ c.id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, for the full set.{% endif %}
@@ -152,7 +156,7 @@
           match flips back to <em>restored / OK</em>; a file whose contents differ is flagged
           <em>came back changed</em>, which closes the obsolete <em>missing</em> alert and raises a
           new one in its place — check that one before you trust it.</li>
-        <li>For anything you don't want back, <strong>Accept all changes</strong> to clear it from tracking.</li>
+        <li>For anything you don't want back, <strong>Stop tracking</strong> it — from the button above, or one file at a time from its row.</li>
       </ol>
     </details>
   </div>
@@ -184,6 +188,13 @@
           <span class="resolve__done">{{ m.icon("checkCircle", size=14) }} Nothing left to mark reviewed</span>
         {% endif %}
       </div>
+      {# The right column is a STACK of scoped verbs, one per population, each rendered only when
+         its own count is non-zero (#16 / design D5). The single "Accept all changes" that used to
+         sit here adopted the modified files, deleted the missing ones AND promoted every
+         not-yet-baselined file in the collection — files this page never displayed. No label can
+         describe that, which is why it is gone rather than reworded. Counts come from the same
+         snapshot as the list below (design D9), so the number on a button and the rows on the page
+         cannot disagree. Baselining `new` files is NOT offered here: this page does not list them. #}
       <div class="resolve__opt resolve__opt--accept">
         <div class="resolve__opt-head">
           <span class="resolve__chip resolve__chip--accept">{{ m.icon("refresh", size=16, stroke=2) }}</span>
@@ -193,21 +204,33 @@
           </div>
         </div>
         <div class="resolve__opt-desc">
-          Treat the current state as correct from now on: changed files become the new expected
-          version and missing files stop being tracked. Nothing on disk is touched — only what Cairn
-          expects. Use this when <em>you</em> made the change.
+          Treat the current state as correct from now on. Each action below touches only the files
+          it names — nothing else in this collection changes, and nothing on disk is deleted. Use
+          these when <em>you</em> made the change.
         </div>
-        <form method="post" action="/collection/{{ c.id }}/review/accept"
-              onsubmit="return confirm('Accept all changes? Modified files become the new baseline and missing files stop being tracked. This does not delete anything on disk.');">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-          {# Binds this form to the population it was rendered for: the POST recomputes the same
-             fingerprint inside the write transaction and refuses on any drift (design D14). The
-             route always publishes a 64-hex value; an absent or empty field is refused. #}
-          <input type="hidden" name="population_fp" value="{{ population_fp | default('', true) }}" />
-          {# Un-inverted per design D8: this one rewrites baselines and deletes rows, so it is the
-             loud button — not the per-row reading-log write. #}
-          <button class="btn btn--danger btn--full" type="submit">{{ m.icon("refresh", size=15, stroke=2) }} Accept all changes</button>
-        </form>
+        {% if (adopt_count | default(0)) > 0 %}
+          <form method="post" action="/collection/{{ c.id }}/review/adopt-changed" class="resolve__verb"
+                onsubmit="return confirm('Adopt {{ adopt_count }} changed file{{ '' if adopt_count == 1 else 's' }}? Their current contents become the expected version, and this change will not be reported again.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            {# Binds this form to the population it was rendered for: the POST recomputes the same
+               fingerprint inside the write transaction and refuses on any drift (design D14). The
+               route always publishes a 64-hex value; an absent or empty field is refused. #}
+            <input type="hidden" name="population_fp" value="{{ adopt_fp | default('', true) }}" />
+            <button class="btn btn--subtle btn--full" type="submit">{{ m.icon("refresh", size=15, stroke=2) }} Adopt {{ adopt_count }} changed file{{ "" if adopt_count == 1 else "s" }}</button>
+            <div class="field__hint">Treats the current contents as correct from now on. Cairn recorded and notarized the new contents when it detected the change; this stops the alert. You won't be told about this change again.</div>
+          </form>
+        {% endif %}
+        {% if (stop_count | default(0)) > 0 %}
+          <form method="post" action="/collection/{{ c.id }}/review/stop-tracking" class="resolve__verb"
+                onsubmit="return confirm('Stop tracking {{ stop_count }} missing file{{ '' if stop_count == 1 else 's' }}? Their records are permanently removed from Cairn — paths, first-seen dates, and the link to their timestamp proofs. Nothing on disk is deleted and the .ots proof files stay in the proof store.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <input type="hidden" name="population_fp" value="{{ stop_fp | default('', true) }}" />
+            {# Un-inverted per design D8: this is the one that deletes records, so it is the loud
+               button — not the per-row reading-log write. #}
+            <button class="btn btn--danger btn--full" type="submit">{{ m.icon("minusCircle", size=15, stroke=2) }} Stop tracking {{ stop_count }} missing file{{ "" if stop_count == 1 else "s" }}</button>
+            <div class="field__hint">Permanently removes {{ stop_count }} file{{ "" if stop_count == 1 else "s" }} from Cairn's records — their paths, first-seen dates, and the link to their timestamp proofs. Nothing on disk is deleted and the .ots proof files stay in the proof store, but Cairn will no longer list them under Verify. If you want them back, restore from backup and run a scan instead.</div>
+          </form>
+        {% endif %}
       </div>
     </div>
   </div>

@@ -21,12 +21,19 @@
         <button class="btn btn--subtle" type="submit">{{ m.icon("bitcoin", size=15) }} Stamp all</button>
       </form>
     {% endif %}
-    {# Action hierarchy (design D7). The destructive Accept is NOT here: it lives only on the review
-       page, where the contrast card explains it and the list shows what it will act on. With issues
-       OR any open event outstanding, Review issues is the primary action — `accept_collection` also
-       acknowledges every open event, so offering "Baseline new files" beside an unread alert (a
-       restored file leaves one open while the file set reads clean) would clear it under a confirm
-       that promises only a new-file promotion. #}
+    {# Action hierarchy (design D7/D5). The destructive verbs are NOT here: Adopt and Stop tracking
+       live only on the review page, where the contrast card explains them and the list shows what
+       each will act on. This form IS the baseline scope — `POST /collection/{id}/accept` with the
+       `baseline-new` form scope, `new -> ok` and nothing else — which is why it is the one accept
+       offered here and is not repeated on the review page, which never lists `new` files.
+       With issues OR any open event outstanding, Review issues stays the primary action. The
+       reason has narrowed with the verb: a scoped baseline no longer acknowledges the collection's
+       other alerts (and an `added` event is born reviewed, so it clears nothing at all). What
+       remains is the ordering — a restored file leaves its alert open while the file set reads
+       clean, and a "nothing to see" control in front of an unread alarm is what this gate exists to
+       prevent. The gate is bound at submit time too: the baseline fingerprint hashes the
+       collection's WHOLE open-event set, so a stale form is refused by an alert on a file it would
+       never have touched (design D3). #}
     {% if c.issues > 0 or c.open_events > 0 %}
       <a class="btn btn--primary" href="/collection/{{ c.id }}/review">{{ m.icon("alert", size=15) }} Review issues</a>
     {% elif show_baseline %}
