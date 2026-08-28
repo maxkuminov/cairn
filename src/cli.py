@@ -96,7 +96,7 @@ def _cmd_add_collection(args: argparse.Namespace) -> int:
 def _cmd_scan(args: argparse.Namespace) -> int:
     async def run() -> int:
         from .database import get_sessionmaker
-        from .services.collections import get_collection_by_name, list_collections
+        from .services.collections import active_run, get_collection_by_name, list_collections
         from .services.scanner import scan_collection
 
         async with get_sessionmaker()() as session:
@@ -113,15 +113,51 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 print("no collections configured (use: cairn add-collection).")
                 return 0
             rc = 0
+            examined = 0  # collections this invocation actually scanned
+            skipped_names: list[str] = []
             for collection in collections:
+                # A refused scan rolls back the claim, expiring the ORM object — so the name the
+                # refusal line prints is read before the call, not after it.
+                name = collection.name
+                # Advisory pre-check, mirroring the scheduler and the panel routes: it reports the
+                # refusal without entering the scan at all. `scan_collection`'s own `claim_run` is
+                # still the race-free authority, and its `result='skipped'` is handled identically
+                # below — this is a cheaper, clearer path to the same message for the common case.
+                if await active_run(session, collection.id) is not None:
+                    skipped_names.append(name)
+                    continue
                 s = await scan_collection(session, collection)
+                if s.result == "skipped":
+                    skipped_names.append(name)
+                    continue
+                examined += 1
                 print(
-                    f"[{collection.name}] added={s.added} modified={s.modified} "
+                    f"[{name}] added={s.added} modified={s.modified} "
                     f"missing={s.missing} restored={s.restored} baselined={s.baselined} "
                     f"ok={s.ok} errors={s.errors} -> {s.result}"
                 )
                 if s.result == "error":
                     rc = 1
+            for name in skipped_names:
+                # The collection's single-operation slot was held (design D10), so nothing was
+                # walked, hashed or classified. The ordinary result line would print all zeroes,
+                # which reads as a clean integrity pass over a collection this run never looked at —
+                # the exact false negative a cron job must never record.
+                print(
+                    f"[{name}] SKIPPED — an operation is already in progress for this "
+                    f"collection; nothing was scanned. Re-run when it finishes.",
+                    file=sys.stderr,
+                )
+            if examined == 0:
+                # Every requested collection was refused: this run examined nothing, so it must not
+                # exit 0 and let a scheduler record a successful integrity check. One busy
+                # collection among several, by contrast, is a success that names the skip.
+                print(
+                    "no collection was scanned — every requested collection already had an "
+                    "operation in progress",
+                    file=sys.stderr,
+                )
+                return 1
             return rc
 
     return _run(run())
@@ -299,16 +335,21 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             # — and neither claims the proof or its attestation was validated, because at this
             # point nothing validated either.
             #
-            # The recorded baseline is NOT the digest the stored proof was made from: a scan
-            # overwrites it with the newly observed bytes before a replacement proof exists, so in
-            # the modified-awaiting-re-stamp window live == recorded while the good, current proof
-            # commits to the previous version. So "live == recorded, != proof" splits by the row's
-            # own state (`pending`, or a `modified`/`new` status = that window) and is otherwise
-            # left explicitly undecided — never a definitive accusation against the proof. Deciding
-            # it needs each proof's own digest stored beside it (#15, out of scope here). Mirrors
-            # the panel's `mismatch_blame`.
+            # `files.ots_digest` — the digest the proof CAIRN PLACED at `ots_path` commits to —
+            # is what makes the attribution provable rather than heuristic (design D7). The ladder
+            # is ORDERED, and the order is the correctness content: "this .ots is not the proof
+            # Cairn recorded placing" is asked BEFORE any staleness reading. Evaluating staleness
+            # first produces the A/B/C false reassurance — recorded provenance A, live == baseline
+            # B, an on-disk proof committing to a third digest C — where `ots_digest != live` holds
+            # and the card would say "simply an older proof of your file" about an `.ots` that is
+            # neither the recorded proof nor this file's proof. Staleness may only be concluded once
+            # the on-disk proof has been shown to BE the recorded proof. Rows with no recorded
+            # provenance keep sprint 1's heuristic and its explicit undecidability, verbatim.
+            # Mirrors the panel's `mismatch_blame` — the two surfaces must never disagree.
             stored_sha = (entry.sha256 or "").strip().lower()
             live_sha = (digest or "").strip().lower()
+            recorded_proof_sha = (entry.ots_digest or "").strip().lower()
+            parsed_proof_sha = (result.proof_digest or "").strip().lower()
             if result.digest_mismatch and live_sha and stored_sha and live_sha != stored_sha:
                 print(
                     f"[{args.relpath}] CHANGED — the live bytes differ from the fingerprint Cairn "
@@ -317,10 +358,69 @@ def _cmd_verify(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
+            # Provenance branch 1 (D7 row 3), evaluated FIRST: the `.ots` on disk is not the
+            # proof Cairn recorded placing. Established, not guessed.
             if (
                 result.digest_mismatch
                 and live_sha
                 and stored_sha
+                and recorded_proof_sha
+                and parsed_proof_sha
+                and parsed_proof_sha != recorded_proof_sha
+            ):
+                print(
+                    f"[{args.relpath}] THIS IS NOT THE PROOF CAIRN PLACED — the file matches its "
+                    f"recorded baseline, but the .ots stored for it commits to "
+                    f"{parsed_proof_sha}, not to {recorded_proof_sha}, the digest Cairn recorded "
+                    f"placing a proof for. The proof file is corrupted, swapped or misfiled. This "
+                    f"says nothing against the file's bytes, which match their baseline",
+                    file=sys.stderr,
+                )
+                return 1
+            # D7 row 4: Cairn recorded placing a proof for exactly THESE bytes, and the stored proof
+            # disagrees with them. The same conclusion, reachable without a parsed proof digest.
+            if result.digest_mismatch and live_sha and stored_sha and recorded_proof_sha == live_sha:
+                print(
+                    f"[{args.relpath}] THIS IS NOT THE PROOF CAIRN PLACED — Cairn recorded placing "
+                    f"a proof for exactly these bytes ({recorded_proof_sha}), and the .ots stored "
+                    f"at that path commits to something else. The proof file is corrupted, swapped "
+                    f"or misfiled. This says nothing against the file's bytes, which match their "
+                    f"baseline",
+                    file=sys.stderr,
+                )
+                return 1
+            # D7 row 5: the on-disk proof IS the proof Cairn recorded placing, and it was made from
+            # earlier bytes. Established without the `pending`/status heuristic.
+            if (
+                result.digest_mismatch
+                and live_sha
+                and stored_sha
+                and recorded_proof_sha
+                and recorded_proof_sha != live_sha
+                and parsed_proof_sha == recorded_proof_sha
+            ):
+                pending_clause = (
+                    " and a re-stamp is still pending"
+                    if (entry.ots_state == "pending" or entry.status in ("modified", "new"))
+                    else ""
+                )
+                print(
+                    f"[{args.relpath}] PROOF PREDATES THIS VERSION — the file matches its current "
+                    f"recorded baseline, and the stored proof is the one Cairn placed for an "
+                    f"earlier version of it{pending_clause}. This is NOT evidence against the "
+                    f"current file",
+                    file=sys.stderr,
+                )
+                return 1
+            # D7 row 7 (legacy, `ots_digest` NULL) — sprint 1's heuristic, unchanged. Row 6 (
+            # provenance recorded but nothing parsed) deliberately falls through to here too: with
+            # no parsed digest neither "swapped" nor "stale" is established, and asserting staleness
+            # would be the A/B/C error with the evidence merely absent instead of contradictory.
+            if (
+                result.digest_mismatch
+                and live_sha
+                and stored_sha
+                and not recorded_proof_sha
                 and (entry.ots_state == "pending" or entry.status in ("modified", "new"))
             ):
                 print(
@@ -450,19 +550,47 @@ def _cmd_export(args: argparse.Namespace) -> int:
 
 
 def _cmd_upgrade(args: argparse.Namespace) -> int:
+    """Upgrade incomplete proofs, one collection at a time, each under its own operation claim.
+
+    Proof mutation is single-writer per collection (design D10). This used to call
+    ``upgrade_incomplete(session)`` fleet-wide with no run row at all, so it could run a second
+    writer straight over a live scan or stamp. Each collection now claims a ``kind='upgrade'`` run,
+    a collection whose slot is held is skipped **and named**, and nothing ever waits: blocking would
+    turn a cron ``cairn upgrade`` into an unbounded stall behind a multi-hour deep scan, and the work
+    is idempotent so the next invocation picks it up.
+    """
+
     async def run() -> int:
         from .config import get_settings
         from .database import get_sessionmaker
-        from .services.proofs import stale_incomplete, upgrade_incomplete
+        from .services.collections import list_collections
+        from .services.proofs import stale_incomplete, upgrade_collection
 
         settings = get_settings()
         async with get_sessionmaker()() as session:
             await _implicit_user_id(session)
-            result = await upgrade_incomplete(session)
-            print(
-                f"upgraded={result['upgraded']} "
-                f"still_incomplete={result['still_incomplete']}"
-            )
+            collections = await list_collections(session)
+            if not collections:
+                print("no collections configured (use: cairn add-collection).")
+                return 0
+            upgraded = still = 0
+            processed = 0  # collections this invocation actually upgraded or found idle
+            refused: list[str] = []
+            for collection in collections:
+                name = collection.name  # read before a refusal can expire the ORM object
+                outcome = await upgrade_collection(session, collection, settings)
+                if outcome.refused:
+                    refused.append(name)
+                    continue
+                processed += 1
+                upgraded += outcome.upgraded
+                still += outcome.still_incomplete
+            print(f"upgraded={upgraded} still_incomplete={still}")
+            for name in refused:
+                print(
+                    f"[{name}] SKIPPED — an operation is already in progress for this collection.",
+                    file=sys.stderr,
+                )
             stale = await stale_incomplete(session, settings.incomplete_proof_alarm_days)
             if stale:
                 print(
@@ -472,6 +600,16 @@ def _cmd_upgrade(args: argparse.Namespace) -> int:
                 )
                 for entry in stale:
                     print(f"  - collection {entry.collection_id}: {entry.relpath}", file=sys.stderr)
+            if processed == 0:
+                # Nothing was upgraded because every collection was busy — a cron run that did no
+                # work must be visible as a failure. A run that processed some and skipped others is
+                # a success that names the skips.
+                print(
+                    "no collection was upgraded — every collection already had an operation in "
+                    "progress",
+                    file=sys.stderr,
+                )
+                return 1
         return 0
 
     return _run(run())
@@ -601,9 +739,23 @@ def _cmd_bench(args: argparse.Namespace) -> int:
 
 
 def _cmd_stamp(args: argparse.Namespace) -> int:
+    """Stamp a collection's pending files under the collection's single-operation claim (D10).
+
+    Stamping inspects the canonical proof path, decides, preserves and places — check-then-act, so
+    two concurrent writers would be a lost-update machine and one proof would be destroyed. The claim
+    is a real ``kind='stamp'`` run, so the panel's operation badge shows the CLI's work and the
+    startup reaper clears it if this process is killed. A lost claim REFUSES and exits non-zero: it
+    never waits, because the work is idempotent and a stall behind a deep scan is worse than a retry.
+    """
+
     async def run() -> int:
+        from sqlalchemy import func, select
+
         from .database import get_sessionmaker
+        from .models.db import FileEntry, Run
+        from .services import collections as collections_svc
         from .services import proofs
+        from .services.scanner import _utcnow
 
         async with get_sessionmaker()() as session:
             await _implicit_user_id(session)
@@ -616,14 +768,58 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
                     f"(only per-file collections are notarized)."
                 )
                 return 0
-            marked = 0
+            # Read before the claim: a refusal rolls back and expires the ORM object.
+            name = collection.name
+            busy = (
+                f"[{name}] SKIPPED — an operation is already in progress for this "
+                f"collection; nothing was stamped."
+            )
             if args.all:
-                marked = await proofs.mark_unstamped_pending(session, collection)
-            stamped = await proofs.stamp_pending(session, collection)
-            if args.all:
-                print(f"[{collection.name}] queued {marked} unstamped file(s); stamped {stamped}.")
-            else:
-                print(f"[{collection.name}] stamped {stamped} pending file(s).")
+                # `run_stamp_backfill` already queues the `none` baseline, opens a `kind='stamp'`
+                # run and claims the slot; reuse it rather than duplicating the claim here.
+                run_row = await proofs.run_stamp_backfill(session, collection)
+                # A refused backfill returns its run row still `running` (the claim was rolled
+                # back), which is the one state a finished backfill can never be in.
+                if run_row.result == "running":
+                    print(busy, file=sys.stderr)
+                    return 1
+                print(
+                    f"[{name}] stamped {run_row.stamped or 0} file(s) "
+                    f"(including the previously unstamped baseline)."
+                )
+                return 0
+
+            total = await session.scalar(
+                select(func.count())
+                .select_from(FileEntry)
+                .where(
+                    FileEntry.collection_id == collection.id,
+                    FileEntry.ots_state == "pending",
+                )
+            )
+            run_row = Run(
+                collection_id=collection.id,
+                kind="stamp",
+                started=_utcnow(),
+                result="running",
+                total=int(total or 0),
+            )
+            if await collections_svc.claim_run(session, run_row) is None:
+                print(busy, file=sys.stderr)
+                return 1
+            try:
+                stamped = await proofs.stamp_pending(session, collection)
+                run_row.result = "ok"
+            except Exception:  # stamping must never leave the run row `running`
+                run_row.result = "error"
+                run_row.finished = _utcnow()
+                await session.commit()
+                raise
+            run_row.stamped = stamped
+            run_row.processed = stamped
+            run_row.finished = _utcnow()
+            await session.commit()
+            print(f"[{name}] stamped {stamped} pending file(s).")
         return 0
 
     return _run(run())
