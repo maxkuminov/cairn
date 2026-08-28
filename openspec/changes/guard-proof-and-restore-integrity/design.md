@@ -732,8 +732,8 @@ it exits non-zero so a cron job's failure is visible; a fleet-wide `cairn upgrad
 some collections and skipped others is a success that names the skips.
 
 **Reusing the run row is a feature, not a side effect.** A `cairn stamp` claim is a real
-`kind='stamp'` run, so the panel's operation badge shows the CLI's work, the startup reaper clears
-it if the process is killed, and `compute_health` is unaffected (only `kind='scan'` runs feed
+`kind='stamp'` run, so the panel's operation badge shows the CLI's work, the reclamation paths below
+release it if the process is killed, and `compute_health` is unaffected (only `kind='scan'` runs feed
 freshness). None of that is new machinery — it is what `run_stamp_backfill` already does, called
 from a second front door.
 
@@ -757,11 +757,60 @@ after the walk under the same claim. The reaper reaps a `running` run only when
 comfortably more than the gap between two progress writes of the slowest real operation.
 
 The trade is deliberate and one-directional. A crash now leaves a collection **claimed for up to the
-threshold**: the badge reads "in progress", the scheduler skips that collection, and the next
-restart or the first stale-run reap clears it. That is a delay measured in minutes. Admitting a
+threshold**: the badge reads "in progress", the scheduler skips that collection, and the first
+stale-run reclamation clears it. That is a delay measured in minutes. Admitting a
 second proof writer is evidence loss. The **dead-man's switch is unaffected** either way — freshness
 is keyed on completed `kind='scan'` runs (`ok`/`partial`), and an unreaped `running` run was never
 going to refresh it; the collection reads stale on schedule exactly as it does today.
+
+### The lease must expire in-band, not only where a reaper runs
+
+A lease reclaimed **only at web startup** is not a lease with a timeout — it is a lease with a
+*restart* as its timeout. The orphan that matters is created *after* startup: kill a `cairn stamp`
+mid-flight and its committed `running` row keeps satisfying
+`uq_runs_one_running_per_collection` indefinitely, so every later scan, stamp and upgrade on that
+collection is refused — by the scheduler, by the panel, and by the CLI — until someone restarts the
+service. In a `CAIRN_SCHEDULER_ENABLED=0`, cron-only or purely CLI deployment there is no web
+process to restart, so the collection is wedged permanently: a file-integrity monitor that has
+silently stopped monitoring one collection, which is this product's most expensive failure shape.
+
+So the lease is reclaimed where it blocks something, and swept in the background as well:
+
+1. **The claim path reconciles before it refuses (`collections.reclaim_stale_claim`).** When the
+   claim INSERT is rejected by the index, the blocker's `coalesce(heartbeat_at, started)` is tested
+   against the same `RUN_HEARTBEAT_TIMEOUT_SECONDS`; if abandoned it is marked `interrupted` with
+   the same terminal semantics the reaper uses, and the claim is retried **once**. A blocker that is
+   still heartbeating refuses exactly as before. This works with no background machinery, no daemon
+   and no new process — it happens exactly where the wedge is felt.
+
+   The *whole* claim path means the advisory pre-check too. Every entry point gates on a cheap
+   `active_run` read (panel "Scan now"/"Stamp all"/"Scan all", `cairn scan`, `upgrade_collection`,
+   the scheduler pass) that answers **before** `claim_run` is reached, so reconciling only inside
+   the claim would leave the gate reporting a dead holder forever and the reconciliation would never
+   be reached. Those gates now call `collections.blocking_run` — `active_run` plus reclamation.
+   `active_run` itself stays a pure read for the display surfaces (the operation badge), which must
+   not write. The reclamation runs in its **own session** so it cannot expire the ORM objects of the
+   route or command that called it, and it fails **safe**: a datastore error there is logged and the
+   claim is reported as held, which is exactly the behaviour that shipped before.
+2. **The scheduler reaps every tick, not only at startup** (`reap_orphaned_runs`, kept at startup
+   too). A blocked claim only reconciles when someone attempts an operation; the tick sweep also
+   tidies a collection nobody is asking about, so the badge and the run record self-heal.
+
+**Why one retry, not a loop.** The retry either wins the freed slot or loses it to another claimant
+that got there first — and losing to a live claimant is the correct answer, not a reason to spin.
+Refusal is still refusal (see "CLI refusal is refusal, not waiting").
+
+**The concurrency argument for the guarded UPDATE.** Reading the blocker's liveness and revoking it
+are two statements, and between them the holder may report progress — precisely the case where
+revoking would admit the second proof writer D10 exists to exclude. So the UPDATE re-asserts the
+*whole* stale condition in its `WHERE` (`id = <blocker>` AND `result='running'` AND
+`coalesce(heartbeat_at, started) <= cutoff`), making the decision atomic with the write: a heartbeat
+that lands first fails the predicate, the statement matches zero rows, `rowcount == 0` is read as
+"not reclaimed", and the claim refuses. The read is only a filter; the `WHERE` is the decision. Two
+reclaimers racing each other are equally safe — the loser matches zero rows and simply retries its
+claim against a slot the winner already freed — and the reaper and the in-band path are the same
+compare-and-swap, so running both concurrently cannot revoke a live claim or double-reclaim a dead
+one. The DB write transaction serializes them; no application lock is involved.
 
 **What this does not claim to solve.** The claim serializes Cairn against Cairn. It is not a defence
 against a second, unrelated process writing into the proof store, nor against two Cairn deployments

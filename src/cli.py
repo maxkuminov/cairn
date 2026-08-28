@@ -96,7 +96,7 @@ def _cmd_add_collection(args: argparse.Namespace) -> int:
 def _cmd_scan(args: argparse.Namespace) -> int:
     async def run() -> int:
         from .database import get_sessionmaker
-        from .services.collections import active_run, get_collection_by_name, list_collections
+        from .services.collections import blocking_run, get_collection_by_name, list_collections
         from .services.scanner import scan_collection
 
         async with get_sessionmaker()() as session:
@@ -123,7 +123,10 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 # refusal without entering the scan at all. `scan_collection`'s own `claim_run` is
                 # still the race-free authority, and its `result='skipped'` is handled identically
                 # below — this is a cheaper, clearer path to the same message for the common case.
-                if await active_run(session, collection.id) is not None:
+                # `blocking_run`, not `active_run`: the gate must also release a claim abandoned by
+                # a killed process, or a CLI-only deployment (no scheduler, no web startup, so no
+                # reaper ever runs) would refuse this collection's scans for good.
+                if await blocking_run(session, collection.id) is not None:
                     skipped_names.append(name)
                     continue
                 s = await scan_collection(session, collection)

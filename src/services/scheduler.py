@@ -38,7 +38,7 @@ from ..config import Settings, get_settings
 from ..database import get_sessionmaker
 from ..models.db import Collection, FileEntry, Run
 from . import proofs, scanner
-from .collections import active_run, list_collections
+from .collections import RUN_HEARTBEAT_TIMEOUT_SECONDS, blocking_run, list_collections
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from fastapi import FastAPI
@@ -48,11 +48,10 @@ log = logging.getLogger("cairn.scheduler")
 # Per-collection first-run offset so a fleet of collections does not all fire on the very first tick.
 STAGGER_SECONDS = 1.0
 
-# How long an in-progress run may go without reporting progress before the startup reaper treats it
-# as orphaned. It must comfortably exceed the gap between two progress writes of the slowest real
-# operation (a scan batch of 500 files, a stamp batch, one upgraded proof) and stay short enough that
-# a crash does not strand a collection for long. Fifteen minutes is both, by a wide margin.
-RUN_HEARTBEAT_TIMEOUT_SECONDS = 15 * 60
+# The abandonment interval for an operation claim (``RUN_HEARTBEAT_TIMEOUT_SECONDS``) is defined in
+# ``services.collections`` next to the claim itself and re-exported here: the reaper below and
+# ``collections.reclaim_stale_claim`` MUST apply the same threshold, or the two reclamation paths
+# would disagree about which claims are dead.
 
 CollectionState = Literal["fresh", "pending", "stale"]
 HealthStatus = Literal["ok", "degraded"]
@@ -149,7 +148,15 @@ async def compute_health(session: AsyncSession, settings: Settings) -> HealthRep
 async def reap_orphaned_runs(session: AsyncSession) -> int:
     """Mark every STALE ``result='running'`` run as ``interrupted`` (finished now); return the count.
 
-    Called once on startup. A run still ``running`` is usually one orphaned by a crash/kill
+    Called on startup **and on every scheduler tick** — an abandoned claim created after startup
+    (a SIGKILLed ``cairn stamp``) must not have to wait for a restart to be tidied up, and a
+    long-idle collection should not have to wait for someone to attempt an operation on it either.
+    It is the fleet-wide sweep; :func:`collections.reclaim_stale_claim` is the in-band counterpart
+    that runs at the moment of a blocked claim (so CLI-only deployments, which run no scheduler at
+    all, still recover). Both apply the same liveness test and write the same terminal state, and
+    both are idempotent, so running them concurrently is harmless.
+
+    A run still ``running`` is usually one orphaned by a crash/kill
     mid-flight: left alone it freezes the live status badge at "in progress" forever and (via the
     concurrency guard) blocks every new operation on that collection. Reaping clears the stale
     indicator and unblocks the collection. The terminal state is ``interrupted`` (not ``error``) so a
@@ -183,8 +190,8 @@ async def reap_orphaned_runs(session: AsyncSession) -> int:
     ]
     if not stale:
         if running:
-            log.info(
-                "startup: %d in-progress run(s) still heartbeating — left claimed, not reaped",
+            log.debug(
+                "%d in-progress run(s) still heartbeating — left claimed, not reaped",
                 len(running),
             )
         return 0
@@ -285,7 +292,7 @@ async def run_due_scans(
     for collection in due_collections(collections, next_due, now, cost):
         # Skip a collection that already has an operation in flight (a manual scan or stamp backfill) —
         # the scanner is the single writer. Leave next_due unchanged so it is reconsidered next tick.
-        if await active_run(session, collection.id) is not None:
+        if await blocking_run(session, collection.id) is not None:
             log.info("skip scan for collection %s — operation already in progress", collection.id)
             continue
         deep = (not deep_used) and _deep_owed(collection, now_wall)
@@ -340,7 +347,9 @@ async def scheduler_loop(app: FastAPI, stop_event: asyncio.Event) -> None:
     clears any backlog). Then wake every ``scan_interval_seconds`` to scan due collections and, once
     ``upgrade_interval_seconds`` has elapsed, run the upgrade pass again. Each iteration is wrapped
     so a single error never kills the loop, and ``stop_event`` is awaited as the wait timeout so
-    shutdown is prompt rather than waiting out a full tick.
+    shutdown is prompt rather than waiting out a full tick. Each tick also reaps abandoned run
+    claims first (:func:`reap_orphaned_runs`), so a claim orphaned after startup — a killed CLI
+    stamp, a crashed scan — is released without waiting for a restart.
     """
     settings: Settings = get_settings()
     tick = max(0.01, settings.scan_interval_seconds)
@@ -373,6 +382,13 @@ async def scheduler_loop(app: FastAPI, stop_event: asyncio.Event) -> None:
         try:
             async with sessionmaker() as session:
                 now = time.monotonic()
+                # Tidy up claims abandoned SINCE startup (a killed CLI stamp, a crashed scan) before
+                # selecting due work: the startup reap alone would leave such a collection wedged
+                # until the next restart, since its claim still satisfies the one-run-per-collection
+                # index. Cheap (one indexed read over `running` rows) and idempotent.
+                reaped = await reap_orphaned_runs(session)
+                if reaped:
+                    log.warning("reaped %d abandoned run claim(s)", reaped)
                 await run_due_scans(session, next_due, now)
                 if now - last_upgrade >= settings.upgrade_interval_seconds:
                     await run_daily_upgrade(session)

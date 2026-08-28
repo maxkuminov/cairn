@@ -511,6 +511,43 @@ about a **claim** the surfaces made that the check behind it did not establish. 
   covering anything), `test_panel.py` (review recovery copy), and the `web-panel` /
   `ots-notarization` deltas + design D7.
 
+- [x] 5.3l **MAJOR — the claim lease expired only at web startup, so a post-startup orphan wedged its
+  collection for good.** Kill a `cairn stamp` after its `claim_run` commits and the `running` row
+  keeps satisfying `uq_runs_one_running_per_collection` forever: every later scan/stamp/upgrade on
+  that collection is refused, by the scheduler, the panel *and* the CLI, until the web service is
+  restarted — and permanently in a `CAIRN_SCHEDULER_ENABLED=0` / CLI-only deployment, which runs no
+  reaper at all. A monitor that has silently stopped monitoring one collection is exactly the
+  false-negative shape this product cannot ship. Fixed in the two layers the finding asks for:
+  (1) **`claim_run` now reconciles before it refuses** — a blocked claim calls the new
+  `collections.reclaim_stale_claim`, which tests the blocker's `coalesce(heartbeat_at, started)`
+  against `RUN_HEARTBEAT_TIMEOUT_SECONDS` and, if abandoned, marks it `interrupted`/`finished` (the
+  reaper's own terminal semantics) and retries the claim **once**; a blocker that is still
+  heartbeating refuses exactly as before. Being on the claim path, this un-wedges every entry point
+  with no background machinery. The revoking UPDATE re-asserts the full stale condition in its
+  `WHERE` (`result='running'` AND liveness `<= cutoff`), so a heartbeat landing between the read and
+  the write wins the race, the statement matches zero rows and the claim refuses — the claim is
+  never taken from a live process (design D10). (2) **The scheduler tick reaps too**
+  (`reap_orphaned_runs`, retained at startup), so a long-idle collection tidies up without waiting
+  for someone to attempt an operation on it. `RUN_HEARTBEAT_TIMEOUT_SECONDS` moved to
+  `services/collections.py` next to the claim and is re-exported by `services/scheduler.py`, so the
+  two reclamation paths cannot drift apart on the threshold.
+- [x] 5.3m Docs + tests for 5.3l: design **D10** gains "The lease must expire in-band, not only where
+  a reaper runs" (both layers, the one-retry rationale, and the concurrency argument for the guarded
+  UPDATE); the `integrity-scanning` delta gains the requirement **"An abandoned operation claim is
+  reclaimed without a restart"** (+ scenarios: reclaimed by the next claim attempt with no restart, a
+  live claim never reclaimed, a concurrent heartbeat defeats the reclamation) and the startup-reaper
+  requirement now says startup is not the only moment it runs. Four regressions in
+  `tests/test_folder_tree_and_progress.py`: `test_claim_reclaims_an_abandoned_lease_without_a_reaper`
+  (SIGKILL simulation — old heartbeat, no reaper called, the new claim succeeds and the orphan reads
+  `interrupted`), `test_claim_refuses_a_lease_that_is_still_heartbeating` (fresh heartbeat → refused
+  as before), and `test_a_concurrent_heartbeat_beats_the_reclaiming_update` (the holder heartbeats
+  between the staleness read and the guarded UPDATE → zero rows matched, claim refused), plus
+  `test_the_operation_gate_releases_an_abandoned_claim` (the gate reclaims and reads free while the
+  display read reports the record and writes nothing). One existing fixture had to be corrected:
+  `test_ux_dashboard.py::test_accept_refuses_while_an_operation_is_in_flight` seeded its "in-flight"
+  run with the module's fixed `NOW` (weeks stale) and no heartbeat, which the gate now — correctly —
+  reclaims; it seeds a live heartbeat, which is what an actually in-flight run has.
+
 ## 5. Gates
 
 - [x] 5.1 **`openspec-verifier` subagent** audits the implementation against the spec deltas.

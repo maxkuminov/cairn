@@ -7,15 +7,28 @@ Root-jailing under an admin-provisioned base and per-user scoping arrive with mu
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import case, func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import case, func, select, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..database import get_sessionmaker
 from ..models.db import Collection, FileEntry, Run, utcnow
+
+log = logging.getLogger("cairn.collections")
+
+# How long an in-progress run may go without reporting progress before its claim is treated as
+# abandoned and may be reclaimed (by the scheduler's reaper, or in-band by the next claim attempt --
+# see :func:`claim_run`). It must comfortably exceed the gap between two progress writes of the
+# slowest real operation (a scan batch of 500 files, a stamp batch, one upgraded proof) and stay
+# short enough that a crash does not strand a collection for long. Fifteen minutes is both, by a
+# wide margin. Lives here, next to the claim it governs, and is re-exported by ``scheduler``.
+RUN_HEARTBEAT_TIMEOUT_SECONDS = 15 * 60
 
 
 async def create_collection(
@@ -78,6 +91,109 @@ async def active_run(session: AsyncSession, collection_id: int) -> Run | None:
     )
 
 
+async def _stale_claim_id(
+    session: AsyncSession, collection_id: int, cutoff: datetime
+) -> int | None:
+    """Id of this collection's ``running`` run whose last reported liveness predates ``cutoff``.
+
+    Split out from :func:`reclaim_stale_claim` so the read and the guarded write are separately
+    visible (and separately testable): between the two, a live process may heartbeat, and the write
+    must lose that race.
+    """
+    return await session.scalar(
+        select(Run.id).where(
+            Run.collection_id == collection_id,
+            Run.result == "running",
+            func.coalesce(Run.heartbeat_at, Run.started) <= cutoff,
+        )
+    )
+
+
+async def reclaim_stale_claim(collection_id: int) -> bool:
+    """Reclaim this collection's operation slot if the claim holding it is abandoned. Returns success.
+
+    An abandoned claim is a ``running`` run whose ``coalesce(heartbeat_at, started)`` is older than
+    :data:`RUN_HEARTBEAT_TIMEOUT_SECONDS` — the same liveness test, and the same terminal state
+    (``interrupted``, ``finished`` set), the scheduler's reaper uses. This is the *in-band* path:
+    the reaper only runs where a scheduler (or a web startup) runs, so a claim orphaned by a
+    SIGKILLed ``cairn stamp`` would otherwise wedge its collection until the service restarts, and
+    forever in a CLI-only deployment.
+
+    **The UPDATE is guarded, so a concurrent live heartbeat wins.** The read above and the write
+    below are separate statements, so the holder may report progress in between — exactly the case
+    where reclaiming would admit a second proof writer (design D10). Re-asserting the full stale
+    condition (``result='running'`` AND liveness ``<= cutoff``) inside the UPDATE's WHERE makes the
+    decision atomic with the write: a heartbeat that lands first fails the predicate, the UPDATE
+    matches zero rows, and we report failure so the caller refuses. The claim is never taken from a
+    process that is still working; the worst case is a delay of one abandonment interval.
+
+    It runs in its **own session** so it cannot disturb the caller's: the panel routes and CLI
+    commands that reach it through :func:`blocking_run` hold loaded ORM objects, and a rollback in
+    their session would expire those objects into an async lazy refresh that raises. A datastore
+    failure here is swallowed and reported as "not reclaimed" — refusing an operation is the
+    behaviour that shipped before this path existed, while raising would break the scan or route
+    that merely asked whether the collection was busy.
+    """
+    now = utcnow()
+    cutoff = now - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS)
+    try:
+        async with get_sessionmaker()() as session:
+            stale_id = await _stale_claim_id(session, collection_id, cutoff)
+            if stale_id is None:
+                return False
+            result = await session.execute(
+                update(Run)
+                .where(
+                    Run.id == stale_id,
+                    Run.result == "running",
+                    func.coalesce(Run.heartbeat_at, Run.started) <= cutoff,
+                )
+                .values(result="interrupted", finished=now)
+            )
+            await session.commit()
+    except SQLAlchemyError:
+        # Fail SAFE, not open: an unreclaimed claim is the behaviour that shipped before, while a
+        # raised exception here would turn a routine refusal into a broken scan/route.
+        log.warning(
+            "collection %s: stale-claim reclamation failed — treating the claim as held",
+            collection_id,
+            exc_info=True,
+        )
+        return False
+    if not result.rowcount:
+        log.info(
+            "collection %s: stale claim (run %s) heartbeated concurrently — not reclaimed",
+            collection_id,
+            stale_id,
+        )
+        return False
+    log.warning(
+        "collection %s: reclaimed abandoned claim (run %s marked interrupted)",
+        collection_id,
+        stale_id,
+    )
+    return True
+
+
+async def blocking_run(session: AsyncSession, collection_id: int) -> Run | None:
+    """The run that would block a new operation on this collection — after reclaiming an abandoned one.
+
+    The gate in front of every operation (panel routes, ``cairn scan``, ``cairn upgrade``, the
+    scheduler pass) is an advisory :func:`active_run` pre-check, and it answers *before*
+    :func:`claim_run` is ever reached — so reclaiming only inside the claim would leave the gate
+    reporting "already in progress" forever for a collection whose claim holder is long dead. The
+    gates ask this instead: an in-progress run that has stopped heartbeating is reclaimed here and
+    the collection reads free. :func:`active_run` stays the plain read for display surfaces (the
+    status badge), which must not write.
+    """
+    run = await active_run(session, collection_id)
+    if run is None:
+        return None
+    if not await reclaim_stale_claim(collection_id):
+        return run
+    return await active_run(session, collection_id)
+
+
 async def claim_run(session: AsyncSession, run: Run) -> Run | None:
     """Atomically claim the single in-progress slot for a collection by committing ``run`` as ``running``.
 
@@ -86,14 +202,36 @@ async def claim_run(session: AsyncSession, run: Run) -> Run | None:
     ``active_run`` pre-check is only advisory, but committing the ``running`` row here is the actual
     claim. If a near-simultaneous op (a manual scan + a scheduler tick, or two POSTs) already holds
     the slot, the INSERT violates the index, the commit raises :class:`IntegrityError`, and we
-    roll back and return ``None`` — the caller must treat that as "already running" and abort. On
-    success the committed run (visible to the badge/freshness immediately) is returned.
+    roll back — the caller must treat ``None`` as "already running" and abort. On success the
+    committed run (visible to the badge/freshness immediately) is returned.
 
     The claim also stamps ``heartbeat_at``: the claim is a LEASE, and a lease with no liveness signal
-    is indistinguishable from a corpse — the startup reaper would revoke a claim a live second
-    process is still working under (design D10). Every long operation refreshes it as it progresses.
+    is indistinguishable from a corpse — a reaper would revoke a claim a live second process is
+    still working under (design D10). Every long operation refreshes it as it progresses.
+
+    **A blocked claim reconciles before it refuses.** A lease reaped only by a background reaper is
+    a lease that never expires where no reaper runs: a SIGKILLed ``cairn stamp`` leaves a committed
+    ``running`` row that satisfies the index forever, wedging every later scan/stamp/upgrade on that
+    collection until the web service restarts — and permanently in a CLI-only deployment. So a
+    blocked claim asks :func:`reclaim_stale_claim` whether the blocker is abandoned, and retries
+    **once** if it was. A blocker that is still heartbeating is refused exactly as before: liveness
+    decides, never impatience. One retry is enough — the retry either wins the freed slot or loses
+    it to another claimant, and losing to a live claimant is the correct answer, not a reason to
+    loop.
     """
+    if await _attempt_claim(session, run) is not None:
+        return run
+    if not await reclaim_stale_claim(run.collection_id):
+        return None
+    return await _attempt_claim(session, run)
+
+
+async def _attempt_claim(session: AsyncSession, run: Run) -> Run | None:
+    """One INSERT of ``run`` as the collection's ``running`` claim; ``None`` if the slot is held."""
     run.heartbeat_at = utcnow()
+    # A rolled-back INSERT leaves the ORM object transient again; clear any primary key the failed
+    # flush assigned so the retry inserts a fresh row rather than re-proposing a taken id.
+    run.id = None
     session.add(run)
     try:
         await session.commit()

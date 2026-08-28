@@ -87,6 +87,11 @@ in-progress indicator and SHALL NOT block starting a new operation on the affect
 `ok`/`partial` scan runs only), so deferring the reconciliation of a claim that may still be live
 SHALL NOT affect staleness reporting.
 
+Startup SHALL NOT be the only moment this reconciliation runs: the background scheduler SHALL also
+run it on every tick, and a blocked claim SHALL reconcile a stale blocker in band (see "An abandoned
+operation claim is reclaimed without a restart"), so a claim abandoned *after* startup does not
+wedge its collection until the next restart.
+
 #### Scenario: Abandoned running run is cleared at startup
 
 - **WHEN** the application starts and finds a `runs` row with `result` = `running`, no `finished`,
@@ -278,3 +283,70 @@ the alarm it raised.
   and is a deep pass on a collection with auto-baseline enabled
 - **THEN** the `restored_changed` file SHALL remain `modified` with its event unacknowledged
 
+
+### Requirement: An abandoned operation claim is reclaimed without a restart
+
+The system SHALL reclaim an abandoned operation claim without requiring a process restart. Where an
+attempt to start an operation on a collection is blocked by an existing in-progress run, the system
+SHALL test that run's liveness (the later of its last reported progress and its start time) and,
+where it has reported nothing for longer than the abandonment interval, SHALL terminate it with the
+same terminal state that startup reconciliation uses (`interrupted`, `finished` set) and let the
+operation proceed. Where the blocking run is still reporting progress, the operation SHALL be
+refused exactly as before — liveness decides, never elapsed wall-clock or the impatience of the
+caller.
+
+This SHALL hold at **every** point that refuses an operation because the collection is busy — the
+advisory readiness check an entry point makes before claiming as well as the claim itself — since a
+check that reports a dead holder as busy would prevent the claim, and its reclamation, from ever
+being attempted. A read made purely to display operation status SHALL NOT reclaim; it SHALL report
+what the run record says. Where the reclamation cannot be carried out, the claim SHALL be reported
+as held (refusing an operation is recoverable; admitting a second writer is not).
+
+Reclamation only at startup makes the abandonment interval a *restart*, not a timeout: an
+operation killed after startup keeps a claim that blocks every later scan, stamp and upgrade on its
+collection until the service is restarted, and forever in a deployment that runs no web process or
+scheduler at all. Because the claim is the gate on scanning, such a collection stops being monitored
+silently. Reclamation SHALL therefore be available on the claim path itself, so it holds for every
+entry point — panel, scheduler, and command line — including deployments with no background
+scheduler.
+
+The termination SHALL be conditional, at the moment of the write, on the run still being in progress
+and still stale, so a claim holder that reports progress concurrently with the reclamation keeps its
+claim and the blocked claim is refused. Reading liveness and revoking the claim are separate steps,
+and revoking a claim whose holder is alive would admit a second writer to that collection's proofs —
+the loss the claim exists to prevent — so the stale condition SHALL be re-asserted as part of the
+revoking write rather than trusted from the earlier read.
+
+The background scheduler SHALL additionally run the startup reconciliation on every tick, so a
+collection nobody is currently operating on also has its abandoned claim cleared and its in-progress
+indicator corrected. This periodic sweep SHALL NOT replace the reclamation on the claim path, which
+is the only path available to a scheduler-less deployment. All reclamation paths SHALL apply the
+same abandonment interval and the same terminal state, and SHALL be safe to run concurrently.
+
+#### Scenario: A stale claim is reclaimed by the next claim attempt without a restart
+
+- **WHEN** a collection has an in-progress run that has reported no progress for longer than the
+  abandonment interval, no startup or periodic reconciliation has run since, and a new scan or stamp
+  attempts to claim that collection
+- **THEN** the abandoned run SHALL be marked `interrupted` with `finished` set and the new operation
+  SHALL be granted the claim
+
+#### Scenario: The busy check in front of an operation reclaims as well
+
+- **WHEN** an entry point checks whether a collection is busy before claiming it, and the
+  in-progress run it finds has reported no progress for longer than the abandonment interval
+- **THEN** that run SHALL be reclaimed and the check SHALL report the collection as free, while a
+  read made only to display operation status SHALL leave the run record untouched
+
+#### Scenario: A live claim is never reclaimed by a blocked claim
+
+- **WHEN** a collection has an in-progress run that reported progress within the abandonment
+  interval and another operation attempts to claim that collection
+- **THEN** the in-progress run SHALL keep its claim untouched and the attempting operation SHALL be
+  refused
+
+#### Scenario: A concurrent heartbeat defeats the reclamation
+
+- **WHEN** a blocked claim reads a blocking run as stale, and that run reports progress before the
+  reclamation's write is applied
+- **THEN** the run SHALL remain in progress and the blocked claim SHALL be refused

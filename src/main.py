@@ -92,8 +92,11 @@ async def lifespan(app: FastAPI):
             "Run `cairn init` or set CAIRN_AUTO_MIGRATE=1."
         )
         raise
-    # Reconcile runs orphaned at 'running' by a previous crash/kill (a restarted process cannot
-    # still be running them) so no collection shows a perpetual in-progress badge or blocks a new op.
+    # Reconcile runs left at 'running' by a previous crash/kill — those that have stopped reporting
+    # progress; a live CLI stamp/upgrade keeps its claim (design D10) — so no collection shows a
+    # perpetual in-progress badge or blocks a new op. The scheduler repeats this every tick and a
+    # blocked claim reconciles in-band (collections.reclaim_stale_claim), so this is the first of
+    # three reclamation paths, not the only one.
     try:
         from .services.scheduler import reap_orphaned_runs
 

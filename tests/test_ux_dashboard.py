@@ -680,7 +680,13 @@ def test_accept_refuses_while_an_operation_is_in_flight(cairn_env):
         async def start_run(s):
             from src.models.db import Run
 
-            s.add(Run(collection_id=1, kind="scan", result="running", started=NOW))
+            # A genuinely in-flight run is one that is still HEARTBEATING: the operation gate now
+            # reclaims a claim whose holder has stopped reporting progress (an orphan from a killed
+            # process must not wedge the collection), and the module's fixed `NOW` is weeks stale.
+            s.add(Run(
+                collection_id=1, kind="scan", result="running",
+                started=NOW, heartbeat_at=datetime.now(timezone.utc),
+            ))
             await s.commit()
 
         _aside(start_run)

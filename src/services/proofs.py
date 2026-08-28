@@ -523,7 +523,9 @@ async def upgrade_collection(
     # refresh on the refusal path would raise rather than report the refusal.
     collection_id, collection_name = collection.id, collection.name
     result = UpgradePass(collection_id=collection_id)
-    if await collections.active_run(session, collection_id) is not None:
+    # `blocking_run` reclaims a claim whose holder has stopped heartbeating before reporting it as
+    # held — otherwise a killed `cairn stamp` would refuse every later upgrade of this collection.
+    if await collections.blocking_run(session, collection_id) is not None:
         result.refused = True
         return result
     incomplete = await session.scalar(
@@ -542,7 +544,7 @@ async def upgrade_collection(
         result="running",
         total=int(incomplete),
     )
-    # The `active_run` pre-check above is only advisory; this commit (guarded by the partial unique
+    # The `blocking_run` pre-check above is only advisory; this commit (guarded by the partial unique
     # index) is the race-free claim.
     if await collections.claim_run(session, run) is None:
         result.refused = True

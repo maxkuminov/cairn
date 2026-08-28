@@ -387,6 +387,183 @@ def test_claiming_a_run_stamps_its_heartbeat(cairn_env):
     assert run.heartbeat_at is not None
 
 
+def test_claim_reclaims_an_abandoned_lease_without_a_reaper(cairn_env):
+    """A SIGKILLed CLI op must not wedge its collection until the service restarts.
+
+    The lease was reaped only at web startup, so an orphan created afterwards (`cairn stamp` killed
+    mid-flight) kept satisfying the one-running-run-per-collection index forever — and a CLI-only
+    deployment, which runs no scheduler and no web process, had no reclamation path at all. The
+    claim itself now reconciles: a blocked claim whose blocker has stopped heartbeating marks that
+    blocker `interrupted` and retries once. No reaper is called anywhere in this test.
+    """
+    root = cairn_env / "wedged"
+    root.mkdir()
+
+    async def go():
+        from src.database import get_sessionmaker
+        from src.models.db import Run
+        from src.services.collections import RUN_HEARTBEAT_TIMEOUT_SECONDS, claim_run
+
+        cid = await _seed_collection(root)
+        dead = _utcnow() - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS + 60)
+        async with get_sessionmaker()() as s:
+            s.add(Run(collection_id=cid, kind="stamp", result="running",
+                      started=dead, heartbeat_at=dead))
+            await s.commit()
+        async with get_sessionmaker()() as s:
+            claimed = await claim_run(
+                s, Run(collection_id=cid, kind="scan", result="running")
+            )
+            claimed_id = claimed.id if claimed is not None else None
+        async with get_sessionmaker()() as s:
+            runs = list(await s.scalars(select(Run).where(Run.collection_id == cid)))
+        return claimed_id, runs
+
+    claimed_id, runs = _run_check(go)
+    assert claimed_id is not None  # the new op got the slot
+    abandoned = [r for r in runs if r.kind == "stamp"]
+    assert len(abandoned) == 1
+    # Reclaimed with the reaper's terminal semantics: 'interrupted' (not 'error'), finished stamped.
+    assert abandoned[0].result == "interrupted" and abandoned[0].finished is not None
+    assert [r.id for r in runs if r.result == "running"] == [claimed_id]
+
+
+def test_claim_refuses_a_lease_that_is_still_heartbeating(cairn_env):
+    """Liveness decides, never impatience: a live claim still refuses the second op (design D10).
+
+    The reclamation path must not become a way for a second writer to walk into a collection a live
+    `cairn upgrade` is grinding through — that is the concurrent check-then-act the claim exists to
+    prevent.
+    """
+    root = cairn_env / "live-claim"
+    root.mkdir()
+
+    async def go():
+        from src.database import get_sessionmaker
+        from src.models.db import Run
+        from src.services.collections import RUN_HEARTBEAT_TIMEOUT_SECONDS, claim_run
+
+        cid = await _seed_collection(root)
+        async with get_sessionmaker()() as s:
+            # Hours old, but reported progress moments ago — a legitimate long CLI upgrade.
+            s.add(Run(
+                collection_id=cid, kind="upgrade", result="running",
+                started=_utcnow() - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS * 20),
+                heartbeat_at=_utcnow(),
+            ))
+            await s.commit()
+        async with get_sessionmaker()() as s:
+            claimed = await claim_run(
+                s, Run(collection_id=cid, kind="scan", result="running")
+            )
+        async with get_sessionmaker()() as s:
+            runs = list(await s.scalars(select(Run).where(Run.collection_id == cid)))
+        return claimed, runs
+
+    claimed, runs = _run_check(go)
+    assert claimed is None  # refused, exactly as before the reclamation path existed
+    assert len(runs) == 1 and runs[0].result == "running" and runs[0].finished is None
+
+
+def test_the_operation_gate_releases_an_abandoned_claim(cairn_env):
+    """The advisory pre-check in front of every operation must reclaim too, not just `claim_run`.
+
+    Panel routes, `cairn scan`, `cairn upgrade` and the scheduler pass all gate on a cheap
+    `active_run` read that answers BEFORE `claim_run` is reached; if that gate kept reporting a dead
+    holder, reclaiming inside the claim would never be given the chance. `blocking_run` is that gate.
+    `active_run` itself stays a pure read — the status badge must never write.
+    """
+    root = cairn_env / "gate"
+    root.mkdir()
+
+    async def go():
+        from src.database import get_sessionmaker
+        from src.models.db import Run
+        from src.services.collections import (
+            RUN_HEARTBEAT_TIMEOUT_SECONDS,
+            active_run,
+            blocking_run,
+        )
+
+        cid = await _seed_collection(root)
+        dead = _utcnow() - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS + 60)
+        async with get_sessionmaker()() as s:
+            s.add(Run(collection_id=cid, kind="stamp", result="running",
+                      started=dead, heartbeat_at=dead))
+            await s.commit()
+        async with get_sessionmaker()() as s:
+            seen_by_display = await active_run(s, cid)
+        async with get_sessionmaker()() as s:
+            blocker = await blocking_run(s, cid)
+        async with get_sessionmaker()() as s:
+            run = await s.scalar(select(Run).where(Run.collection_id == cid))
+        return seen_by_display is not None, blocker, run
+
+    display_saw_it, blocker, run = _run_check(go)
+    assert display_saw_it  # the plain read reports what the table says, and writes nothing
+    assert blocker is None  # the gate lets the new operation through
+    assert run.result == "interrupted" and run.finished is not None
+
+
+def test_a_concurrent_heartbeat_beats_the_reclaiming_update(cairn_env, monkeypatch):
+    """The read and the guarded UPDATE are separate statements — the holder may revive between them.
+
+    Simulates that race by heartbeating the blocker (from another connection, as the live process
+    would) after the staleness read has already selected it. The UPDATE re-asserts the full stale
+    condition in its WHERE, so it matches zero rows, the reclamation reports failure, and the claim
+    refuses. The claim is never taken from a process that is still working.
+    """
+    root = cairn_env / "race"
+    root.mkdir()
+
+    async def go():
+        from sqlalchemy import update as sql_update
+
+        from src.database import get_sessionmaker
+        from src.models.db import Run
+        from src.services import collections as collections_svc
+
+        cid = await _seed_collection(root)
+        dead = _utcnow() - timedelta(
+            seconds=collections_svc.RUN_HEARTBEAT_TIMEOUT_SECONDS + 60
+        )
+        async with get_sessionmaker()() as s:
+            s.add(Run(collection_id=cid, kind="stamp", result="running",
+                      started=dead, heartbeat_at=dead))
+            await s.commit()
+
+        real_stale_claim_id = collections_svc._stale_claim_id
+
+        async def racing_stale_claim_id(session, collection_id, cutoff):
+            stale_id = await real_stale_claim_id(session, collection_id, cutoff)
+            if stale_id is not None:
+                # The "dead" holder was not dead: it reports progress before we can revoke it.
+                async with get_sessionmaker()() as other:
+                    await other.execute(
+                        sql_update(Run)
+                        .where(Run.id == stale_id)
+                        .values(heartbeat_at=_utcnow())
+                    )
+                    await other.commit()
+            return stale_id
+
+        monkeypatch.setattr(
+            collections_svc, "_stale_claim_id", racing_stale_claim_id
+        )
+        async with get_sessionmaker()() as s:
+            claimed = await collections_svc.claim_run(
+                s, Run(collection_id=cid, kind="scan", result="running")
+            )
+        async with get_sessionmaker()() as s:
+            runs = list(await s.scalars(select(Run).where(Run.collection_id == cid)))
+        return claimed, runs
+
+    claimed, runs = _run_check(go)
+    assert claimed is None  # the guarded UPDATE lost the race, so the claim refuses
+    assert len(runs) == 1
+    assert runs[0].result == "running" and runs[0].finished is None
+
+
 # --- 7.6 tree + op-status route fragments ---------------------------------------------------
 
 

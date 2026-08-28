@@ -764,7 +764,7 @@ async def scan_all(
     for c in collections:
         # Honour the single-writer guard: never start a second writer on a collection that already has
         # an operation (a manual background scan/stamp or a scheduler pass) in flight.
-        if await collections_svc.active_run(session, c.id) is not None:
+        if await collections_svc.blocking_run(session, c.id) is not None:
             continue
         _launch_operation(c.id, lambda s, cps: scanner_svc.scan_collection(s, cps))
     return RedirectResponse("/", status_code=303)
@@ -1060,7 +1060,7 @@ async def collection_scan(
     single-writer); in that case it just re-renders the current in-progress badge.
     """
     collection = await _get_owned_collection(session, collection_id, user)
-    if await collections_svc.active_run(session, collection_id) is not None:
+    if await collections_svc.blocking_run(session, collection_id) is not None:
         c = await _op_status_c(session, collection)
         return templates.TemplateResponse(
             request, "partials/op_status.html", {"c": c, "already_running": True}
@@ -1376,7 +1376,7 @@ async def _guarded_accept(
     the page that lists exactly the issues that caused the refusal — on any of:
 
     * an absent or empty ``population_fp`` (fail closed: an unguarded POST is refused, never run);
-    * an operation already in flight (``active_run``, now belt-and-braces for the *long* window);
+    * an operation already in flight (``blocking_run``, now belt-and-braces for the *long* window);
     * the writer lock being unobtainable (BUSY / BUSY_SNAPSHOT / LOCKED — that *is* drift, and an
       uncaught 500 on a destructive POST is the refusal promise broken exactly where the guard
       exists, and an invitation to retry blind);
@@ -1390,7 +1390,7 @@ async def _guarded_accept(
     if not submitted:
         await session.rollback()
         return stale
-    if await collections_svc.active_run(session, collection.id) is not None:
+    if await collections_svc.blocking_run(session, collection.id) is not None:
         await session.rollback()
         return stale
 
@@ -1623,7 +1623,7 @@ async def collection_stamp_all(
     collection = await _get_owned_collection(session, collection_id, user)
     if collection.ots_mode != "perfile":
         raise HTTPException(status_code=400, detail="stamp-all is only for per-file collections")
-    if await collections_svc.active_run(session, collection_id) is not None:
+    if await collections_svc.blocking_run(session, collection_id) is not None:
         c = await _op_status_c(session, collection)
         return templates.TemplateResponse(
             request, "partials/op_status.html", {"c": c, "already_running": True}
