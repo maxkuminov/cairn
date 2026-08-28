@@ -649,7 +649,7 @@ artifacts: a verdict presented as established when only a weaker fact was. Fixed
   and `web-panel` deltas carry the matching requirement text and scenarios.
 - [x] 8.11 Gates re-run: full `PYTHONPATH=. pytest -q` green, `ruff check src tests` clean,
   `openspec validate fix-ux-audit-sprint1 --strict` passes.
-- [ ] 8.12 Re-run the adversarial Codex pass (§6.8) against the reworked verify path *and* the
+- [x] 8.12 Re-run the adversarial Codex pass (§6.8) against the reworked verify path *and* the
   accept guard: say which findings were addressed and how, and ask it to attack the blame tiebreak
   specifically — whether a stale or absent `files.sha256` can misattribute a disagreement, and
   whether any surface still presents proof-declared metadata as confirmed.
