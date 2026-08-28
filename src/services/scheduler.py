@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import Settings, get_settings
@@ -144,6 +144,12 @@ async def compute_health(
     a first scan that terminated ``error``/``interrupted`` inside the window is ``stale``, because
     something *did* run and it did not complete); otherwise ``stale``.
 
+    All three legs — newest completed scan, in-flight scan, and whether any ``kind='scan'`` run
+    exists at all — are answered by ONE statement per collection, so they describe one consistent
+    snapshot. Read separately they would not: consecutive ``SELECT``s on a SQLite connection are
+    independent snapshots, and a scan committing between them can be seen by neither, reporting a
+    collection that has just finished scanning as ``stale``.
+
     ``last_scan_age_seconds`` describes the newest **completed** scan and is ``None`` when there is
     none — so a collection fresh only by leg (b) reports ``fresh`` with a ``None`` age, which is
     exactly true: it is being scanned, and no scan has finished yet.
@@ -158,40 +164,66 @@ async def compute_health(
     for collection in await list_collections(session, user_id=user_id):
         threshold = _threshold(collection, settings)
 
-        # Leg (a) — the newest COMPLETED scan. Dated from `finished`; `started` only as a fallback
-        # for a row whose finish was never written (it cannot be selected here without a result, so
-        # this is belt-and-braces).
-        completed = await session.scalar(
-            select(Run)
-            .where(
-                Run.collection_id == collection.id,
-                Run.kind == "scan",
-                Run.result.in_(("ok", "partial")),
+        # ONE statement, so ONE snapshot answers all three legs. Python's `sqlite3` runs in
+        # legacy transaction mode: a SELECT does not open a transaction, so consecutive SELECTs on
+        # one connection are independent snapshots and a scan can commit between them (the same
+        # hazard `routes._read_population` is one statement to avoid). Read as three statements,
+        # a first scan that COMMITTED between the completed-run read and the running-run read was
+        # seen by neither — no completed run yet when the first ran, no running row left when the
+        # second did — and a collection that had *just finished scanning* reported `stale`: a false
+        # `degraded` on the dead-man's switch, manufactured by the reader.
+        #
+        # Conditional aggregation rather than a UNION ALL of three limit-1 legs: every leg is a
+        # scalar over the same `(collection_id, kind='scan')` row set, so one index pass answers
+        # all three. That matters — this runs per collection on every panel render
+        # (`routes._attach_health_state`), and it must not cost more than the two reads it replaces.
+        snapshot = (
+            await session.execute(
+                select(
+                    # Leg (a) — the newest COMPLETED scan, dated from `finished`; `started` is the
+                    # belt-and-braces fallback for a row whose finish was never written (a run
+                    # cannot carry an `ok`/`partial` result without one).
+                    func.max(
+                        case(
+                            (
+                                Run.result.in_(("ok", "partial")),
+                                func.coalesce(Run.finished, Run.started),
+                            )
+                        )
+                    ).label("completed_at"),
+                    # Leg (b) — the in-flight scan's last reported progress, read as the very
+                    # `coalesce(heartbeat_at, started)` both reclaimers read. `max` selects the
+                    # newest, as the old `order_by(started.desc()).limit(1)` did; at most one
+                    # `running` row per collection can exist in any case
+                    # (`uq_runs_one_running_per_collection`).
+                    func.max(
+                        case(
+                            (
+                                Run.result == "running",
+                                func.coalesce(Run.heartbeat_at, Run.started),
+                            )
+                        )
+                    ).label("running_progress"),
+                    # The grace leg — does ANY scan run exist? Counted, never materialized: only
+                    # its zero-ness is used.
+                    func.count().label("scan_runs"),
+                ).where(Run.collection_id == collection.id, Run.kind == "scan")
             )
-            .order_by(Run.finished.desc().nulls_last())
-            .limit(1)
-        )
-        age: float | None = None
-        if completed is not None:
-            age = (now - _as_aware(completed.finished or completed.started)).total_seconds()
+        ).one()
 
-        # Leg (b) — an in-flight scan, but only one that is still reporting progress. The liveness
-        # test is evaluated in Python on the same `coalesce(heartbeat_at, started)` the reaper uses,
-        # so both sides of the lease read one value by one rule.
-        running = await session.scalar(
-            select(Run)
-            .where(
-                Run.collection_id == collection.id,
-                Run.kind == "scan",
-                Run.result == "running",
-            )
-            .order_by(Run.started.desc())
-            .limit(1)
-        )
+        age: float | None = None
+        if snapshot.completed_at is not None:
+            age = (now - _as_aware(snapshot.completed_at)).total_seconds()
+
         # THE shared predicate (`collections.claim_is_live`), not a second spelling of it: health
         # and both reclaimers must agree about the exact abandonment boundary, or a claim can be
-        # reclaimed out from under a collection this switch is still calling fresh.
-        live_scan = running is not None and claim_is_live(running, now)
+        # reclaimed out from under a collection this switch is still calling fresh. It reads
+        # `heartbeat_at or started` — precisely the value `running_progress` already holds — so the
+        # progress instant is handed to it on a transient (never-added, never-queried) `Run` rather
+        # than the comparison being restated here as a third spelling.
+        live_scan = snapshot.running_progress is not None and claim_is_live(
+            Run(started=snapshot.running_progress), now
+        )
 
         if (age is not None and age <= threshold) or live_scan:
             state: CollectionState = "fresh"
@@ -199,11 +231,7 @@ async def compute_health(
             # The startup grace covers a collection nothing has ever scanned. A collection whose
             # only scan run ended `error`/`interrupted` is NOT in grace — a scan was attempted and
             # did not complete, which is a report, not an absence of one.
-            never_scanned = completed is None and running is None and not await session.scalar(
-                select(Run.id)
-                .where(Run.collection_id == collection.id, Run.kind == "scan")
-                .limit(1)
-            )
+            never_scanned = snapshot.scan_runs == 0
             created_age = (now - _as_aware(collection.created_at)).total_seconds()
             state = "pending" if (never_scanned and created_age <= threshold) else "stale"
 

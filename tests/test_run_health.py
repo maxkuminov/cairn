@@ -1292,3 +1292,66 @@ def test_a_legacy_partial_run_with_no_recorded_count_still_says_files_were_skipp
             # No fabricated number, and no sample it does not have.
             assert "0 files skipped" not in html, site
             assert "What was skipped" not in html, site
+
+
+def test_health_answers_a_collections_three_freshness_legs_in_one_statement(cairn_env):
+    """Round-2 MINOR: three reads are three snapshots, and a scan can commit between them.
+
+    Python's `sqlite3` runs in legacy transaction mode — a SELECT opens no transaction — so the
+    completed-run read, the running-run read and the any-scan-exists read each saw the database at
+    a different instant. A first scan that committed between the first two was seen by NEITHER (no
+    completed run when the first ran, no `running` row left when the second did), so a collection
+    that had just finished scanning read `stale` and `/healthz` answered 503 for one poll: a false
+    alarm manufactured by the reader, on the one surface whose false alarms teach an operator to
+    stop reading it.
+
+    The interleaving seam is gone rather than patched, so what is asserted is the property that
+    removed it — one statement per collection, the way `test_the_fleet_page_never_reads_events_a_second_time`
+    asserts the fleet page's single read. The count is also the loop budget: `_attach_health_state`
+    calls this per render, so one statement per collection must stay one.
+    """
+
+    async def go():
+        from sqlalchemy import event
+
+        from src.config import get_settings
+        from src.database import get_engine, get_sessionmaker
+        from src.services.scheduler import compute_health
+
+        one = await _new_collection(cairn_env / "onestmt-a", cadence=900)
+        two = await _new_collection(cairn_env / "onestmt-b", cadence=900)
+        now = _utcnow()
+        # Every leg has something to find, so no leg can be "one statement" by being skipped:
+        # a completed scan, a live in-flight scan, and a non-scan run the freshness read ignores.
+        await _add_run(one, result="ok", started=now - timedelta(minutes=10), finished=now)
+        await _add_run(one, result="running", started=now - timedelta(minutes=1), heartbeat=now)
+        await _add_run(one, result="ok", started=now - timedelta(minutes=5), finished=now,
+                       kind="upgrade")
+        await _add_run(two, result="ok", started=now - timedelta(minutes=10), finished=now)
+
+        statements: list[str] = []
+
+        def _record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+
+        engine = get_engine()
+        event.listen(engine.sync_engine, "before_cursor_execute", _record)
+        try:
+            async with get_sessionmaker()() as s:
+                report = await compute_health(s, get_settings())
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", _record)
+
+        # The verdict is unchanged by the rewrite: both collections fresh on their completed scan.
+        assert [r.state for r in report.collections] == ["fresh", "fresh"]
+
+        runs_reads = [q for q in statements if "FROM runs" in q]
+        assert len(runs_reads) == 2, runs_reads  # exactly one per collection, never per leg
+        # …and that one statement really does answer all three legs, rather than two of them
+        # while a third read hid somewhere else.
+        assert all(
+            "max(" in q.lower() and "count(" in q.lower() and "heartbeat_at" in q
+            for q in runs_reads
+        ), runs_reads
+
+    asyncio.run(go())

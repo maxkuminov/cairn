@@ -32,6 +32,11 @@ is precisely one abandonment interval old SHALL be treated as abandoned by the f
 by both reclaimers alike, so a claim can never be reclaimed out from under a collection the switch is
 still reporting fresh.
 
+A corpus's freshness legs — its newest completed scan, its in-flight scan, and whether it has any
+scan run at all — SHALL be read as a single consistent snapshot, so that a scan committing while the
+verdict is being computed can never be missed by every leg and report a corpus that has just
+finished scanning as stale.
+
 A corpus is **pending** when it has no scan run at all but was created within the freshness window
 (startup grace), and **stale** otherwise — including when its only scan run is `running` with an
 abandoned claim, and when its only scan runs never completed.
@@ -96,6 +101,13 @@ constraint makes unique.
 
 - **WHEN** a corpus is fresh only because a scan is in flight, and it has never completed a scan
 - **THEN** its last-scan age SHALL be absent rather than reporting the in-flight run's elapsed time
+
+#### Scenario: A corpus's freshness legs are read from one snapshot
+
+- **WHEN** a corpus's freshness is computed while a scan commits its completion concurrently
+- **THEN** the verdict SHALL be derived from a single consistent read of that corpus's scan runs, so
+  the corpus is reported either as it was before the commit or as it is after it, never as stale on
+  the strength of a gap between separate reads
 
 #### Scenario: A stamp or upgrade run does not refresh freshness
 

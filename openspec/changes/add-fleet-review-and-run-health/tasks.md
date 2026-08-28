@@ -484,6 +484,30 @@ only).
     asserted for both. (f) 4.4's stale "Noted, not changed" bullet deleted (the scenario heading
     landed in fae9fed).
   - Gates re-run after the fixes: see 5.2b.
+- [x] 5.2b **Adversarial Codex round 2 finding, fixed** (1 MINOR; verdict PASS otherwise). Same
+  family as round 1's MAJOR 1 — a health surface answering from something other than one consistent
+  read of its own dependencies:
+  - **MINOR — `compute_health`'s freshness legs were three separate snapshots.** The newest
+    completed scan, the in-flight scan and the any-scan-exists fact were three `SELECT`s;
+    Python's `sqlite3` runs in legacy transaction mode, so a `SELECT` opens no transaction and a
+    scan can commit between them. A first scan that committed in that gap was seen by NEITHER of
+    the first two reads (no completed run when the first ran, no `running` row left when the
+    second did), so a collection that had *just finished scanning* read `stale` and `/healthz`
+    answered a false 503 `degraded` for one poll — a dead-man's-switch false alarm manufactured by
+    the reader. The three legs are now ONE statement per collection (conditional aggregation over
+    the collection's `kind='scan'` rows: `max` of the completed runs' `coalesce(finished, started)`,
+    `max` of the running rows' `coalesce(heartbeat_at, started)`, `count(*)` for the grace leg), so
+    one snapshot answers all three. Two-leg semantics unchanged; leg (b) still goes through THE
+    shared predicate `collections.claim_is_live` (the aggregated progress instant is handed to it
+    on a transient `Run`, not restated as a third spelling of the comparison). Cost falls rather
+    than rises — one index pass replaces two-to-three reads on a path `_attach_health_state` runs
+    per collection on every panel render. Spec: `app-runtime` single-consistent-read paragraph +
+    new scenario "A corpus's freshness legs are read from one snapshot". Test:
+    `test_health_answers_a_collections_three_freshness_legs_in_one_statement` (the interleaving
+    seam is gone, so it asserts the property that removed it — one `runs` statement per collection,
+    as `test_the_fleet_page_never_reads_events_a_second_time` does for the fleet page).
+  - Gates re-run after the fix: `PYTHONPATH=. pytest -q` **667 passed, 2 skipped**; `ruff check .`
+    clean; `openspec validate add-fleet-review-and-run-health --strict` green.
 - [ ] 5.3 Deploy (`make deploy`, then `make migrate` — this change adds revision 0012).
 - [ ] 5.4 `user-representative` pass on the live panel: the fleet page as an operator with issues in
   several collections, the tile→`/review` path, the feed's new top rows, the health pill on a phone
@@ -574,6 +598,7 @@ gap** — add the test, do not delete the row.
 | An abandoned in-flight scan confers no freshness | 3.25(c) |
 | No completed scan and no running scan is stale | 3.25(d) |
 | The reported age describes a completed scan | 3.25(b) (`last_scan_age_seconds is None`) |
+| A corpus's freshness legs are read from one snapshot | 5.2b (`test_health_answers_a_collections_three_freshness_legs_in_one_statement`) |
 | A stamp or upgrade run does not refresh freshness | 3.25(e) |
 | Datastore unreachable | 4.4 (`test_healthz_reports_error_when_the_datastore_cannot_be_reached`) |
 | The datastore fails after the liveness probe succeeds | 5.2a (`test_healthz_reports_error_when_the_freshness_read_fails_after_ping_succeeds`) |
