@@ -38,47 +38,47 @@ Standing guardrails for both slices:
 
 ## 0. Pre-flight (before slice A)
 
-- [ ] 0.1 Confirm the base: `src/control_panel/routes.py` contains `_guarded_accept` **and**
+- [x] 0.1 Confirm the base: `src/control_panel/routes.py` contains `_guarded_accept` **and**
   `_population_fingerprint`; `src/services/scanner.py::accept_collection` still has the blanket
   `Event.acknowledged_at.is_(None)` ack over the whole collection;
   `openspec/changes/archive/2026-08-28-guard-proof-and-restore-integrity/` exists. If any is
   missing, the branch is stale — stop.
-- [ ] 0.2 Confirm the Alembic head is `0011_proof_provenance_and_restored_changed` and that this
+- [x] 0.2 Confirm the Alembic head is `0011_proof_provenance_and_restored_changed` and that this
   change adds nothing after it.
-- [ ] 0.3 Baseline the gates so slice failures are attributable: `PYTHONPATH=. pytest -q` and
+- [x] 0.3 Baseline the gates so slice failures are attributable: `PYTHONPATH=. pytest -q` and
   `ruff check .` green.
 - [ ] 0.4 Open the coordination issue referencing #16, #30, #35 and link it from all three.
 
 ## 1. Slice A — service + CLI (`src/services/scanner.py`, `src/cli.py`, tests)
 
-- [ ] 1.1 Add `scope: set[str] | None = None` to `accept_collection`. `None` MUST reproduce today's
+- [x] 1.1 Add `scope: set[str] | None = None` to `accept_collection`. `None` MUST reproduce today's
   behaviour exactly — every status, blanket collection-wide ack, same return dict, same counts.
   Validate the scope against `{"new", "modified", "missing"}` and raise on anything else (a typo'd
   scope must never silently degrade to "everything").
-- [ ] 1.2 Replace the blanket event ack with the scoped one (design D8): a scoped call acknowledges
+- [x] 1.2 Replace the blanket event ack with the scoped one (design D8): a scoped call acknowledges
   only open events whose `file_id` is one of the files that scope touched. Unscoped keeps the
   blanket ack, including detached (`file_id IS NULL`) open events.
-- [ ] 1.3 Rewrite the detach as the single correlated `UPDATE` of design D7 — detach + conditional
+- [x] 1.3 Rewrite the detach as the single correlated `UPDATE` of design D7 — detach + conditional
   ack + `detail` backfill, `WHERE file_id IN (SELECT id FROM files WHERE collection_id = … AND
   status = 'missing')`, issued **before** the deletes. No Python `IN` list (parameter limit), no
   clobbering of a non-empty `detail`, `COALESCE` on `acknowledged_at`.
-- [ ] 1.4 Add `accept_file(session, collection, file, user_id)`: one row, same detach/ack/backfill
+- [x] 1.4 Add `accept_file(session, collection, file, user_id)`: one row, same detach/ack/backfill
   statement narrowed to that `file_id`, `new|modified -> ok`, `missing -> detach then delete`, acks
   only that file's open events, returns the same count shape. It MUST refuse (raise / return a
   sentinel the caller turns into a refusal) if the file is not in the given collection.
-- [ ] 1.5 `src/cli.py`: help-text only — name `cairn accept` the unscoped legacy verb and point at
+- [x] 1.5 `src/cli.py`: help-text only — name `cairn accept` the unscoped legacy verb and point at
   the panel for the scoped ones. No `--scope` flag, no behaviour change.
-- [ ] 1.6 Tests (`tests/test_scanner.py`): unscoped parity against the pre-change behaviour;
+- [x] 1.6 Tests (`tests/test_scanner.py`): unscoped parity against the pre-change behaviour;
   each scope touching only its own rows; **a `{"new"}` accept leaves an open `missing` alert open**
   (the R2 regression test); adopt acks the adopted file's events and no others; stop-tracking acks
   the deleted files' events and no others.
-- [ ] 1.7 Tests for #35: an event with NULL `detail` on a stopped-tracking file gets that file's
+- [x] 1.7 Tests for #35: an event with NULL `detail` on a stopped-tracking file gets that file's
   relpath; a `moved` event's `old → new` and a `restored_changed` event's digest pair are
   **unchanged**; two files in one call each get their **own** path (the correlation test); an
   already-acknowledged event keeps its original `acknowledged_at`/`acknowledged_by`.
-- [ ] 1.8 A stop-tracking call over more `missing` rows than SQLite's bound-parameter limit
+- [x] 1.8 A stop-tracking call over more `missing` rows than SQLite's bound-parameter limit
   completes (the subquery, not an `IN` list).
-- [ ] 1.9 `PYTHONPATH=. pytest -q` + `ruff check .` green. Commit. **Review A's diff before B
+- [x] 1.9 `PYTHONPATH=. pytest -q` + `ruff check .` green. Commit. **Review A's diff before B
   starts** — B builds on this contract.
 
 ## 2. Slice B — panel routes + templates (`routes.py`, templates, CSS, tests)

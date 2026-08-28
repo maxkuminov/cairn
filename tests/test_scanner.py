@@ -951,3 +951,429 @@ async def test_failed_restore_ack_rolls_back_the_whole_batch(cairn_env, monkeypa
         assert len(list(still_open)) == 1
         runs = list(await s.scalars(_select(Run).where(Run.collection_id == cid).order_by(Run.id)))
         assert runs[-1].result == "error"  # the run still reaches a terminal state
+
+
+# --- scoped accept verbs (#16 / #30 / #35) ---------------------------------------------------
+
+
+async def _mixed_collection(root: Path) -> int:
+    """A worm collection ending with n.txt=new, m.txt=modified, g.txt=missing (+ open alerts)."""
+    from src.database import get_sessionmaker
+    from src.models.db import Collection
+    from src.services.scanner import scan_collection
+
+    root.mkdir()
+    for n in ("m.txt", "g.txt"):
+        (root / n).write_text(n)
+    cid = await _make_collection(root, mode="worm")
+    sm = get_sessionmaker()
+
+    # First scan: m,g -> new. Accept them so they are `ok` and can then drift.
+    async with sm() as s:
+        await scan_collection(s, await s.get(Collection, cid))
+    async with sm() as s:
+        for rp in ("m.txt", "g.txt"):
+            row = await _file(s, cid, rp)
+            row.status = "ok"
+        await s.commit()
+
+    # Now: m modified, g missing, n brand new.
+    (root / "m.txt").write_text("m changed and rather longer")
+    (root / "g.txt").unlink()
+    (root / "n.txt").write_text("n")
+    async with sm() as s:
+        summ = await scan_collection(s, await s.get(Collection, cid))
+        assert (summ.modified, summ.missing, summ.added) == (1, 1, 1)
+    return cid
+
+
+async def _open_kinds(session, cid: int) -> set[str]:
+    return {e.kind for e in await _events(session, cid, unack=True)}
+
+
+@pytest.mark.asyncio
+async def test_unscoped_accept_keeps_collection_wide_behaviour(cairn_env):
+    """`scope=None` is the legacy verb: all three populations, blanket ack, detached events too."""
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, Event, User
+    from src.services.scanner import accept_collection
+
+    cid = await _mixed_collection(cairn_env / "unscoped")
+    sm = get_sessionmaker()
+
+    # A detached open event (file_id IS NULL) — only the unscoped verb reaches these.
+    async with sm() as s:
+        s.add(Event(collection_id=cid, file_id=None, kind="missing"))
+        await s.commit()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        result = await accept_collection(s, await s.get(Collection, cid), uid)
+        assert result == {"accepted": 2, "removed": 1, "events_ack": 3}
+
+    async with sm() as s:
+        assert (await _file(s, cid, "m.txt")).status == "ok"
+        assert (await _file(s, cid, "n.txt")).status == "ok"
+        assert await _file(s, cid, "g.txt") is None
+        assert await _events(s, cid, unack=True) == []
+
+
+@pytest.mark.asyncio
+async def test_scoped_accept_touches_only_its_own_population(cairn_env):
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, User
+    from src.services.scanner import accept_collection
+
+    cid = await _mixed_collection(cairn_env / "scoped")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        result = await accept_collection(s, await s.get(Collection, cid), uid, scope={"new"})
+        assert result["accepted"] == 1 and result["removed"] == 0
+
+    async with sm() as s:
+        assert (await _file(s, cid, "n.txt")).status == "ok"
+        # No baseline rewritten, no record removed outside the scope.
+        assert (await _file(s, cid, "m.txt")).status == "modified"
+        assert (await _file(s, cid, "g.txt")).status == "missing"
+
+
+@pytest.mark.asyncio
+async def test_baseline_scope_leaves_a_missing_alert_open(cairn_env):
+    """The R2 regression: a `new` accept must not clear an alarm it never mentioned."""
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, User
+    from src.services.scanner import accept_collection
+
+    cid = await _mixed_collection(cairn_env / "r2")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        result = await accept_collection(s, await s.get(Collection, cid), uid, scope={"new"})
+        # `added` events are born acknowledged, so a baseline acknowledges nothing at all.
+        assert result["events_ack"] == 0
+
+    async with sm() as s:
+        assert await _open_kinds(s, cid) == {"missing", "modified"}
+
+
+@pytest.mark.asyncio
+async def test_adopt_scope_acks_only_the_adopted_files_events(cairn_env):
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, User
+    from src.services.scanner import accept_collection
+
+    cid = await _mixed_collection(cairn_env / "adopt")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        result = await accept_collection(s, await s.get(Collection, cid), uid, scope={"modified"})
+        assert result == {"accepted": 1, "removed": 0, "events_ack": 1}
+
+    async with sm() as s:
+        assert (await _file(s, cid, "m.txt")).status == "ok"
+        assert (await _file(s, cid, "g.txt")).status == "missing"
+        assert (await _file(s, cid, "n.txt")).status == "new"
+        assert await _open_kinds(s, cid) == {"missing"}
+
+
+@pytest.mark.asyncio
+async def test_stop_tracking_acks_only_the_removed_files_events(cairn_env):
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, Event, User
+    from src.services.scanner import accept_collection
+
+    cid = await _mixed_collection(cairn_env / "stop")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        result = await accept_collection(s, await s.get(Collection, cid), uid, scope={"missing"})
+        assert result == {"accepted": 0, "removed": 1, "events_ack": 1}
+
+    async with sm() as s:
+        assert await _file(s, cid, "g.txt") is None
+        assert (await _file(s, cid, "m.txt")).status == "modified"
+        assert await _open_kinds(s, cid) == {"modified"}
+        # The removed file's history survived the cascade, detached and acknowledged.
+        detached = list(
+            await s.scalars(
+                select(Event).where(
+                    Event.collection_id == cid, Event.file_id.is_(None), Event.kind == "missing"
+                )
+            )
+        )
+        assert len(detached) == 1
+        assert detached[0].acknowledged_at is not None
+
+
+@pytest.mark.asyncio
+async def test_an_unrecognized_scope_is_refused_rather_than_widened(cairn_env):
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, User
+    from src.services.scanner import AcceptScopeError, accept_collection
+
+    cid = await _mixed_collection(cairn_env / "badscope")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        with pytest.raises(AcceptScopeError):
+            await accept_collection(s, await s.get(Collection, cid), uid, scope={"gone"})
+
+    async with sm() as s:
+        assert (await _file(s, cid, "m.txt")).status == "modified"
+        assert (await _file(s, cid, "g.txt")).status == "missing"
+        assert (await _file(s, cid, "n.txt")).status == "new"
+
+
+# --- #35: a stopped-tracking file's events keep the path they refer to ------------------------
+
+
+@pytest.mark.asyncio
+async def test_each_detached_event_keeps_its_own_files_path(cairn_env):
+    """The correlation test: one statement, each event carrying *its own* file's relpath."""
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, Event, User
+    from src.services.scanner import accept_collection
+
+    root = cairn_env / "backfill"
+    root.mkdir()
+    for n in ("one.txt", "two.txt"):
+        (root / n).write_text(n)
+    cid = await _make_collection(root, mode="worm")
+    sm = get_sessionmaker()
+
+    from src.services.scanner import scan_collection
+
+    async with sm() as s:
+        await scan_collection(s, await s.get(Collection, cid))
+    (root / "one.txt").unlink()
+    (root / "two.txt").unlink()
+    async with sm() as s:
+        assert (await scan_collection(s, await s.get(Collection, cid))).missing == 2
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        await accept_collection(s, await s.get(Collection, cid), uid, scope={"missing"})
+
+    async with sm() as s:
+        rows = list(
+            await s.scalars(
+                select(Event).where(Event.collection_id == cid, Event.kind == "missing")
+            )
+        )
+        assert {e.detail for e in rows} == {"one.txt", "two.txt"}
+        assert all(e.file_id is None for e in rows)
+
+
+@pytest.mark.asyncio
+async def test_an_existing_event_detail_is_never_overwritten(cairn_env):
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, Event, User
+    from src.services.scanner import accept_collection
+
+    root = cairn_env / "detail"
+    root.mkdir()
+    (root / "keep.txt").write_text("keep")
+    cid = await _make_collection(root, mode="worm")
+    sm = get_sessionmaker()
+
+    from src.services.scanner import scan_collection
+
+    async with sm() as s:
+        await scan_collection(s, await s.get(Collection, cid))
+    (root / "keep.txt").unlink()
+    async with sm() as s:
+        await scan_collection(s, await s.get(Collection, cid))
+
+    # A `moved` pair and a `restored_changed` digest pair on the same (now missing) file.
+    async with sm() as s:
+        fid = (await _file(s, cid, "keep.txt")).id
+        s.add(Event(collection_id=cid, file_id=fid, kind="moved", detail="old.txt → keep.txt"))
+        s.add(Event(collection_id=cid, file_id=fid, kind="restored_changed", detail="aaaa → bbbb"))
+        await s.commit()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        await accept_collection(s, await s.get(Collection, cid), uid, scope={"missing"})
+
+    async with sm() as s:
+        details = {
+            e.kind: e.detail
+            for e in await s.scalars(select(Event).where(Event.collection_id == cid))
+        }
+        assert details["moved"] == "old.txt → keep.txt"
+        assert details["restored_changed"] == "aaaa → bbbb"
+        assert details["missing"] == "keep.txt"
+
+
+@pytest.mark.asyncio
+async def test_an_already_acknowledged_event_is_not_restamped(cairn_env):
+    from datetime import datetime, timezone
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, User
+    from src.services.scanner import accept_collection
+
+    root = cairn_env / "restamp"
+    root.mkdir()
+    (root / "old.txt").write_text("old")
+    cid = await _make_collection(root, mode="worm")
+    sm = get_sessionmaker()
+
+    from src.services.scanner import scan_collection
+
+    async with sm() as s:
+        await scan_collection(s, await s.get(Collection, cid))
+    (root / "old.txt").unlink()
+    async with sm() as s:
+        await scan_collection(s, await s.get(Collection, cid))
+
+    then = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    async with sm() as s:
+        ev = (await _events(s, cid, kind="missing"))[0]
+        ev.acknowledged_at = then
+        ev.acknowledged_by = None
+        await s.commit()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        result = await accept_collection(s, await s.get(Collection, cid), uid, scope={"missing"})
+        assert result["events_ack"] == 0  # it was not open, so it is not in the ack population
+
+    async with sm() as s:
+        ev = (await _events(s, cid, kind="missing"))[0]
+        assert ev.acknowledged_at.replace(tzinfo=timezone.utc) == then
+        assert ev.acknowledged_by is None
+        assert ev.detail == "old.txt"  # the path is still carried forward
+
+
+@pytest.mark.asyncio
+async def test_stop_tracking_survives_more_rows_than_the_parameter_limit(cairn_env):
+    """The removal set is selected by subquery, so SQLite's bound-parameter ceiling is irrelevant."""
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, Event, FileEntry, User
+    from src.services.scanner import accept_collection
+
+    root = cairn_env / "many"
+    root.mkdir()
+    cid = await _make_collection(root, mode="worm")
+    sm = get_sessionmaker()
+
+    n = 1100  # SQLite's default SQLITE_MAX_VARIABLE_NUMBER on older builds is 999
+    async with sm() as s:
+        rows = [
+            FileEntry(collection_id=cid, relpath=f"d/f{i}.txt", size=1, status="missing")
+            for i in range(n)
+        ]
+        s.add_all(rows)
+        await s.flush()
+        s.add_all(
+            [Event(collection_id=cid, file_id=r.id, kind="missing") for r in rows]
+        )
+        await s.commit()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        result = await accept_collection(s, await s.get(Collection, cid), uid, scope={"missing"})
+        assert result["removed"] == n and result["events_ack"] == n
+
+    async with sm() as s:
+        assert (
+            await s.scalar(
+                select(FileEntry.id).where(FileEntry.collection_id == cid).limit(1)
+            )
+        ) is None
+        details = list(
+            await s.scalars(select(Event.detail).where(Event.collection_id == cid))
+        )
+        assert len(details) == n and len(set(details)) == n
+
+
+# --- #30: accepting one file ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_accept_file_resolves_one_row_without_touching_the_others(cairn_env):
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, User
+    from src.services.scanner import accept_file
+
+    cid = await _mixed_collection(cairn_env / "perfile")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        result = await accept_file(
+            s, await s.get(Collection, cid), await _file(s, cid, "m.txt"), uid
+        )
+        assert result == {"accepted": 1, "removed": 0, "events_ack": 1}
+
+    async with sm() as s:
+        assert (await _file(s, cid, "m.txt")).status == "ok"
+        assert (await _file(s, cid, "g.txt")).status == "missing"
+        assert (await _file(s, cid, "n.txt")).status == "new"
+        assert await _open_kinds(s, cid) == {"missing"}
+
+
+@pytest.mark.asyncio
+async def test_accept_file_on_a_missing_row_preserves_its_history(cairn_env):
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, Event, User
+    from src.services.scanner import accept_file
+
+    cid = await _mixed_collection(cairn_env / "perfile_missing")
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        result = await accept_file(
+            s, await s.get(Collection, cid), await _file(s, cid, "g.txt"), uid
+        )
+        assert result == {"accepted": 0, "removed": 1, "events_ack": 1}
+
+    async with sm() as s:
+        assert await _file(s, cid, "g.txt") is None
+        ev = list(
+            await s.scalars(
+                select(Event).where(Event.collection_id == cid, Event.kind == "missing")
+            )
+        )
+        assert len(ev) == 1
+        assert ev[0].file_id is None and ev[0].acknowledged_at is not None
+        assert ev[0].detail == "g.txt"
+        # The other row's alert is untouched.
+        assert await _open_kinds(s, cid) == {"modified"}
+
+
+@pytest.mark.asyncio
+async def test_accept_file_refuses_a_file_from_another_collection(cairn_env):
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, User
+    from src.services.collections import create_collection
+    from src.services.scanner import AcceptScopeError, accept_file
+
+    cid = await _mixed_collection(cairn_env / "owner")
+    other_root = cairn_env / "other"
+    other_root.mkdir()
+    sm = get_sessionmaker()
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        other = await create_collection(s, user_id=uid, name="other", root=str(other_root))
+        other_id = other.id
+
+    async with sm() as s:
+        uid = await s.scalar(select(User.id))
+        with pytest.raises(AcceptScopeError):
+            await accept_file(
+                s, await s.get(Collection, other_id), await _file(s, cid, "g.txt"), uid
+            )
+
+    async with sm() as s:
+        assert (await _file(s, cid, "g.txt")).status == "missing"
+        assert await _open_kinds(s, cid) == {"missing", "modified"}

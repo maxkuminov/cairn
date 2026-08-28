@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.db import Collection, Event, FileEntry, Run
@@ -859,24 +859,142 @@ async def scan_collection(
     return summary
 
 
+# The three file states an accept can act on. A scope naming anything else is a caller bug and
+# is refused outright: silently widening a typo'd scope to "everything" is exactly the unscoped
+# blast radius this split exists to remove (#16, root cause R2 of #12).
+ACCEPT_SCOPES = frozenset({"new", "modified", "missing"})
+
+
+class AcceptScopeError(ValueError):
+    """An accept was asked to act outside what it was given.
+
+    Raised for a scope naming a state that is not one of :data:`ACCEPT_SCOPES`, and for a
+    single-file accept whose file does not belong to the named collection. A ``ValueError``
+    subclass so existing callers that guard on ``ValueError`` keep working.
+    """
+
+
+def _detach_ack_backfill(where, now: datetime, user_id: int | None):
+    """The one statement that retires a file record's events, issued *before* the row is deleted.
+
+    Detaching (``file_id = NULL``) is what saves the audit trail from ``ON DELETE CASCADE``. It is
+    also what erases the events' only link to a path, so the same statement carries the path
+    forward into ``detail`` (#35) and acknowledges the alerts the operator just resolved (#16/D8).
+
+    Five properties are load-bearing (design D7):
+
+    1. **Correlated, per row** — the scalar subquery gives each event *its own* file's relpath;
+       one bulk ``values()`` could only apply a single value across the batch.
+    2. **Evaluated against pre-update values** — SQLite computes every ``SET`` expression from the
+       row's *old* values, so ``detail``'s subquery still sees the pre-NULL ``file_id`` in the very
+       statement that clears it. Splitting this into detach-then-backfill would backfill nothing.
+    3. **``detail`` filled only when NULL or empty** — a ``moved`` event's ``old → new`` pair and a
+       ``restored_changed`` event's digest pair are the findings those kinds exist to carry.
+    4. **``acknowledged_at`` via COALESCE** — an already-acknowledged event keeps its original
+       timestamp and its original acknowledger; re-stamping would make the reading log lie.
+    5. **A subquery, never a Python ``IN`` list** — a deleted folder is easily more ``missing`` rows
+       than SQLite's bound-parameter ceiling, which an id list would blow.
+    """
+    relpath_of_this_events_file = (
+        select(FileEntry.relpath).where(FileEntry.id == Event.file_id).correlate(Event)
+    ).scalar_subquery()
+    return (
+        update(Event)
+        .where(where)
+        .values(
+            file_id=None,
+            acknowledged_at=func.coalesce(Event.acknowledged_at, now),
+            acknowledged_by=case(
+                (Event.acknowledged_at.is_(None), user_id), else_=Event.acknowledged_by
+            ),
+            detail=case(
+                (
+                    or_(Event.detail.is_(None), Event.detail == ""),
+                    relpath_of_this_events_file,
+                ),
+                else_=Event.detail,
+            ),
+        )
+        # The in-memory Event objects this touches are only ever re-read for `acknowledged_*`,
+        # which the ack loop rewrites to the same values; leaving them un-synchronized avoids
+        # SQLAlchemy trying to evaluate a correlated subquery in Python.
+        .execution_options(synchronize_session=False)
+    )
+
+
 async def accept_collection(
-    session: AsyncSession, collection: Collection, user_id: int | None
+    session: AsyncSession,
+    collection: Collection,
+    user_id: int | None,
+    scope: set[str] | frozenset[str] | None = None,
 ) -> dict[str, int]:
-    """Re-baseline acknowledged changes (nag-until-accept). Idempotent."""
+    """Re-baseline acknowledged changes (nag-until-accept). Idempotent.
+
+    ``scope`` names which of the three populations to act on — ``new``, ``modified``, ``missing``.
+    ``None`` is the unscoped legacy verb (`cairn accept`): all three populations, and the
+    collection-wide event acknowledgement, including events already detached from any file.
+
+    **A scoped accept acknowledges only the events of the files its scope touched** (#16/D8). An
+    accept that still cleared every open event would close alarms its label never mentioned — a
+    ``{"new"}`` accept, which deletes nothing, silently closing a missing-file alert. That is the
+    same false negative the scoping exists to remove.
+    """
     now = _utcnow()
+    if scope is not None:
+        unknown = sorted(set(scope) - ACCEPT_SCOPES)
+        if unknown:
+            raise AcceptScopeError(
+                f"unrecognized accept scope: {', '.join(unknown)} "
+                f"(expected any of {', '.join(sorted(ACCEPT_SCOPES))})"
+            )
+    statuses = ACCEPT_SCOPES if scope is None else frozenset(scope)
     accepted = removed = 0
 
     files = list(
         await session.scalars(select(FileEntry).where(FileEntry.collection_id == collection.id))
     )
-    # Detach events from the files we're about to delete so the audit trail survives the
-    # ON DELETE CASCADE on events.file_id (a vanished file's history must not vanish too).
-    missing_ids = [f.id for f in files if f.status == "missing"]
-    if missing_ids:
-        await session.execute(
-            update(Event).where(Event.file_id.in_(missing_ids)).values(file_id=None)
+
+    # Read the acknowledgement population *before* anything mutates, and by subquery rather than
+    # by an id list, so a collection with more touched files than SQLite's parameter ceiling still
+    # completes. Unscoped keeps the blanket collection-wide set (detached events included).
+    if scope is None:
+        ack_where = (Event.collection_id == collection.id,)
+    else:
+        ack_where = (
+            Event.collection_id == collection.id,
+            Event.file_id.in_(
+                select(FileEntry.id).where(
+                    FileEntry.collection_id == collection.id,
+                    FileEntry.status.in_(sorted(statuses)),
+                )
+            ),
         )
+    events = list(
+        await session.scalars(
+            select(Event).where(Event.acknowledged_at.is_(None), *ack_where)
+        )
+    )
+
+    # Detach the events of the rows we are about to delete so the audit trail survives the
+    # ON DELETE CASCADE (a vanished file's history must not vanish too) — and, in the same
+    # statement, keep the path those rows are about. Must precede the deletes.
+    if "missing" in statuses:
+        await session.execute(
+            _detach_ack_backfill(
+                Event.file_id.in_(
+                    select(FileEntry.id).where(
+                        FileEntry.collection_id == collection.id,
+                        FileEntry.status == "missing",
+                    )
+                ),
+                now,
+                user_id,
+            )
+        )
+
     for f in files:
+        if f.status not in statuses:
+            continue
         if f.status in ("new", "modified"):
             f.status = "ok"
             accepted += 1
@@ -884,13 +1002,54 @@ async def accept_collection(
             await session.delete(f)
             removed += 1
 
+    for e in events:
+        e.acknowledged_at = now
+        e.acknowledged_by = user_id
+
+    await session.commit()
+    return {"accepted": accepted, "removed": removed, "events_ack": len(events)}
+
+
+async def accept_file(
+    session: AsyncSession,
+    collection: Collection,
+    file: FileEntry,
+    user_id: int | None,
+) -> dict[str, int]:
+    """Accept exactly one file record, applying what its scoped collection accept would apply.
+
+    A ``new`` or ``modified`` row is set ``ok``; a ``missing`` row has its events detached (and its
+    path carried into their ``detail``) *before* the row is deleted, in the same order and by the
+    same statement a bulk stop-tracking uses. Only this file's open events are acknowledged; every
+    other file's alerts, baselines and records are untouched (#30).
+
+    Raises :class:`AcceptScopeError` — mutating nothing — if the file is not in the collection.
+    """
+    if file.collection_id != collection.id:
+        raise AcceptScopeError(
+            f"file {file.id} does not belong to collection {collection.id}"
+        )
+
+    now = _utcnow()
+    if file.status not in ACCEPT_SCOPES:
+        # Nothing to accept on an already-baselined row: acknowledge nothing, mutate nothing.
+        return {"accepted": 0, "removed": 0, "events_ack": 0}
+
+    accepted = removed = 0
     events = list(
         await session.scalars(
-            select(Event).where(
-                Event.collection_id == collection.id, Event.acknowledged_at.is_(None)
-            )
+            select(Event).where(Event.file_id == file.id, Event.acknowledged_at.is_(None))
         )
     )
+
+    if file.status == "missing":
+        await session.execute(_detach_ack_backfill(Event.file_id == file.id, now, user_id))
+        await session.delete(file)
+        removed = 1
+    else:
+        file.status = "ok"
+        accepted = 1
+
     for e in events:
         e.acknowledged_at = now
         e.acknowledged_by = user_id

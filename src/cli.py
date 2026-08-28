@@ -951,7 +951,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--once", action="store_true", help="Single pass (cron-friendly)")
     p_scan.set_defaults(func=_cmd_scan)
 
-    p_accept = sub.add_parser("accept", help="Re-baseline acknowledged changes")
+    p_accept = sub.add_parser(
+        "accept",
+        help="Re-baseline acknowledged changes (unscoped legacy verb)",
+        description=(
+            "Re-baseline a collection's acknowledged changes: new and modified files become ok, "
+            "missing files' records are removed, and every open event on the collection is "
+            "acknowledged. This is the UNSCOPED legacy verb — it acts on all three populations at "
+            "once. For the scoped verbs, each named for the one thing it does (baseline new files "
+            "/ adopt changed files / stop tracking missing files, or accept a single file), use "
+            "the web panel's collection and review pages."
+        ),
+    )
     p_accept.add_argument(
         "--collection", "--corpus", default=None, help="Collection name (default: all)"
     )
