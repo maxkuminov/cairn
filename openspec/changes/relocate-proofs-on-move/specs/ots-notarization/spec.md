@@ -21,11 +21,13 @@ paths through the single proof-path helper.
 The guard SHALL detect aliased slots, not just equal spellings: a member whose output path
 differs from a recorded `ots_path` only in a way the store's filesystem may treat as the same
 entry (a case-insensitive store) SHALL be deferred when filesystem identity confirms the alias —
-candidate rows MAY be found by case-insensitive comparison, but the deferral SHALL be confirmed
-by comparing the on-disk identity of the member's output path against the recorded pointer's
-entry, so a case-sensitive store (where the two spellings are genuinely distinct slots) is never
-falsely deferred, and a case-insensitive store can never stamp over a referenced proof through a
-respelled path. *Accepted limitation:* filesystem identity (device and inode) cannot
+candidate rows MAY be found by case-insensitive comparison, and that comparison SHALL use **full
+Unicode case folding** (a registered case-folding SQL function or an equivalent complete key),
+not an ASCII-only fold, so a non-ASCII respelling cannot slip past candidate selection; the
+deferral SHALL then be confirmed by comparing the on-disk identity of the member's output path
+against the recorded pointer's entry, so a case-sensitive store (where the two spellings are
+genuinely distinct slots) is never falsely deferred, and a case-insensitive store can never
+stamp over a referenced proof through a respelled path. *Accepted limitation:* filesystem identity (device and inode) cannot
 distinguish one directory entry from two hard links to one file — which Cairn's own relocation
 can leave behind across a crash — so the alias check MAY over-defer a member whose slot is
 genuinely distinct on a case-sensitive store while such a leftover link exists. The failure
@@ -33,13 +35,21 @@ direction is conservative and loud (a warned, retried deferral; nothing displace
 lost), and `cairn upgrade` converges the blocker or clears the leftover, after which the member
 stamps normally.
 
-The window between the guard and placement is closed by the existing lease fencing, and the
-delta SHALL be implemented so that linkage holds: a move reconciliation that would newly
-reference one of the batch's output slots can only commit under the collection's operation
-claim, which the stamping operation holds — so such a reconciliation implies the stamp's claim
-was reclaimed, and the existing fence (no placement under a reclaimed claim) SHALL refuse the
-batch's placements entirely, leaving the members `pending`. No placement-time re-query is
-required or permitted to substitute for that fence.
+The window between the guard and any post-guard state commit is closed by **lock discipline,
+not by a point-in-time read**: the stamping operation SHALL hold the collection's proof-store
+lock continuously across its guard-through-placement critical section — the guard, the adoption
+pass, staging, calendar submission, placement, and every post-guard state commit, an
+adoption-only batch included — and **claim reclamation SHALL first probe that lock without
+blocking**: a contended lock means the claim's holder is alive inside a proof critical section,
+and the claim SHALL NOT be reclaimed (process death releases the lock, so a crashed holder
+reclaims normally; a store whose filesystem cannot lock degrades to guarded-UPDATE-only
+reclamation with the placement path's existing one-per-store warning, as an accepted degrade).
+A move reconciliation that would newly reference one of the batch's output slots can only
+commit under a replacement claim, which the probe rule makes unobtainable while the batch is
+inside its critical section. The lease fences remain, and every post-guard state commit —
+placement and adoption alike — SHALL be fenced: they are the guard for crashed holders and for
+degraded stores. No referenced-slot re-query at placement time is required; mutual exclusion
+comes from the lock discipline above.
 
 This guard — not any relocation winning a race — is what makes it impossible for a new file
 appearing at a moved file's former path to displace the moved file's proof, at every entry
@@ -82,13 +92,37 @@ point (scheduler, panel, CLI) and in the same scan that reconciled the move.
   on a case-sensitive store the same spellings SHALL be treated as distinct slots and not
   deferred
 
-#### Scenario: A reclaimed claim mid-batch places nothing
+#### Scenario: A live batch cannot be reclaimed out from under its critical section
 
-- **WHEN** a stamping operation's claim is reclaimed after the guard's evaluation (a scan under
-  the replacement claim may have committed a move reconciliation referencing one of the batch's
-  output slots) and the batch reaches its placement fence
-- **THEN** the fence SHALL refuse every placement, the members SHALL stay `pending`, and no
-  recorded proof — including one newly referencing a batch output slot — SHALL be displaced
+- **WHEN** a stamping operation is inside its guard-through-placement critical section (its
+  heartbeat may have gone stale — a failed keepalive on a live process) and a scan attempts
+  stale-claim reclamation
+- **THEN** the reclamation's non-blocking probe of the collection's proof-store lock SHALL find
+  it held and refuse, no replacement claim SHALL exist, and no reconciliation SHALL be able to
+  newly reference the batch's output slots while it runs
+
+#### Scenario: A crashed batch's claim reclaims normally and the fences hold
+
+- **WHEN** a stamping process died inside its critical section (the lock released by the
+  operating system) and its stale claim is reclaimed, after which a scan reconciles a move
+  referencing one of the dead batch's output slots
+- **THEN** the reclamation SHALL succeed, and any surviving state commit attempted under the
+  dead claim SHALL be refused by its fence, the members left `pending`, and no recorded proof
+  displaced
+
+#### Scenario: An adoption-only batch is fenced too
+
+- **WHEN** every member of a batch resolves by adoption (no placement occurs) and the
+  operation's claim was reclaimed before the adoption state commit
+- **THEN** the fence SHALL refuse the adoption commit, the members SHALL stay `pending`, and no
+  row SHALL record another row's artifact
+
+#### Scenario: A non-ASCII respelled path cannot evade candidate selection
+
+- **WHEN** the proof store is case-insensitive and a moved row's recorded proof path differs
+  from a newcomer's canonical output path only in the case of a non-ASCII letter
+- **THEN** the case-folded candidate key SHALL surface the row, on-disk identity SHALL confirm
+  the alias, and the newcomer SHALL defer
 
 ### Requirement: A stored proof's location follows its file, without a moment of untruth
 

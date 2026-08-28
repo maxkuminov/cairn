@@ -63,11 +63,27 @@ evaluated under the proof-store lock after the claim is re-confirmed, and BEFORE
 pass (`_adopt_or_verdict` would otherwise adopt a byte-identical blocker's proof onto the
 newcomer, putting two rows on one artifact), before writability classification, before staging
 symlinks exist, and before calendar submission. A deferred member therefore never produces a
-proof, so the batch teardown has nothing of its to discard. The guard-to-placement window needs
-no re-query: a move reconciliation referencing a batch slot can only commit under the
-collection's operation claim, i.e. only after the stamp's claim was reclaimed — and the
-existing lease fence already refuses ALL placement under a reclaimed claim, whole-batch,
-members left `pending`.
+proof, so the batch teardown has nothing of its to discard.
+
+**The guard-to-placement window is closed by lock discipline, not a point-in-time fence**
+(implementation audit scope 1, B1/M1: the fence is a TOCTOU read; a keepalive can fail on a
+live process, the claim gets reclaimed during the minutes-long calendar round-trip, and a
+replacement scan's reconciliation newly references a batch slot before `_place_proof` runs).
+The stamping operation holds the collection's proof-store flock across the WHOLE critical
+section — guard, adoption, staging, calendar submission, placement, every post-guard state
+commit (adoption-only batches included) — and `reclaim_stale_claim` probes that flock
+non-blocking FIRST: contended → the holder is alive in a proof critical section → refuse
+reclamation (process death releases the flock, so crashes reclaim normally; flock-unsupported
+stores degrade to guarded-UPDATE-only reclamation with the existing one-per-store warning).
+The lease fences remain on every post-guard commit as the guard for crashed holders and
+degraded stores. Liveness is unchanged in kind: a live process with a beating keepalive was
+already unreclaimable; the probe extends the same protection to a live process whose DB
+keepalive is failing.
+
+**Candidate keys use full Unicode case folding** (implementation audit scope 1, B2): SQLite's
+`lower()` folds ASCII only, so the alias prefilter registers a `casefold` SQL function
+(`str.casefold`) on every connection and keys on it; `same_directory_entry` remains the
+confirmation, so case-sensitive stores still never falsely defer.
 
 This guard alone makes the #39 hazard unreachable from every entry point (scheduler, panel,
 CLI): the stranger's stamp waits instead of displacing. It also covers the same-scan case — a
