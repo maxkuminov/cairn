@@ -46,11 +46,22 @@ path, converges pointers), instead of teaching the scanner to move files.
 
 ### D1 — The referenced-slot stamp guard (the actual fix for the loss path)
 
-Before placing any proof, the stamp path (batched `stamp_pending`, its per-file fallback, and
-the backfill) SHALL defer any member whose canonical output path is currently recorded as
-`ots_path` by a **different** row in the collection — one bounded query over the batch's
-output paths. A deferred member stays `pending` with a warning naming the blocking row; it is
-retried on later passes and proceeds once the sweep (D2) has relocated the blocker away.
+Before anything else touches a canonical slot, the stamp path (batched `stamp_pending`, its
+per-file fallback, and the backfill) defers any member whose canonical output path is currently
+recorded as `ots_path` by a **different** row in the collection — one bounded query over the
+batch's output paths. A deferred member stays `pending` with a warning naming the blocking row;
+it is retried on later passes and proceeds once the sweep (D2) has relocated the blocker away.
+
+**Position is load-bearing** (audit round 2a): the guard is the FIRST canonical-slot decision —
+evaluated under the proof-store lock after the claim is re-confirmed, and BEFORE the adoption
+pass (`_adopt_or_verdict` would otherwise adopt a byte-identical blocker's proof onto the
+newcomer, putting two rows on one artifact), before writability classification, before staging
+symlinks exist, and before calendar submission. A deferred member therefore never produces a
+proof, so the batch teardown has nothing of its to discard. The guard-to-placement window needs
+no re-query: a move reconciliation referencing a batch slot can only commit under the
+collection's operation claim, i.e. only after the stamp's claim was reclaimed — and the
+existing lease fence already refuses ALL placement under a reclaimed claim, whole-batch,
+members left `pending`.
 
 This guard alone makes the #39 hazard unreachable from every entry point (scheduler, panel,
 CLI): the stranger's stamp waits instead of displacing. It also covers the same-scan case — a

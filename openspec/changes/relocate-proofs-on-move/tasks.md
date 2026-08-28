@@ -3,14 +3,25 @@
 ## 1. The referenced-slot stamp guard (`src/services/proofs.py`)
 
 - [ ] 1.1 In `stamp_pending` (batched path + per-file fallback) and `run_stamp_backfill`:
-  before placement, one bounded query for `files` rows in the collection (other than the
-  member's own row) whose `ots_path` equals the member's canonical output path (computed via
-  `proof_path`). On hit: defer the member (stays `pending`), warn naming the blocking row,
-  never fail the batch/operation. Evaluate inside the operation's claim against current rows.
-- [ ] 1.2 Tests: a newcomer at a moved row's former path defers at every entry point (batched
-  stamp, per-file fallback, backfill); the rest of the batch stamps normally; the deferred
-  member proceeds on the pass after the blocking pointer is gone; the guard never matches a
-  member against its own row (re-stamp of the same file unaffected).
+  the referenced-slot guard as the FIRST canonical-slot decision — evaluated under the
+  proof-store lock after claim re-confirmation, BEFORE the adoption pass, writability
+  classification, staging-symlink creation, and calendar submission. One bounded query for
+  `files` rows in the collection (other than the member's own row) whose `ots_path` equals the
+  member's canonical output path (computed via `proof_path`). On hit: exclude the member from
+  the batch (stays `pending`, no staging entry, no calendar traffic), warn naming the blocking
+  row, never fail the batch/operation.
+- [ ] 1.2 No placement-time re-query: rely on (and test) the existing lease fence for the
+  guard-to-placement window — a reconciliation referencing a batch slot implies the stamp's
+  claim was reclaimed, and the fence refuses the whole batch's placements, members `pending`.
+- [ ] 1.3 Tests: a newcomer at a moved row's former path defers at every entry point (batched
+  stamp, per-file fallback, backfill); ordering asserted with barriers/mocks — a deferred
+  member triggers NO adoption attempt and NO calendar call, and the guard runs after lock +
+  claim re-confirmation; the byte-identical newcomer case defers BEFORE `_adopt_or_verdict`
+  can adopt the blocker's proof (newcomer keeps `ots_path` NULL); the warning names the actual
+  blocking row; the rest of the batch stamps normally; the deferred member proceeds on the
+  pass after the blocking pointer is gone; the guard never matches a member against its own
+  row (re-stamp of the same file unaffected); the reclaimed-claim race (pause after guard,
+  reclaim, commit a reconciliation, resume) places nothing.
 
 ## 2. The relocation primitive (`src/services/ots.py`)
 

@@ -10,11 +10,25 @@ fallback, and the on-demand backfill alike — any member whose canonical output
 SHALL be warned with the blocking row named, SHALL NOT fail the batch or the operation, and SHALL
 be retried by later passes, proceeding once the blocking row's proof has been relocated away.
 
-The check SHALL be evaluated inside the stamping operation's claim (against current rows, not a
-stale snapshot) and SHALL compute canonical paths through the single proof-path helper. This
-guard — not any relocation winning a race — is what makes it impossible for a new file appearing
-at a moved file's former path to displace the moved file's proof, at every entry point
-(scheduler, panel, CLI) and in the same scan that reconciled the move.
+The guard SHALL be the **first canonical-slot decision** for every member: it SHALL be evaluated
+before the adoption pass, before output-writability classification, before any staging entry is
+created, and before any calendar submission — a deferred member is excluded from the batch
+entirely, so no proof is ever produced for it and no produced proof needs disposing of. The
+check SHALL be evaluated under the collection's proof-store lock after the operation's claim has
+been re-confirmed (against current rows, not a stale snapshot), and SHALL compute canonical
+paths through the single proof-path helper.
+
+The window between the guard and placement is closed by the existing lease fencing, and the
+delta SHALL be implemented so that linkage holds: a move reconciliation that would newly
+reference one of the batch's output slots can only commit under the collection's operation
+claim, which the stamping operation holds — so such a reconciliation implies the stamp's claim
+was reclaimed, and the existing fence (no placement under a reclaimed claim) SHALL refuse the
+batch's placements entirely, leaving the members `pending`. No placement-time re-query is
+required or permitted to substitute for that fence.
+
+This guard — not any relocation winning a race — is what makes it impossible for a new file
+appearing at a moved file's former path to displace the moved file's proof, at every entry
+point (scheduler, panel, CLI) and in the same scan that reconciled the move.
 
 #### Scenario: A newcomer at a moved file's former path defers
 
@@ -36,6 +50,22 @@ at a moved file's former path to displace the moved file's proof, at every entry
 - **WHEN** one member of a stamp batch is deferred by the referenced-slot guard
 - **THEN** every other member SHALL stamp normally and the operation SHALL NOT report failure
   because of the deferral
+
+#### Scenario: A deferred member is never adopted, staged, or submitted
+
+- **WHEN** a newcomer at a moved file's former path has bytes identical to the moved file, so
+  the confirmed proof at that slot would pass the adoption pass's checks
+- **THEN** the guard SHALL defer the newcomer before adoption is attempted: the newcomer SHALL
+  remain `pending` with no `ots_path`, no staging entry SHALL be created for it, no calendar
+  traffic SHALL occur for it, and only the moved row SHALL record the slot
+
+#### Scenario: A reclaimed claim mid-batch places nothing
+
+- **WHEN** a stamping operation's claim is reclaimed after the guard's evaluation (a scan under
+  the replacement claim may have committed a move reconciliation referencing one of the batch's
+  output slots) and the batch reaches its placement fence
+- **THEN** the fence SHALL refuse every placement, the members SHALL stay `pending`, and no
+  recorded proof — including one newly referencing a batch output slot — SHALL be displaced
 
 ### Requirement: A stored proof's location follows its file, without a moment of untruth
 
