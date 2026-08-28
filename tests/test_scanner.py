@@ -777,3 +777,177 @@ async def test_auto_baseline_never_touches_modified_or_missing(cairn_env):
         assert (await _file(s, cid, "keep.txt")).status == "ok"
         assert (await _file(s, cid, "mod.txt")).status == "modified"
         assert (await _file(s, cid, "gone.txt")).status == "missing"
+
+
+# --- restore closes the file's own `missing` alert (fix-ux-audit-sprint1, #22 / design D10) ----
+
+
+async def _restore_events(cid: int, *, kind: str | None = None, relpath: str | None = None):
+    """Every event of the collection (optionally by kind / by the file's relpath), oldest first."""
+    from sqlalchemy import select as _select
+
+    from src.database import get_sessionmaker
+    from src.models.db import Event, FileEntry
+
+    async with get_sessionmaker()() as s:
+        stmt = _select(Event).where(Event.collection_id == cid).order_by(Event.id)
+        if kind is not None:
+            stmt = stmt.where(Event.kind == kind)
+        if relpath is not None:
+            fid = await s.scalar(
+                _select(FileEntry.id).where(
+                    FileEntry.collection_id == cid, FileEntry.relpath == relpath
+                )
+            )
+            stmt = stmt.where(Event.file_id == fid)
+        return list(await s.scalars(stmt))
+
+
+@pytest.mark.asyncio
+async def test_restore_system_acknowledges_only_that_files_missing_event(cairn_env):
+    """A restored file's `missing` alert is closed by the scan that restores it — and nothing else.
+
+    The open WORM `modified` event on the *same* file must survive (a blanket `WHERE file_id = ...`
+    would clear it; #12's rejected fix 7), and so must another file's still-valid `missing` alert.
+    """
+    from src.database import get_sessionmaker
+    from src.models.db import Collection
+    from src.services.scanner import scan_collection
+
+    root = cairn_env / "restore"
+    root.mkdir()
+    (root / "a.txt").write_text("original-a")
+    (root / "b.txt").write_text("original-b")
+    cid = await _make_collection(root, mode="worm")
+    sm = get_sessionmaker()
+
+    async def _scan():
+        async with sm() as s:
+            return await scan_collection(s, await s.get(Collection, cid))
+
+    await _scan()                                        # both new
+    (root / "a.txt").write_text("tampered-a-longer")     # WORM change -> open `modified` event
+    await _scan()
+    (root / "a.txt").unlink()
+    (root / "b.txt").unlink()
+    await _scan()                                        # both missing -> two open `missing` events
+
+    opens = [e for e in await _restore_events(cid) if e.acknowledged_at is None]
+    assert {e.kind for e in opens} == {"modified", "missing"}
+    assert len(opens) == 3                               # a: modified + missing, b: missing
+
+    (root / "a.txt").write_text("tampered-a-longer")     # a.txt comes back; b.txt stays gone
+    summary = await _scan()
+    assert summary.restored == 1
+
+    a_missing = await _restore_events(cid, kind="missing", relpath="a.txt")
+    assert a_missing and all(e.acknowledged_at is not None for e in a_missing)
+    # System ack, matching the born-acked convention for informational events.
+    assert all(e.acknowledged_by is None for e in a_missing)
+
+    a_modified = await _restore_events(cid, kind="modified", relpath="a.txt")
+    assert a_modified and all(e.acknowledged_at is None for e in a_modified), (
+        "the WORM `modified` alert on the same file is a different claim and stays open"
+    )
+
+    b_missing = await _restore_events(cid, kind="missing", relpath="b.txt")
+    assert b_missing and all(e.acknowledged_at is None for e in b_missing), (
+        "another file's missing alert is untouched"
+    )
+
+
+@pytest.mark.asyncio
+async def test_restore_ack_covers_every_chunk(cairn_env, monkeypatch):
+    """More restored files than one `IN (...)` chunk holds are all acknowledged."""
+    from src.database import get_sessionmaker
+    from src.models.db import Collection
+    from src.services import scanner as scanner_mod
+    from src.services.scanner import scan_collection
+
+    root = cairn_env / "chunks"
+    root.mkdir()
+    names = ["f1.txt", "f2.txt", "f3.txt"]
+    for n in names:
+        (root / n).write_text(f"body-{n}")
+    cid = await _make_collection(root, mode="worm")
+    sm = get_sessionmaker()
+
+    async def _scan():
+        async with sm() as s:
+            return await scan_collection(s, await s.get(Collection, cid))
+
+    await _scan()
+    for n in names:
+        (root / n).unlink()
+    await _scan()
+    assert len([e for e in await _restore_events(cid, kind="missing") if e.acknowledged_at is None]) == 3
+
+    monkeypatch.setattr(scanner_mod, "ACK_CHUNK", 1)  # 3 restores -> 3 chunks
+    for n in names:
+        (root / n).write_text(f"body-{n}")
+    summary = await _scan()
+
+    assert summary.restored == 3
+    assert [e for e in await _restore_events(cid, kind="missing") if e.acknowledged_at is None] == []
+
+
+@pytest.mark.asyncio
+async def test_failed_restore_ack_rolls_back_the_whole_batch(cairn_env, monkeypatch):
+    """The ack rides *inside* the batch: if it raises, the restore it belongs to is not committed.
+
+    This is the scenario D10's placement exists for — an ack applied after the walk would already
+    have committed `status='ok'` + the `restored` event, leaving a healthy file wearing an open
+    `missing` alert that nothing can clear.
+    """
+    from sqlalchemy import select as _select
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, Event, Run
+    from src.services import scanner as scanner_mod
+    from src.services.scanner import scan_collection
+
+    root = cairn_env / "ackfail"
+    root.mkdir()
+    (root / "a.txt").write_text("original-a")
+    cid = await _make_collection(root, mode="worm")
+    sm = get_sessionmaker()
+
+    async def _scan():
+        async with sm() as s:
+            return await scan_collection(s, await s.get(Collection, cid))
+
+    await _scan()
+    (root / "a.txt").unlink()
+    await _scan()
+    assert (await _restore_events(cid, kind="missing"))[0].acknowledged_at is None
+
+    real_update = scanner_mod.update
+
+    def boom(entity, *args, **kwargs):
+        if entity is Event:
+            raise RuntimeError("simulated failure acknowledging the restore")
+        return real_update(entity, *args, **kwargs)
+
+    monkeypatch.setattr(scanner_mod, "update", boom)
+
+    (root / "a.txt").write_text("original-a")
+    summary = await _scan()
+
+    assert summary.result == "error"
+    async with sm() as s:
+        row = await _file(s, cid, "a.txt")
+        assert row.status == "missing", "the restore must not commit without its acknowledgement"
+        restored = await s.scalars(
+            _select(Event).where(Event.collection_id == cid, Event.kind == "restored")
+        )
+        assert list(restored) == []
+        still_open = await s.scalars(
+            _select(Event).where(
+                Event.collection_id == cid,
+                Event.kind == "missing",
+                Event.acknowledged_at.is_(None),
+            )
+        )
+        assert len(list(still_open)) == 1
+        runs = list(await s.scalars(_select(Run).where(Run.collection_id == cid).order_by(Run.id)))
+        assert runs[-1].result == "error"  # the run still reaches a terminal state

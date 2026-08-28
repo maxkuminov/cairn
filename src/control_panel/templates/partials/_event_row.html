@@ -19,11 +19,15 @@
     <div class="event-row__relpath mono">{% if e.kind == "moved" and e.detail %}{{ e.detail }}{% else %}{{ e.relpath }}{% endif %}</div>
     <div class="event-row__collection">{{ e.collection_name }}</div>
     {% if not e.acked %}
+      {# Un-inverted per design D8: a reading-log write is never the loud button. The hint says
+         what it does *not* do, so "Mark reviewed" is never mistaken for a fix. #}
       <div style="margin-top:8px">
-        <button class="btn btn--sm {{ 'btn--danger' if e.kind == 'missing' else 'btn--subtle' }}"
+        <button class="btn btn--sm btn--subtle"
+                title="Notes that you've seen this. The file stays on record as missing or changed, keeps any existence proof, and the collection keeps its Alert status until you restore or retire it."
                 hx-post="/events/{{ e.id }}/ack" hx-target="#event-row-{{ e.id }}" hx-swap="outerHTML">
-          {{ m.icon("check", size=15, stroke=2) }} Acknowledge
+          {{ m.icon("check", size=15, stroke=2) }} Mark reviewed
         </button>
+        <div class="field__hint" style="margin-top:5px">Notes that you've seen this. The file stays on record as missing or changed, keeps any existence proof, and the collection keeps its Alert status until you restore or retire it.</div>
       </div>
     {% endif %}
   </div>

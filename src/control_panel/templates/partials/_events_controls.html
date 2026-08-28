@@ -4,8 +4,13 @@
    keeps the pill and the button in sync (both vanish once open_events hits 0). #}
 {%- if open_events and open_events > 0 -%}
 <span class="pill pill--soft pill--danger pill--sm">{{ open_events }} need action</span>
+{# This one reaches every open event on every collection of yours, including the ones the 20-row
+   feed below never showed — so it carries its count *and* a confirm, and the hint spells out what
+   it leaves alone. #}
 <button class="btn btn--sm btn--subtle" style="margin-left:6px"
-        hx-post="/events/ack-all" hx-target="#events-feed" hx-swap="innerHTML">
-  {{ m.icon("check", size=14, stroke=2) }} Acknowledge all
+        hx-post="/events/ack-all" hx-target="#events-feed" hx-swap="innerHTML"
+        hx-confirm="Marks {{ open_events }} alerts across all your collections as seen. The files stay missing or changed and the red counts stay — this only clears the notification."
+        title="Marks {{ open_events }} alerts across all your collections as seen. The files stay missing or changed and the red counts stay — this only clears the notification.">
+  {{ m.icon("check", size=14, stroke=2) }} Mark all {{ open_events }} reviewed (all collections)
 </button>
 {%- endif -%}

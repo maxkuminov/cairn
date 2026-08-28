@@ -2,22 +2,47 @@
 {% import "_macros.html" as m %}
 {% block title %}Review — {{ c.name }} · Cairn{% endblock %}
 {% block content %}
+{# `population_fp` and `stale` are published by the route (design D14 / D12's context contract).
+   Both are read defensively here so this page still renders if it is ever reached from a context
+   that does not set them; the POST guard fails closed on an absent or empty fingerprint, so a
+   half-configured render refuses accepts rather than accepting them unguarded. #}
+{%- macro mark_all_reviewed(cid, n, token) -%}
+  <form method="post" action="/collection/{{ cid }}/review/ack-all">
+    <input type="hidden" name="csrf_token" value="{{ token }}" />
+    <button class="btn btn--subtle btn--full" type="submit">{{ m.icon("check", size=15, stroke=2) }} Mark all {{ n }} reviewed</button>
+    <div class="field__hint">Clears {{ n }} alerts in this collection. Nothing about the files changes.</div>
+  </form>
+{%- endmacro -%}
 <div class="page-header">
   <div>
     <a class="back-link" href="/collection/{{ c.id }}">{{ m.icon("arrowLeft", size=15) }} {{ c.name }}</a>
     <h1>What changed</h1>
     <div class="page-header__sub">
       Files in <strong>{{ c.name }}</strong> that went missing or changed. Recover anything you want
-      back, then clear the alerts — <strong>Acknowledge</strong> to just note them, or
+      back, then clear the alerts — <strong>Mark reviewed</strong> to just note them, or
       <strong>Accept</strong> to make the current state your new baseline.
     </div>
   </div>
   {# The bulk actions used to live here as two near-identical buttons; they now live in the
-     self-explaining "Clear these alerts" panel below so Acknowledge vs Accept can't be confused. #}
+     self-explaining "Clear these alerts" panel below so Mark reviewed vs Accept can't be confused. #}
   <div class="page-header__actions">
     <span id="review-open-pill">{% include "partials/_review_open_pill.html" %}</span>
   </div>
 </div>
+
+{% if stale %}
+  {# Where an accept refused by the population guard lands (`?stale=1`). Without it the operator
+     sees an ordinary review page and no account of why their click did nothing. #}
+  <div class="card" id="stale-banner"
+       style="margin-bottom:16px;display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border-color:color-mix(in oklch, var(--warn) 35%, var(--border));background:color-mix(in oklch, var(--warn-soft) 40%, var(--surface))">
+    <span style="color:var(--warn);flex-shrink:0;display:flex">{{ m.icon("alert", size=16, stroke=2) }}</span>
+    <div style="flex:1;font-size:13px;line-height:1.55;color:var(--text-2)">
+      This collection changed since the page loaded — the list below is current.
+    </div>
+    <button type="button" class="btn btn--sm btn--subtle" aria-label="Dismiss"
+            onclick="var b=document.getElementById('stale-banner'); if (b) b.remove();">Dismiss</button>
+  </div>
+{% endif %}
 
 {% if total_issues == 0 %}
   <div class="card">
@@ -28,6 +53,35 @@
       <a class="btn btn--subtle btn--sm" href="/collection/{{ c.id }}" style="margin-top:16px;display:inline-flex">Back to {{ c.name }}</a>
     </div>
   </div>
+  {% if review_open and review_open > 0 %}
+    {# Nothing is wrong any more, but alerts raised earlier are still open — a file that went
+       missing and has since come back. Only the Mark-reviewed half is offered (design D9):
+       Accept from an otherwise-empty page would silently baseline every pending `new` file. #}
+    <div class="card resolve">
+      <div class="resolve__head">{{ m.icon("checkCircle", size=16, stroke=1.9) }}
+        {{ review_open }} alert{{ "" if review_open == 1 else "s" }} from files that have since been restored</div>
+      <div class="resolve__sub">
+        The files are back and nothing is missing or changed right now. These alerts stay open until
+        you note that you've seen them.
+      </div>
+      <div class="resolve__grid" style="grid-template-columns:1fr">
+        <div class="resolve__opt">
+          <div class="resolve__opt-head">
+            <span class="resolve__chip resolve__chip--ack">{{ m.icon("check", size=16, stroke=2) }}</span>
+            <div>
+              <div class="resolve__opt-title">Mark reviewed</div>
+              <span class="pill pill--soft pill--muted pill--sm">Baseline unchanged</span>
+            </div>
+          </div>
+          <div class="resolve__opt-desc">
+            Clears the alerts these files raised while they were gone. Nothing about the files or
+            your baseline changes, and any existence proof is kept.
+          </div>
+          {{ mark_all_reviewed(c.id, review_open, csrf_token) }}
+        </div>
+      </div>
+    </div>
+  {% endif %}
 {% else %}
   {# Recovery panel — tool-agnostic. Copy the affected paths into whatever backup tool you use. #}
   <div class="card recovery" id="recovery"
@@ -53,16 +107,16 @@
       <ol class="recovery__steps">
         <li>Copy the affected paths with the <strong>Copy paths</strong> button above (relative to the collection root, or full paths).</li>
         <li>In your backup tool, restore exactly those paths to the collection root <span class="mono">{{ c.root }}</span>.</li>
-        <li>Run <strong>Scan now</strong> — recovered files flip back to <em>restored / OK</em>.</li>
+        <li>Run <strong>Scan now</strong> on the collection page — recovered files flip back to <em>restored / OK</em>.</li>
         <li>For anything you don't want back, <strong>Accept all changes</strong> to clear it from tracking.</li>
       </ol>
     </details>
   </div>
 
-  {# Resolve panel — the two bulk actions shown each next to what it actually does. Acknowledge and
+  {# Resolve panel — the two bulk actions shown each next to what it actually does. Mark reviewed and
      Accept land on different routes and have very different consequences, so they're spelled out and
      visually contrasted (neutral vs amber) rather than sitting as two look-alike buttons. Per-file
-     Acknowledge still lives on each row in the list below. #}
+     Mark reviewed still lives on each row in the list below. #}
   <div class="card resolve">
     <div class="resolve__head">{{ m.icon("checkCircle", size=16, stroke=1.9) }} Clear these alerts</div>
     <div class="resolve__sub">Two ways to resolve, depending on whether the change was expected.</div>
@@ -71,7 +125,7 @@
         <div class="resolve__opt-head">
           <span class="resolve__chip resolve__chip--ack">{{ m.icon("check", size=16, stroke=2) }}</span>
           <div>
-            <div class="resolve__opt-title">Acknowledge</div>
+            <div class="resolve__opt-title">Mark reviewed</div>
             <span class="pill pill--soft pill--muted pill--sm">Baseline unchanged</span>
           </div>
         </div>
@@ -81,12 +135,9 @@
           return if the file changes again.
         </div>
         {% if review_open and review_open > 0 %}
-          <form method="post" action="/collection/{{ c.id }}/review/ack-all">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-            <button class="btn btn--subtle btn--full" type="submit">{{ m.icon("check", size=15, stroke=2) }} Acknowledge all</button>
-          </form>
+          {{ mark_all_reviewed(c.id, review_open, csrf_token) }}
         {% else %}
-          <span class="resolve__done">{{ m.icon("checkCircle", size=14) }} Nothing left to acknowledge</span>
+          <span class="resolve__done">{{ m.icon("checkCircle", size=14) }} Nothing left to mark reviewed</span>
         {% endif %}
       </div>
       <div class="resolve__opt resolve__opt--accept">
@@ -105,7 +156,14 @@
         <form method="post" action="/collection/{{ c.id }}/review/accept"
               onsubmit="return confirm('Accept all changes? Modified files become the new baseline and missing files stop being tracked. This does not delete anything on disk.');">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-          <button class="btn btn--subtle btn--full" type="submit">{{ m.icon("refresh", size=15, stroke=2) }} Accept all changes</button>
+          {# Binds this form to the population it was rendered for: the POST recomputes the same
+             fingerprint inside the write transaction and refuses on any drift (design D14).
+             TODO(seam): once Slice B's `collection_review` publishes `population_fp`, this value is
+             non-empty on every render — assert that in tests/test_ux_review.py post-merge. #}
+          <input type="hidden" name="population_fp" value="{{ population_fp | default('', true) }}" />
+          {# Un-inverted per design D8: this one rewrites baselines and deletes rows, so it is the
+             loud button — not the per-row reading-log write. #}
+          <button class="btn btn--danger btn--full" type="submit">{{ m.icon("refresh", size=15, stroke=2) }} Accept all changes</button>
         </form>
       </div>
     </div>
@@ -119,12 +177,15 @@
         {% if c.counts.modified %}<span class="legend__stat">{{ m.dot("var(--warn)", size=7) }}{{ c.counts.modified }} modified</span>{% endif %}
       </div>
     </div>
+    <div class="field__hint" style="padding:0 18px 12px;margin-top:0">
+      <strong>Mark reviewed:</strong> Notes that you've seen this. The file stays on record as missing or changed, keeps any existence proof, and the collection keeps its Alert status until you restore or retire it.
+    </div>
     {% for it in items %}
       {% include "partials/review_row.html" %}
     {% endfor %}
     {% if truncated %}
       <div class="review-list__more">Showing the first {{ shown }} of {{ total_issues }} — open the
-        <a href="/collection/{{ c.id }}">file browser</a> (filter: Issues) to see the rest.</div>
+        <a href="/collection/{{ c.id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, to see the rest.</div>
     {% endif %}
   </div>
 {% endif %}
@@ -142,12 +203,47 @@
       var base = root.replace(/\/+$/, "");
       return rel.split("\n").map(function (p) { return base + "/" + p; }).join("\n");
     }
+    // A failed copy has to *say so*: silently doing nothing leaves the operator pasting a stale
+    // clipboard into their backup tool and restoring the wrong set of paths.
+    function report(ok) {
+      if (!note) return;
+      note.textContent = ok ? "Copied ✓" : "Couldn't copy — select the paths and copy manually";
+      note.style.color = ok ? "" : "var(--danger)";
+      note.hidden = false;
+      setTimeout(function () { note.hidden = true; }, ok ? 1800 : 5000);
+    }
+    // navigator.clipboard is undefined outside a secure context (plain http on a LAN address is
+    // the normal self-hosted case), so fall back to the old hidden-textarea + execCommand path.
+    function legacyCopy(text) {
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "-1000px";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        var ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        return !!ok;
+      } catch (e) {
+        return false;
+      }
+    }
     card.querySelectorAll("[data-copy]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var text = paths(btn.getAttribute("data-copy"));
-        navigator.clipboard.writeText(text).then(function () {
-          if (note) { note.hidden = false; setTimeout(function () { note.hidden = true; }, 1800); }
-        });
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(text).then(function () {
+            report(true);
+          }).catch(function () {
+            report(legacyCopy(text));
+          });
+        } else {
+          report(legacyCopy(text));
+        }
       });
     });
   })();

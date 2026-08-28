@@ -1027,7 +1027,7 @@ def test_review_acknowledge_marks_event_and_refreshes_counts(cairn_env):
         token = _csrf_token(client)
         r = client.post("/events/1/ack?view=review", headers={"X-CSRF-Token": token})
         assert r.status_code == 200
-        assert "Acknowledged" in r.text                       # row flipped to acked state
+        assert "Reviewed" in r.text                           # row flipped to acked state
         assert 'id="review-open-pill"' in r.text              # OOB pill refresh
         assert 'id="sidebar-alert-badge"' in r.text           # OOB sidebar badge refresh
 
