@@ -139,7 +139,14 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
   transaction is not a guard — the scan can commit between the recount and the first `DELETE`.
   The **review page is not exempt**: its list is a render, so a scan landing after it makes "exactly
   what you see below" false and the operator deletes a record they never saw. `active_run()` stays,
-  demoted to belt-and-braces for the long window.
+  demoted to belt-and-braces for the long window. The fingerprint identifies each file by path,
+  status and digest — not by row id alone, which SQLite reuses after a delete — and being unable to
+  take the write lock is itself a refusal, never a 500. **One deliberate exception:** the review
+  accept's fingerprint covers only the *protected* `missing` + `modified` population, so a
+  not-yet-baselined file that appears between render and submit is still adopted rather than
+  refusing the accept — guarding the harmless promotion too would refuse every accept on an actively
+  growing collection, for a change that deletes nothing (accepted limitation, stated in the spec;
+  scoping the verb itself is #16).
 - **`collection_detail` honours `view` and `filter` query parameters**, threading `status_filter`
   into the *initial* `query_files` call and templating the Tree/List `is-active` class, so a deep
   link into the filtered list actually lands filtered.

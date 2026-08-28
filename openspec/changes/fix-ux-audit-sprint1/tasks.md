@@ -76,7 +76,8 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   valid attestation is proof, and no caller may turn a bad sibling into a verdict. Mismatch stays
   **before** transport: a mismatch established before the network failed is knowledge.
   `incomplete` and `pending` are two branches, not one (design D13). Pass the reason flags into the
-  template context.
+  template context — **`transport_error` included on every branch**, not only the branch it wins, so
+  2.9 can disclose it under a verdict that outranks it.
 - [ ] 2.7 `routes.py::verify_run`: the `except ots_svc.OtsError` fallback stops passing
   `state=fe.ots_state` — construct
   `VerifyResult(verified=False, state="none", transport_error=str(exc))` so it lands on the same
@@ -98,6 +99,13 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   too: `incomplete` reads "Pending confirmation" (submitted, waiting on Bitcoin) and `pending` reads
   "Queued to stamp" with **no awaiting-confirmation wording anywhere in its copy** (design D13). Do
   not weaken the existing `verdict == "ok"` copy.
+  **Plus the diagnostic transport line (design D2):** whenever `transport_error` is present on a
+  result whose verdict is `ok` (verified) or the proof mismatch, render it *under* the verdict —
+  verified: *"Note: N attestation lookups failed; the verdict is based on the attestations
+  reached."*; proof mismatch: the same note, qualifying the mismatch as established over the
+  attestations that could be reached. It is a muted sub-line, never a second verdict style and never
+  a downgrade of the headline. Without it, precedence turns into concealment: the operator reads a
+  categorical "this proof does not check out" over a proof half of which was never fetched.
 - [ ] 2.10 `src/cli.py::_cmd_verify`: branch in the same order as 2.6 — `digest_mismatch`, then
   `result.verified`, then `proof_mismatch`, `transport_error`, `inconclusive`, all **before** the
   lifecycle lines, each printing its own reason and returning non-zero. Today the CLI prints
@@ -106,6 +114,10 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   lifecycle line the same way the panel does: `incomplete` prints the pending-confirmation wording,
   `pending` prints **"queued to stamp — not yet submitted to a calendar"** and never says it is
   awaiting confirmation (design D13). The inconclusive line names all three possibilities (2.9).
+  **Same disclosure rule as the panel:** when `transport_error` rides along with a verified or
+  `proof_mismatch` verdict, print it as an extra line after the verdict line ("N attestation lookups
+  failed; the verdict is based on the attestations reached", qualifying the mismatch on the mismatch
+  branch). That line never changes the exit status the verdict already sets.
 - [ ] 2.11 `partials/verify_results.html:15`: `{{ m.ots_badge(f.state, "sm") }}` — `f.state` is
   already supplied by `_anchored_view`; confirm it renders for both `incomplete` and `complete` rows.
 - [ ] 2.12 `_macros.html:141`: in `ots_badge`, `incomplete` → **"Pending confirmation"** and
@@ -134,7 +146,10 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   merkle-root mismatch renders a card that does **not** claim the file changed; a returned
   `transport_error` and a raised `OtsError` both render "Couldn't check right now" as
   `verdict--unavailable` (never `danger`, never "pending"); **a verified result that also carries
-  `proof_mismatch` renders the ok verdict, not the mismatch card**; a node-backend `inconclusive`
+  `proof_mismatch` renders the ok verdict, not the mismatch card**; **a verified result carrying
+  `transport_error` renders the ok verdict *and* the failed-lookup note, and a `proof_mismatch`
+  result carrying `transport_error` renders the mismatch card *and* that note qualifying it** —
+  neither may render the transport verdict style, and neither may omit the note; a node-backend `inconclusive`
   result renders copy naming **all three** possibilities (unanchored, changed, node unreachable) and
   never "pending confirmation"; **a `state='pending'` result with no other signal renders "Queued to
   stamp" and no awaiting-confirmation wording, while `state='incomplete'` renders "Pending
@@ -144,7 +159,9 @@ Files owned: `src/services/ots.py`, `src/cli.py` (`_cmd_verify` only), `routes.p
   regression: `_cmd_verify` on a `digest_mismatch` result prints the mismatch and not "pending", on
   a `transport_error`/`inconclusive` result prints neither "pending" nor a verified line, and on a
   plain `state='pending'` result prints the queued wording without any awaiting-confirmation
-  language.
+  language; and a verified-plus-`transport_error` result **and** a
+  `proof_mismatch`-plus-`transport_error` result each print the winning verdict *and* the
+  failed-lookup line, with the exit status the verdict alone would give.
 - [ ] 2.17 Smoke the external-process boundary without a network: `ots.verify` is exercised with a
   stubbed explorer HTTP layer and a stubbed `_run_ots` only (no live calendar/explorer/node calls in
   the suite).
@@ -213,11 +230,26 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
 - [ ] 3.10 When `c.issues == 0 and c.counts.new > 0`, keep **"Baseline new files"** with an
   `onsubmit` light confirm naming the count. When both are zero, render neither.
 - [ ] 3.11 `routes.py`: add the shared **population fingerprint** guard (design D14) and apply it to
-  `collection_accept`. New `async def _population_fingerprint(session, collection_id, scope) -> str`
-  returning the SHA-256 of `"{scope}|{collection_id}|{issues=N|}" + ";".join(f"{id}:{status}")` over
-  the population that scope names — `baseline-new`: the live `missing + modified` count (the
-  zero-issue assertion, hashed *inside* the fingerprint) then the sorted `id:status` pairs of the
-  collection's `new` files. `collection_detail.html` renders it as a hidden `population_fp` input in
+  `collection_accept`. New `async def _population_fingerprint(session, collection, scope) -> str`
+  (it takes the `Collection` row `_get_owned_collection` already loaded, because the collection's
+  `created_at` is part of the preimage) returning the hex SHA-256 of design D14's **canonical
+  encoding**, over the population that scope names: header
+  `f"{scope}\x1f{collection.id}\x1f{collection.created_at.isoformat()}"` (plus `f"\x1fissues={n}"`
+  for `baseline-new` only — the zero-issue assertion hashed *inside* the fingerprint), then one
+  record per file `f"{id}\x1f{len(relpath.encode())}\x1f{relpath}\x1f{status}\x1f{sha256 or ''}"`,
+  records sorted by `relpath` and joined with `\x1e`, the whole preimage UTF-8 encoded.
+  `baseline-new` hashes the collection's `new` files; `review-accept` (3.12) its `missing` +
+  `modified` files. **`relpath` and `sha256` are load-bearing, not decoration:** `files.id` /
+  `collections.id` are `INTEGER PRIMARY KEY` **without** `AUTOINCREMENT`, so SQLite may hand a
+  deleted row's id to a later insert — an id-and-status-only preimage is byte-identical for two
+  populations sharing no file, and the old form would then delete a record the operator never saw.
+  `relpath` pins the logical file, `sha256` (empty string when NULL) pins the content generation,
+  and the collection's `created_at` does the same job for a recreated collection reusing its id. The
+  byte-length prefix on `relpath` keeps the encoding unambiguous for paths containing `\x1f`/`\x1e`.
+  Sort by `relpath` (unique per collection), never by `id`. One `select(FileEntry.id,
+  FileEntry.relpath, FileEntry.status, FileEntry.sha256)` — every column is already on the entity
+  `query_files` / `collection_review` select, so this adds no join.
+  `collection_detail.html` renders it as a hidden `population_fp` input in
   the baseline form. The POST then, **in one write transaction**: (1) takes the write lock first with
   a no-op write on the collection's own row (`UPDATE collections SET name = name WHERE id = :id`) —
   SQLite holds that lock until commit, so nothing can interleave; (2) recomputes the fingerprint and
@@ -229,7 +261,11 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   recount statement and the accept's first `DELETE`.
 - [ ] 3.12 `routes.py`: the **review page's accept is guarded by the same mechanism** (design D14).
   `collection_review` publishes `population_fp` (scope `review-accept`, hashed over the collection's
-  **entire** `missing + modified` set in SQL — *not* the `REVIEW_ROW_LIMIT`-capped rendered rows) and
+  **entire** `missing + modified` set in SQL — *not* the `REVIEW_ROW_LIMIT`-capped rendered rows, and
+  deliberately **not** the `new` set the same accept promotes: that exclusion is the documented
+  accepted limitation (design D14, stated normatively in the delta), so do not "complete" the
+  fingerprint by folding `new` in — it would refuse every accept on a collection that scans every
+  few minutes) and
   a `stale` context flag from a whitelisted `?stale=1` query parameter (only `1` recognized,
   anything else ignored, exactly as `view`/`filter` are handled). `collection_review_accept` runs the
   identical write-lock → recompute → compare → act sequence and refuses to
@@ -271,8 +307,33 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   empty** `population_fp` refuses (fails closed); an unchanged population accepts normally, so the
   guard is not simply refusing everything; a fingerprint minted for one collection is refused on
   another, and a `baseline-new` fingerprint is refused by the review route; a POST while
-  `active_run()` reports an operation in flight refuses. Assert the *absence* of mutation, not just
-  the status code — a guard that redirects and still deletes is the bug.
+  `active_run()` reports an operation in flight refuses. **Id reuse:** render the review form,
+  delete the missing row, insert a *different* `relpath` that reuses the freed id (set it explicitly)
+  and mark it `missing` — the already-rendered `population_fp` is refused and the replacement row
+  survives; do the same for a collection deleted and recreated on the same `collection_id` with a
+  new `created_at`. **The `new`-set exception (design D14 / the delta's accepted limitation):** add a
+  not-yet-baselined file between render and POST on `/collection/{id}/review/accept` and assert the
+  accept **succeeds** and promotes it — the guard must not refuse on a growing collection. Assert the
+  *absence* of mutation on every refusal, not just the status code — a guard that redirects and still
+  deletes is the bug.
+
+- [ ] 3.19 `routes.py`: the guard helper handles **lock contention as a refusal** (design D14).
+  Wrap the step-1 no-op `UPDATE collections SET name = name WHERE id = :id` — the statement that
+  acquires/upgrades the writer transaction — in `except sqlalchemy.exc.OperationalError`, and
+  convert it **only** when SQLite reports `SQLITE_BUSY`, `SQLITE_BUSY_SNAPSHOT` or `SQLITE_LOCKED`
+  (test the driver exception's `sqlite_errorname` where available, falling back to the message
+  text); then `await session.rollback()`, **do not** call `accept_collection`, and return the same
+  fail-closed `303` to `/collection/{id}/review?stale=1` a fingerprint mismatch returns. Re-raise
+  every other `OperationalError`/`DatabaseError` untouched — a corrupt or misconfigured datastore
+  must not be reported as "the collection changed since the page loaded". Uncaught, these become an
+  HTTP 500 on a destructive POST: the refusal promise broken exactly where the guard exists, and an
+  invitation to retry blind. Both accept-family routes go through the one helper.
+- [ ] 3.20 `tests/test_ux_dashboard.py` — **contention**: with a second session holding the SQLite
+  writer lock on the same database (begin a write transaction there and leave it open) fire the
+  accept POST on both routes and assert each returns the `303` to `…/review?stale=1`, **not** a 500,
+  and that nothing was mutated once the holding transaction is rolled back; and that an
+  `OperationalError` which is *not* one of the three lock codes propagates rather than being
+  reported as staleness (inject it on the no-op `UPDATE`).
 
 ## 4. Slice C — review, acknowledgement vocabulary, and the restore ack (#17, #22, #32-review)
 Files owned: `src/services/scanner.py`, `templates/collection_review.html`,

@@ -47,6 +47,15 @@ that means a real mismatch. The panel SHALL derive this outcome from the verific
 not only from a raised error, because the backends report most unreachability as an ordinary
 returned result.
 
+Where a transport failure is present on a result whose verdict was decided by something that
+outranks it — a **verified** result or a **proof mismatch** — the panel SHALL still disclose it, as a
+diagnostic line beneath the verdict naming that some attestation lookups failed and that the verdict
+rests on the attestations that could be reached; on a proof mismatch that line SHALL qualify the
+mismatch as established only over those attestations. Precedence decides the headline, not what the
+card is permitted to say: a categorical "this proof does not check out" over a proof half of which
+was never checked, or a clean bill over a proof only partly reachable, tells the operator more than
+was established.
+
 Where the configured backend cannot distinguish "not yet confirmed" from "the file no longer
 matches" from "the backend itself could not be reached", the panel SHALL render an **inconclusive**
 verdict that names **every** possibility that backend cannot separate — including its own
@@ -111,6 +120,21 @@ asserting a fixed backend.
   merkle root, while the file's digest is still the one the proof commits to
 - **THEN** the panel SHALL render a failure naming the proof as what does not check out, and SHALL
   NOT state that the file's bytes changed
+
+#### Scenario: A verified verdict discloses the lookups that failed
+
+- **WHEN** a proof's verification confirms one attestation against its real block while the lookup
+  for another attestation fails, so the result is verified **and** carries a transport failure
+- **THEN** the panel SHALL render the verified verdict **and** a diagnostic line saying that
+  attestation lookups failed and that the verdict is based on the attestations reached
+
+#### Scenario: A proof mismatch discloses the lookups that failed
+
+- **WHEN** a proof's only fetched attestation mismatches its block while another attestation's
+  lookup fails, so the result carries both the proof mismatch and a transport failure
+- **THEN** the panel SHALL render the proof-mismatch failure **and** a diagnostic line saying that
+  attestation lookups failed, qualifying the mismatch as based on the attestations reached, and
+  SHALL NOT present the mismatch as if the whole proof had been checked
 
 #### Scenario: An unreachable verification backend is not a pending proof
 
@@ -252,11 +276,33 @@ scan that records another missing file after the render makes "these are the fil
 adopt" false, and the operator removes a record they never saw.
 
 Each such form SHALL carry a **fingerprint of the population it claims to act on**, and the endpoint
-SHALL recompute that fingerprint from the datastore and refuse unless it still matches. The
-fingerprint SHALL cover each file's identity **and** its status, SHALL be scoped so that a
-fingerprint issued for one form or one collection cannot validate another, and SHALL be computed
-over the **whole** population the action would affect rather than over any truncated list the page
-displayed. An absent or empty fingerprint SHALL be treated as a mismatch, so the check fails closed.
+SHALL recompute that fingerprint from the datastore and refuse unless it still matches.
+
+The fingerprint SHALL identify each file by a **durable identity, not by a row identifier alone**:
+it SHALL cover the file's path and its status, and its content digest wherever one is recorded, in
+addition to its row identifier. A row identifier can be reused by the datastore after the row it
+named is deleted, so a fingerprint built from identifiers and statuses alone can match a population
+that shares no file with the one the form was rendered for — precisely the replay this guard exists
+to prevent. For the same reason the fingerprint SHALL be scoped by the collection's creation time as
+well as its identifier, so that a recreated collection reusing an identifier cannot validate a
+fingerprint issued for its predecessor. The fingerprint SHALL also be scoped so that a fingerprint
+issued for one form cannot validate another, and its encoding SHALL be unambiguous for every legal
+file path, so that two different populations cannot be encoded to the same input.
+
+The fingerprint SHALL cover the **whole protected population its form is rendered for**, rather than
+any truncated list the page displayed: for the review view's accept, the collection's entire
+`missing` + `modified` set; for the collection-detail baseline action, its entire `new` set together
+with the assertion that the collection has no missing or modified files. An absent or empty
+fingerprint SHALL be treated as a mismatch, so the check fails closed.
+
+The review view's accept also promotes files that are merely **not yet baselined**, and that set is
+deliberately **outside** the fingerprint: a new file appearing between render and submit SHALL NOT
+cause a refusal, and SHALL be baselined by the accept along with the rest. This is an accepted
+limitation, not an oversight. The guard's purpose is the *destructive* half — the missing records the
+accept removes and the alerts it clears — and a collection that is actively growing (a scan every
+few minutes adding photos) would otherwise refuse every accept over a promotion that deletes
+nothing, which would train the operator to work around the guard. Narrowing the re-baseline verb so
+it acts only on what was displayed is separate work.
 
 The recomputation and the re-baseline SHALL happen **within a single write transaction**, entered
 before the recomputation reads anything it depends on, so that no concurrent scan can commit between
@@ -264,6 +310,15 @@ the check and the mutation. A check that is merely "recount, then call the servi
 the recount and the deletion are separate statements, and a scan can claim, run and commit in the
 gap. An in-flight-operation check SHALL also be made, but as a secondary precaution covering the
 long window, not as the mechanism relied on for the short one.
+
+Entering that write transaction can itself fail under contention — another writer holding the lock
+past the connection's busy timeout, or having committed since this request's read snapshot. Such a
+failure SHALL be handled as a **refusal**, identical to a fingerprint mismatch: nothing mutated, the
+transaction rolled back, the same redirect and marker. It SHALL NOT surface as a server error, which
+would leave the operator with a failed destructive POST, no account of why, and every reason to
+retry it blind. Database failures that are **not** lock contention SHALL NOT be converted into a
+refusal — reporting a corrupt or misconfigured datastore as "the collection changed since the page
+loaded" hides a fault the operator must act on.
 
 On refusal the endpoint SHALL mutate nothing — no file record removed, no baseline rewritten, no
 event acknowledged — and SHALL redirect to the review view **carrying a marker that the view
@@ -316,6 +371,47 @@ one.
 
 - **WHEN** a re-baseline is submitted without the population fingerprint, or with an empty one
 - **THEN** the endpoint SHALL refuse and SHALL NOT re-baseline anything
+
+#### Scenario: A reused row identifier does not validate a stale fingerprint
+
+- **WHEN** the review view is rendered for a collection, the missing file it listed is then removed
+  from the datastore and a scan records a **different** file, at a different path, whose row reuses
+  the removed record's identifier and which is itself missing, and the operator submits the
+  originally rendered form
+- **THEN** the endpoint SHALL refuse, SHALL NOT remove the replacement file's record or acknowledge
+  its event, and SHALL redirect to the review view with the staleness marker — a reused identifier
+  SHALL NOT be sufficient for a fingerprint to still match
+
+#### Scenario: A recreated collection does not validate its predecessor's fingerprint
+
+- **WHEN** an accept-family form is rendered, its collection is then deleted and a new collection is
+  created that reuses the same identifier, and the originally rendered form is submitted against it
+- **THEN** the endpoint SHALL refuse and SHALL mutate nothing in the replacement collection
+
+#### Scenario: Lock contention is a refusal, not a server error
+
+- **WHEN** a re-baseline is submitted while another writer holds the datastore's write lock, or has
+  committed since this request's read snapshot, so that the endpoint cannot take the write lock its
+  check-and-act depends on
+- **THEN** the endpoint SHALL refuse exactly as it does on a fingerprint mismatch — mutating
+  nothing and redirecting to the review view with the staleness marker — and SHALL NOT return a
+  server error
+
+#### Scenario: A datastore failure that is not contention is not reported as staleness
+
+- **WHEN** the re-baseline endpoint's datastore access fails for a reason that is not write-lock
+  contention
+- **THEN** that failure SHALL surface as the error it is, and SHALL NOT be presented to the operator
+  as the collection having changed since the page loaded
+
+#### Scenario: Accepted limitation — a new file appearing after render does not refuse the accept
+
+- **WHEN** the review view's accept form is submitted after a scan has added a file that is merely
+  not yet baselined, while the collection's missing and modified files are exactly what the view
+  listed
+- **THEN** the endpoint SHALL accept rather than refuse, and that new file SHALL be baselined along
+  with the rest; the response is the view's ordinary post-accept redirect, and no additional notice
+  is claimed for the file that appeared
 
 #### Scenario: A re-baseline is refused while an operation is in flight
 

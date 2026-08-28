@@ -135,6 +135,15 @@ failure SHALL be reported as verification being unavailable, with its reason, an
 reported as a pending proof. An inconclusive result SHALL name every possibility it cannot separate,
 including the backend's own unreachability. Every one of these SHALL exit non-zero.
 
+Where a transport failure is present on a result whose verdict was decided by something that
+outranks it — a verified result or a proof mismatch — the command SHALL still print it, as a
+diagnostic line beneath the verdict naming that some attestation lookups failed and that the verdict
+rests on the attestations reached; on a proof mismatch that line SHALL qualify the mismatch as
+established only over those attestations. The precedence order chooses the command's headline and
+its exit status, not the whole of what it is allowed to report, and an operator reading a
+categorical verdict over a partly-unreachable proof has been told more than was established. Neither
+line SHALL change the exit status the verdict itself sets.
+
 Where none of those reasons is present, the command SHALL distinguish the two not-yet-confirmed
 proof states in the same words the panel uses: a proof awaiting Bitcoin confirmation, and a proof
 merely queued for stamping. The queued state SHALL NOT be reported with awaiting-confirmation
@@ -151,6 +160,19 @@ wording.
 - **WHEN** `cairn verify` receives a result carrying a transport failure or an inconclusive outcome
 - **THEN** the command SHALL report that verification could not be completed, naming the reason, and
   SHALL NOT print its pending wording
+
+#### Scenario: The command line discloses failed lookups beside a verified result
+
+- **WHEN** `cairn verify` receives a result that is verified and also carries a transport failure,
+  because one attestation confirmed while another's lookup failed
+- **THEN** the command SHALL report the verified verdict **and** print that attestation lookups
+  failed and the verdict is based on the attestations reached
+
+#### Scenario: The command line discloses failed lookups beside a proof mismatch
+
+- **WHEN** `cairn verify` receives a result carrying both a proof mismatch and a transport failure
+- **THEN** the command SHALL report the proof-mismatch failure **and** print that attestation
+  lookups failed, qualifying the mismatch as based on the attestations reached
 
 #### Scenario: The command line names the queued state as queued
 

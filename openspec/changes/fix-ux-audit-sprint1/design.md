@@ -134,6 +134,17 @@ finding that matters. `digest_mismatch` stays above `verified` for the mirror re
 set on a not-verified return, and if both were ever set, "these are not the bytes that were stamped"
 is the finding that must win.
 
+**Losing the verdict is not losing the disclosure.** Precedence decides the *headline*, not what the
+card and the CLI line are allowed to say. Whenever a `transport_error` rides along with a verdict
+that outranks it — `verified` or `proof_mismatch` — the consumer appends it as a diagnostic line
+under the headline: on a verified result, *"Note: N attestation lookups failed; the verdict is based
+on the attestations reached."*; on a proof mismatch, the same note, qualifying the mismatch as
+established only over the attestations that could be fetched. Attaching the reason to the result
+(above) and then rendering only the winning branch would leave the operator with a categorical
+"this proof does not check out" over a proof half of which was never checked — the swallow moved one
+layer out rather than being closed. The other verdicts need no such line: on `transport_error` and
+`inconclusive` the transport failure *is* the headline.
+
 `incomplete` and `pending` are **two branches, not one** (D13): `incomplete` is submitted and waiting
 on Bitcoin, so it reads "Pending confirmation"; `pending` is queued locally and never submitted, so
 it reads **"Queued to stamp"** and carries no awaiting-confirmation wording anywhere in its copy.
@@ -465,19 +476,51 @@ checked can have one a millisecond later.
 *The fingerprint.* Each accept-family form renders a hidden `population_fp` field: the SHA-256 of a
 canonical description of the population that button claims to act on.
 
-| Form | Scope tag | Hashed |
+| Form | Scope tag | Population hashed |
 |---|---|---|
-| detail-page **Baseline new files** | `baseline-new` | `issues=<missing+modified count>` (zero whenever this form is rendered at all — the zero-issue assertion travels *inside* the hash) then the sorted `id:status` pairs of the collection's `new` files |
-| review-page **Accept all changes** | `review-accept` | the sorted `id:status` pairs of the collection's `missing` + `modified` files |
+| detail-page **Baseline new files** | `baseline-new` | `issues=<missing+modified count>` (zero whenever this form is rendered at all — the zero-issue assertion travels *inside* the hash) then the collection's `new` files |
+| review-page **Accept all changes** | `review-accept` | the collection's `missing` + `modified` files |
 
-Serialized as `"{scope}|{collection_id}|{issues=N|}" + ";".join(f"{id}:{status}")` and hashed, so a
-fingerprint minted for one form can never validate the other, and one collection's can never
-validate another's. Each pair carries `status` as well as `id` because a file flipping
-`new → modified` between render and submit changes what accepting it *means* without changing the
-id set.
+*Canonical encoding.* Two ASCII control characters do the framing: **US** = `\x1f` between fields,
+**RS** = `\x1e` between records.
 
-The review page's fingerprint is computed **over the whole population in SQL, not over the rendered
-rows**: the list is capped at `REVIEW_ROW_LIMIT` (500) while accept acts on all of it, so hashing
+- **Header** — `f"{scope}\x1f{collection_id}\x1f{collection.created_at.isoformat()}"`, and for
+  `baseline-new` only, a further `f"\x1fissues={n}"`.
+- **One record per file** —
+  `f"{id}\x1f{len(relpath.encode('utf-8'))}\x1f{relpath}\x1f{status}\x1f{sha256 or ''}"`.
+- **Order** — records sorted by `relpath`, which is unique within a collection
+  (the ORM's `uq_files_collection_relpath` unique constraint on `(collection_id, relpath)`), so the
+  order is total and deterministic.
+  Deliberately **not** sorted by `id`: `id` is the field this encoding distrusts.
+- **Preimage** — `header + RS + RS.join(records)`; the fingerprint is the hex SHA-256 of its UTF-8
+  encoding. (Every stored `relpath` round-trips through UTF-8 — `tolerate-unencodable-paths` skips
+  the ones that do not before a row is ever created — so the encode cannot raise.)
+
+The byte-length prefix on `relpath` is what makes the encoding injective: a filename may legally
+contain any byte but `/` and NUL, US and RS included, so without the length the record stream would
+be ambiguous and two different populations could be made to hash equal. Framing by length removes
+that by construction rather than by escaping.
+
+*Why each field is in the preimage.* The scope tag and `collection_id` stop a fingerprint minted for
+one form or one collection validating another. `status` rides beside the id because a file flipping
+`new → modified` between render and submit changes what accepting it *means* without changing the id
+set. **`relpath` and `sha256` are there because a SQLite integer id is not a durable identity.**
+`files.id` and `collections.id` are `INTEGER PRIMARY KEY` **without** `AUTOINCREMENT`, so after a
+delete SQLite may hand the freed rowid to the next insert: an accept deletes the highest-id `missing`
+row, a later scan inserts a different file that reuses that id, and a scan marks it `missing` again —
+and an id-and-status-only preimage is byte-identical for two populations that share no file. Adding
+`relpath` pins the *logical file* (the unique key within the collection) and `sha256` pins the
+*content generation* (a same-path file restamped with different bytes is a different record to
+accept). Both are already loaded wherever the guard runs: `collection_review` and `query_files` both
+select whole `FileEntry` entities, so the columns are on the ORM object and the fingerprint's own
+`SELECT` adds no join and no new column. A NULL `sha256` (an unhashed row) encodes as the empty
+string and simply contributes no content pinning — `id + relpath + status` still pin the logical
+file. The collection's own `created_at` (NOT NULL; `_get_owned_collection` already loads the whole
+row) does the same job one level up: a deleted-and-recreated collection that reuses `collection_id`
+gets a different creation timestamp, so an old fingerprint cannot validate against the replacement.
+
+The review page's fingerprint is computed **over the whole protected population in SQL, not over the
+rendered rows**: the list is capped at `REVIEW_ROW_LIMIT` (500) while accept acts on all of it, so hashing
 the visible rows would leave every issue past the cap outside the guard — the exact collections
 (a whole deleted folder) where the guard matters most.
 
@@ -503,9 +546,24 @@ already set on every connection) and commits strictly before or strictly after, 
 guard against the short one.
 
 The engine-wide alternative — `BEGIN IMMEDIATE` via a driver-level `begin` hook — is rejected: it
-would make every read-only page render take the write lock and queue behind a running scan. If the
-escalation itself fails because another writer committed since this session's read snapshot
-(SQLite's `SQLITE_BUSY_SNAPSHOT`), that *is* drift, and it is handled as a refusal, never as a 500.
+would make every read-only page render take the write lock and queue behind a running scan.
+
+*Taking the lock can fail, and a failure is a refusal.* Step 1 is where contention lands: the no-op
+`UPDATE` is the statement that acquires or upgrades the writer transaction, and it can raise
+`sqlalchemy.exc.OperationalError` wrapping SQLite's `SQLITE_BUSY_SNAPSHOT` (another writer committed
+since this session's read snapshot — that *is* drift), `SQLITE_BUSY` (the writer lock was still held
+when `busy_timeout=5000` expired — a long scan or another large accept) or `SQLITE_LOCKED`. All
+three are **handled exactly like a fingerprint mismatch**: `await session.rollback()`, no call to
+`accept_collection`, and the same fail-closed `303` to `/collection/{id}/review?stale=1`. Left
+uncaught they surface as an HTTP 500, which is the promise of a refusal broken in the one situation
+the guard exists for — and a 500 on a POST is exactly what invites the operator to retry the
+destructive action blind. The catch is **narrow by classification, not by breadth**: only
+`OperationalError` whose SQLite code is one of those three (matched on the driver exception's
+`sqlite_errorname` where present, falling back to the message text) is converted; every other
+`OperationalError` or `DatabaseError` propagates untouched, because a corrupt datastore or a schema
+error must not be reported to the operator as "the collection changed since the page loaded". The
+guard's own `SELECT`s run after the lock is held, so this is the only statement in the sequence that
+needs the treatment.
 
 *The refusal.* No mutation of any kind, and a **303 to `/collection/{id}/review?stale=1`** — the
 page that lists exactly the issues that caused the refusal, with the clearing controls in reach. The
@@ -522,4 +580,9 @@ appear between render and submit are still adopted by a review-page accept. That
 verb, unchanged. The fingerprint's job here is the **destructive** half: the `missing` rows accept
 deletes and the alerts it clears. Covering the `new` set as well would refuse an accept on any
 actively-growing collection (Photos scans every 15 minutes) for a promotion that deletes nothing —
-the wrong trade. Scoping the verb properly is #16.
+the wrong trade. Scoping the verb properly is #16. The spec delta is narrowed to match: what the
+review form's fingerprint SHALL cover is the collection's whole **protected** population — its
+untruncated `missing` + `modified` set — and the `new` set's exclusion is written there as an
+explicit accepted limitation rather than left as a contradiction of a broader "whole population"
+SHALL. (The detail page's baseline form is unaffected: its population *is* the `new` set, and it
+covers all of it plus the zero-issue assertion.)
