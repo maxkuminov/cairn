@@ -12,9 +12,30 @@
   case-insensitive stores; never a false defer on case-sensitive ones). On hit: exclude the member from
   the batch (stays `pending`, no staging entry, no calendar traffic), warn naming the blocking
   row, never fail the batch/operation.
-- [x] 1.2 No placement-time re-query: rely on (and test) the existing lease fence for the
-  guard-to-placement window — a reconciliation referencing a batch slot implies the stamp's
-  claim was reclaimed, and the fence refuses the whole batch's placements, members `pending`.
+- [x] 1.2 The guard-to-placement window is closed by LOCK DISCIPLINE, not by a point-in-time
+  read (implementation audit scope 1, B1/M1). `stamp_pending` (and therefore `run_stamp_backfill`,
+  whose critical section it is) takes the collection's proof-store flock ONCE and holds it
+  continuously across guard → adoption → staging → calendar submission → placement → every
+  post-guard state commit, releasing it in a `finally`. Claim reclamation probes that same lock
+  non-blocking FIRST — `collections.reclaim_stale_claim` and the scheduler's fleet reaper
+  (`reap_orphaned_runs`, which runs on every tick, so its context guarantees no exclusivity) both
+  refuse while it is held and hold it across their guarded UPDATE; a crashed holder's lock is
+  released by the OS and reclaims normally; a store that cannot lock degrades to the guarded
+  UPDATE alone with the existing one-warning-per-store. The lease fences REMAIN on every
+  post-guard state commit — the adoption pass's own commit included, even when no placement chunk
+  survives it (M1) — as the guard for crashed holders and degraded stores. Tests: a live batch
+  holding the lock with a stale heartbeat is not reclaimed (and the run row is untouched); a
+  crashed holder's stale claim reclaims normally; an adoption-only batch reclaimed before its
+  commit is refused by the fence with its members left `pending`.
+- [x] 1.2b Alias candidate keys use FULL UNICODE case folding (implementation audit scope 1, B2):
+  a `casefold` SQL function (Python `str.casefold`, `deterministic=True`) is registered on every
+  SQLite connection beside the pragmas in `src/database.py`, and `_slot_references` keys its
+  folded leg on `casefold(ots_path)` against `str.casefold()`ed wanted paths — SQLite's `lower()`
+  folds ASCII only, so a non-ASCII respelling (`Å.txt.ots` vs `å.txt.ots`) surfaced no candidate
+  at all. `same_directory_entry` remains the decider, so a case-sensitive store still never
+  defers a genuinely distinct slot. Tests: the non-ASCII respelling is surfaced by the candidate
+  key and defers when identity confirms the alias (and does not when identity says otherwise);
+  a fresh connection answers `SELECT casefold('Å')`.
 - [x] 1.3 Tests: a newcomer at a moved row's former path defers at every entry point (batched
   stamp, per-file fallback, backfill); ordering asserted with barriers/mocks — a deferred
   member triggers NO adoption attempt and NO calendar call, and the guard runs after lock +
@@ -44,7 +65,14 @@
   copy if not. Post-commit failures keep the committed pointer and warn (never roll back the
   row); pre-commit filesystem/precondition failures return a per-row outcome (nothing
   changed, warnable). No branch discards proof bytes; a permanent destination refusal is a
-  per-row outcome, never a drop-to-`none`.
+  per-row outcome, never a drop-to-`none`. **Never a silent success** (implementation audit
+  scope 2, B1/M4): a failed unlink or source-directory sync is no longer suppressed — the
+  destination is verified first, then the removal failure RAISES as the post-commit warning;
+  and a failed RESTORATION raises too, leaving exactly the restore leg's admission shape
+  (committed pointer naming an absent entry, corroborated copy durable in the archive), which
+  the next sweep repairs. `_sweep_relocate`'s post-commit warning READS the destination
+  instead of assuming it: "nothing was lost, the pointer is correct" is printed only when the
+  pointer actually resolves, and the absent case says so and names the restore leg.
 - [x] 2.3 Unit tests (`tests/test_proof_preservation.py` style): plain relocation; both-exist
   crash window completes via byte-identical adoption AND syncs the destination chain; a
   same-identity-but-different-bytes aliasing lie does not commit the pointer;
@@ -54,7 +82,10 @@
   overwriting; case-aliased source/destination updates spelling without removing anything;
   removal re-verification restores from the archive copy when the destination vanished;
   over-limit destination refused per-row; every failure leaves the source proof readable and
-  the row's pointer truthful.
+  the row's pointer truthful. Plus (scope 2): a failed restoration after the identity-lying
+  unlink warns and is repaired by the NEXT sweep through the restore leg; an unlinkable source
+  (EACCES) keeps the committed pointer, leaves both copies readable and is WARNED; and the
+  sweep-level aliased branch re-spells the pointer without calling the removal phase at all.
 
 ## 3. The healing sweep (`src/services/proofs.py` + scheduler/CLI reach)
 
@@ -92,6 +123,20 @@
   Wire both entry points: the scheduler's daily pass and `cairn upgrade`. Lease discipline:
   claim heartbeat, per-collection proof flock around each relocation, claim re-confirmed
   after lock acquisition, lock held across all phases.
+  **Per operation, not per row** (implementation audit scope 2, M2): `survey_pointer_work`
+  classifies `stale` and `absent` INDEPENDENTLY — they may overlap, and a row that is both is
+  restored and THEN relocated inside the same sweep, contributing one work item each. The old
+  disjoint ("absent only") classification restored such a row to its obsolete location, called
+  the run `ok`, and left the pointer non-canonical (still blocking a newcomer's stamp).
+  **Surveyed under the claim** (M3): the pre-claim survey is advisory only — it decides
+  whether to try for the slot; the authoritative work set and `total` come from a re-survey
+  taken immediately AFTER `claim_run`, and an empty one discards the provisional run row (a
+  guarded DELETE, so a reclamation's `interrupted` row stands) rather than recording an empty
+  upgrade run.
+  **Terminal numbers are what happened** (M1): `processed` is finalized from the shared
+  counter, never the admission total, and an `ok` pass that did not reach its total — the
+  sweep or the upgrade loop stopping early rather than waiting out a contended proof-store
+  lock — finalizes `partial` with the skip warned. No retry loop.
 - [x] 3.6 Tests: a pre-existing moved row (live-deployment shape) heals in one sweep with only
   `ots_path` changed; crash-window fixtures (both-exist → completes; pointer-committed +
   leftover source → leftover untouched and never re-selected); chain A→B + C→A converges over
@@ -101,7 +146,11 @@
   warned as ambiguous (never "misfiled"); a path swap (cycle) converges via the holding slot;
   the row-changed-beneath-the-sweep race hits the CAS zero-row path and commits nothing;
   sweep-only admission (no incompletes / tripwire) claims, runs, counts progress with the
-  MODIFIED totals; permanent-refusal row re-warns with all fields intact.
+  MODIFIED totals; permanent-refusal row re-warns with all fields intact. Plus (scope 2): an
+  absent-AND-stale row is restored then relocated in ONE sweep with `total`/`processed` = 2/2;
+  a sweep that could not take the proof-store lock finalizes `partial` (0 of 1) and the next
+  pass converges it `ok`; work completed by a rival between the pre-check and the claim leaves
+  NO run row at all.
 
 ## 4. Verification
 

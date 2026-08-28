@@ -2,7 +2,8 @@
 
 WAL mode + enforced foreign keys are set on every connection via a ``connect`` event listener
 (SQLite defaults ``foreign_keys`` OFF and pragmas are connection-scoped, so the listener is the
-only reliable place). The scanner is the single writer; WAL keeps panel reads concurrent.
+only reliable place), and the same listener registers the ``casefold`` SQL function (connection-
+scoped for the same reason). The scanner is the single writer; WAL keeps panel reads concurrent.
 """
 
 from __future__ import annotations
@@ -32,6 +33,27 @@ def _configure_sqlite(dbapi_conn, _record) -> None:
     cur.execute("PRAGMA busy_timeout=5000")
     cur.execute("PRAGMA synchronous=NORMAL")
     cur.close()
+    # Full Unicode case folding, as a SQL function, on every connection.
+    #
+    # SQLite's built-in ``lower()`` folds ASCII ONLY: `lower('Å')` is `'Å'`. The referenced-slot
+    # stamp guard (`src/services/proofs._slot_references`) uses a case-folded comparison to find
+    # rows whose recorded `ots_path` may be an ALIAS of a member's output path on a
+    # case-insensitive store, and an ASCII-only fold makes a non-ASCII respelling
+    # (`Å.txt.ots` vs `å.txt.ots`) surface no candidate at all — the guard then misses it and a
+    # stamp can displace another row's recorded proof (#39). ``str.casefold`` is the complete
+    # rule, so the candidate key is registered here, beside the pragmas, for the same reason:
+    # SQL functions are connection-scoped, and this listener is the only place every connection
+    # passes through.
+    #
+    # ``deterministic=True`` (the value only ever depends on the argument) lets SQLite use it in
+    # an index or a partial-index expression should one ever be added; it also lets the planner
+    # cache the call.
+    dbapi_conn.create_function("casefold", 1, _casefold, deterministic=True)
+
+
+def _casefold(value):
+    """``str.casefold`` for SQLite, NULL- and non-text-safe (a SQL function may see anything)."""
+    return value.casefold() if isinstance(value, str) else value
 
 
 def get_engine() -> AsyncEngine:

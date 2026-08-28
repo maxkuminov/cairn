@@ -86,7 +86,9 @@ def _unmute_cairn_loggers() -> None:
     afterwards would silently see nothing and pass or fail for the wrong reason. Call this INSIDE
     the test body (an autouse fixture can run before ``cairn_env`` and be undone by it).
     """
-    for name in ("cairn.ots", "cairn.proofs"):
+    # Every logger a proof-path assertion may need: the placement/relocation modules, plus the two
+    # that decide whether a claim may be reclaimed (the reclamation probe's refusal is logged there).
+    for name in ("cairn.ots", "cairn.proofs", "cairn.collections", "cairn.scheduler"):
         logger = logging.getLogger(name)
         logger.disabled = False
         logger.propagate = True

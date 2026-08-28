@@ -19,8 +19,10 @@ from sqlalchemy import case, func, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import get_settings
 from ..database import get_sessionmaker
 from ..models.db import Collection, FileEntry, Run, utcnow
+from . import ots
 
 log = logging.getLogger("cairn.collections")
 
@@ -196,6 +198,23 @@ async def reclaim_stale_claim(collection_id: int) -> bool:
     matches zero rows, and we report failure so the caller refuses. The claim is never taken from a
     process that is still working; the worst case is a delay of one abandonment interval.
 
+    **A heartbeat is not the only proof of life.** A stamping operation holds the collection's
+    proof-store lock across its whole guard-through-placement critical section (design D1), and
+    that section spans a calendar round-trip minutes long — during which a keepalive can fail on a
+    perfectly live process (a momentarily locked datastore) and let the claim look abandoned.
+    Reclaiming it there is not a bookkeeping tidy-up: it lets a replacement scan's move
+    reconciliation newly reference a slot the live batch is about to write, which is precisely the
+    proof displacement the guard exists to prevent. So the lock is **probed non-blocking first**
+    (:func:`ots.acquire_proof_lock_now`): held ⇒ the holder is alive inside a proof critical
+    section ⇒ refuse, touching nothing. Process death releases an ``flock``, so a crashed holder
+    still reclaims normally; a store whose filesystem cannot lock degrades to the guarded UPDATE
+    alone (the accepted degrade, warned once per store by the lock itself).
+
+    The probe does not merely peek: the lock is **held across the guarded UPDATE**, so a holder
+    cannot slip into its critical section in the gap between the two. (If one slips in immediately
+    after the release, its own post-lock lease fence sees the reclamation and stops it before it
+    mutates anything.)
+
     It runs in its **own session** so it cannot disturb the caller's: the panel routes and CLI
     commands that reach it through :func:`blocking_run` hold loaded ORM objects, and a rollback in
     their session would expire those objects into an async lazy refresh that raises. A datastore
@@ -210,16 +229,43 @@ async def reclaim_stale_claim(collection_id: int) -> bool:
             stale_id = await _stale_claim_id(session, collection_id, cutoff)
             if stale_id is None:
                 return False
-            result = await session.execute(
-                update(Run)
-                .where(
-                    Run.id == stale_id,
-                    Run.result == "running",
-                    abandoned_claim_clause(cutoff),
+            store_root = get_settings().proof_store_path
+            try:
+                lock = await asyncio.to_thread(
+                    ots.acquire_proof_lock_now, store_root, collection_id
                 )
-                .values(result="interrupted", finished=now)
-            )
-            await session.commit()
+            except ots.LockContended:
+                log.info(
+                    "collection %s: stale claim (run %s) holds the proof-store lock — it is alive "
+                    "inside a proof critical section, so it was NOT reclaimed",
+                    collection_id,
+                    stale_id,
+                )
+                return False
+            except ots.OtsError:
+                # The lock could not even be evaluated. Fail SAFE, exactly as the datastore branch
+                # below does: an unreclaimed claim delays an operation, while reclaiming one whose
+                # liveness we could not check risks a second proof writer.
+                log.warning(
+                    "collection %s: could not probe the proof-store lock — treating the claim as "
+                    "held",
+                    collection_id,
+                    exc_info=True,
+                )
+                return False
+            try:
+                result = await session.execute(
+                    update(Run)
+                    .where(
+                        Run.id == stale_id,
+                        Run.result == "running",
+                        abandoned_claim_clause(cutoff),
+                    )
+                    .values(result="interrupted", finished=now)
+                )
+                await session.commit()
+            finally:
+                lock.release()
     except SQLAlchemyError:
         # Fail SAFE, not open: an unreclaimed claim is the behaviour that shipped before, while a
         # raised exception here would turn a routine refusal into a broken scan/route.

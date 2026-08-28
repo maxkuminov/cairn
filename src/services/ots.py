@@ -115,6 +115,17 @@ class OtsError(Exception):
     """A genuine failure of the ``ots`` CLI (not a normal pending state)."""
 
 
+class LockContended(OtsError):
+    """The collection's proof-store lock is held by someone else right now.
+
+    A distinct class because two callers act on it in OPPOSITE directions and must not confuse it
+    with a real failure: a placer treats it as transient (wait for the next pass), while claim
+    reclamation treats it as PROOF OF LIFE — a held lock means the claim's holder is alive inside a
+    proof critical section, so the claim must not be reclaimed out from under it (design D1). Every
+    other lock failure stays a plain :class:`OtsError`.
+    """
+
+
 class OtsPathError(OtsError):
     """The FINAL proof output path cannot be written — a component Cairn creates below the proof
     store exceeds the filesystem's per-name byte limit (ENAMETOOLONG), or the destination is
@@ -708,7 +719,9 @@ class CollectionProofLock:
       by contract; if it is not, the placement about to happen would fail anyway);
     * ``flock`` says the filesystem cannot lock -> **degrade**: one WARNING per proof store, then
       proceed with the datastore fence alone (accepted limitation);
-    * the deadline passes with the lock still held elsewhere -> transient :class:`OtsError`;
+    * the deadline passes with the lock still held elsewhere -> :class:`LockContended` (an
+      :class:`OtsError`, so every existing handler still treats it as the transient refusal it is;
+      the subclass exists for the reclamation probe, which reads a held lock as proof of life);
     * any other errno -> transient :class:`OtsError`.
 
     Never a permanent (:class:`OtsPathError`) verdict: the lock is not the final output path, so it
@@ -758,7 +771,7 @@ class CollectionProofLock:
                 if exc.errno in _LOCK_CONTENDED:
                     if time.monotonic() >= deadline:
                         os.close(fd)
-                        raise OtsError(
+                        raise LockContended(
                             f"timed out after {self._timeout:g}s waiting for the proof placement "
                             f"lock {str(self.path)!r}; another placer holds it"
                         ) from exc
@@ -801,6 +814,31 @@ class CollectionProofLock:
 
     def __exit__(self, *_exc: object) -> None:
         self.release()
+
+
+def acquire_proof_lock_now(
+    store_root: str | os.PathLike[str], collection_id: str | int
+) -> CollectionProofLock:
+    """Take a collection's proof lock WITHOUT waiting, or raise :class:`LockContended` (design D1).
+
+    The reclamation probe. A stamping operation holds this lock across its whole
+    guard-through-placement critical section, so "the lock is held" is the one signal that
+    distinguishes a claim holder that is ALIVE inside that section from one that died: process
+    death releases an ``flock``, a failing DB keepalive does not. Claim reclamation therefore
+    probes here first and refuses while the lock is held — the lock, not the heartbeat, is what
+    proves the batch between its guard and its placement is still running.
+
+    Non-blocking by construction (``timeout=0``): a reclaimer must never queue behind a live
+    holder — it is answering a question, not taking a turn. A store whose filesystem cannot lock
+    degrades exactly as the placement path does (one WARNING per store, ``degraded`` set, no lock
+    held), so reclamation there falls back to the guarded UPDATE alone.
+
+    The caller must release the returned lock in a ``finally``: the reclaiming UPDATE runs while it
+    is held, so a holder cannot slip into its critical section between the probe and the write.
+    """
+    lock = CollectionProofLock(store_root, collection_id, timeout=0.0)
+    lock.acquire()
+    return lock
 
 
 def _path_occupied(path: Path) -> bool:
@@ -1197,8 +1235,12 @@ def publish_relocation(
     Phase 3 — **publication**, atomic and non-replacing: a hard link where the filesystem supports
     one, else a link-free exclusive create plus a full copy, then the directory-sync chain to the
     store root. A destination that appears between classification and publication (``EEXIST``)
-    restarts phase 2 instead of overwriting — that restart re-consults ``referenced``, so a slot
-    that became another row's proof in the meantime defers rather than being taken.
+    restarts phase 2 instead of overwriting, re-asking ``referenced`` and re-inspecting the
+    occupant. What the restart re-reads is the FILESYSTEM; ``referenced`` may legitimately be a
+    frozen snapshot (the sweep passes one) because the caller holds the collection's operation
+    claim AND its proof-store lock for the whole relocation, so no other Cairn writer can create a
+    pointer at the destination while it is in flight — the answer cannot go stale under it. What
+    can change under it is the directory entry, and that is exactly what the restart re-classifies.
 
     Raises :class:`OtsPathError` for a permanently refused destination name and :class:`OtsError`
     for every other failure; both leave the source proof readable and the caller's pointer truthful.
@@ -1331,6 +1373,13 @@ def finish_relocation(
     caller to warn about: a post-commit problem must never roll a row back to a pointer the proof
     may be about to leave. A source that survives is harmless — it sits in an unreferenced slot, and
     a future stamp there archives it under the never-destroy rules.
+
+    **Nothing here is a silent success.** A failed unlink or source-directory sync is not suppressed
+    into a clean return: the destination is verified first (so the caller learns the pointer is
+    still truthful) and then the removal failure is raised as the post-commit warning. A failed
+    RESTORATION likewise raises — and the state it leaves is deliberately the restore leg's
+    admission shape (a committed pointer naming an absent entry, with the corroborated copy durable
+    in the archive), so the next sweep republishes it at the recorded path.
     """
     src = Path(src)
     dst = Path(dst)
@@ -1350,19 +1399,41 @@ def finish_relocation(
             f"archived first ({exc})"
         ) from exc
 
-    # The bytes now exist in three places. Only here may one of them go away.
-    with contextlib.suppress(OSError):
+    # The bytes now exist in three places. Only here may one of them go away — and a removal that
+    # does not happen is REPORTED, not suppressed: the caller's per-row warning is the only thing
+    # that tells an operator a redundant copy is still sitting in an unreferenced slot. It is
+    # remembered rather than raised on the spot, because the destination must be verified first:
+    # what the operator needs to hear about a post-commit failure depends on whether the pointer
+    # they now hold still resolves.
+    removal_error: OSError | None = None
+    try:
         os.unlink(src)
-        _sync_dir_chain(src.parent, ctx.sync_root, store_key=ctx.store_key)
+    except FileNotFoundError:
+        pass  # the source is already gone — the goal of this step, not a failure of it
+    except OSError as exc:
+        removal_error = exc
+    if removal_error is None:
+        try:
+            _sync_dir_chain(src.parent, ctx.sync_root, store_key=ctx.store_key)
+        except OSError as exc:
+            removal_error = exc
 
     if _path_occupied(dst):
         try:
-            if dst.read_bytes() == archived.read_bytes():
-                return
+            same = dst.read_bytes() == archived.read_bytes()
         except OSError as exc:  # pragma: no cover - defensive
             raise OtsError(
                 f"cannot re-verify the relocated proof at {str(dst)!r}: {exc}"
             ) from exc
+        if same:
+            if removal_error is not None:
+                raise OtsError(
+                    f"the relocated proof is at {str(dst)!r} exactly as recorded, but its old copy "
+                    f"at {str(src)!r} could not be removed ({removal_error}); nothing was lost — "
+                    f"the leftover sits in an unreferenced slot and a future stamp there preserves "
+                    f"it rather than overwriting it"
+                )
+            return
         # Something else is at the destination the pointer already names. Nothing is removed and
         # nothing is overwritten: two proofs survive and the operator is told.
         raise OtsError(
@@ -1383,8 +1454,14 @@ def finish_relocation(
         _copy_no_replace(archived.read_bytes(), dst)
         _sync_dir_chain(dst.parent, ctx.sync_root, store_key=ctx.store_key)
     except OSError as exc:
+        # Loud, never silent: the pointer the caller committed now names an absent entry, and only
+        # this exception makes the sweep say so. The state left behind is the restore leg's own
+        # admission shape — recorded path absent, corroborated copy durable in the archive — so the
+        # next sweep republishes the proof there rather than the loss waiting for someone to verify.
         raise OtsError(
-            f"could not restore the relocated proof at {str(dst)!r} from {str(archived)!r}: {exc}"
+            f"could not restore the relocated proof at {str(dst)!r} from {str(archived)!r} "
+            f"({exc}); the recorded pointer names an entry that is now ABSENT, and the corroborated "
+            f"copy at {str(archived)!r} is what the next sweep's restore leg republishes there"
         ) from exc
 
 

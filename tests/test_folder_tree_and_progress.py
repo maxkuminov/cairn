@@ -402,9 +402,11 @@ def test_a_concurrent_heartbeat_beats_the_reaping_update(cairn_env, monkeypatch)
             if stale:
                 # The "dead" holder was not dead: it reports progress before we can reap it.
                 async with get_sessionmaker()() as other:
+                    # `_stale_run_ids` answers `(run id, collection id)` pairs — the collection id
+                    # rides along for the reaper's per-collection proof-lock probe.
                     await other.execute(
                         sql_update(Run)
-                        .where(Run.id.in_(stale))
+                        .where(Run.id.in_([run_id for run_id, _cid in stale]))
                         .values(heartbeat_at=_utcnow())
                     )
                     await other.commit()

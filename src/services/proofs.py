@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from sqlalchemy import exists, func, literal, or_, select, update
+from sqlalchemy import delete, exists, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import Settings, get_settings
@@ -75,10 +75,13 @@ async def _slot_references(
       and only the filesystem can say which. :func:`_blocking_reference` confirms these by on-disk
       identity before they defer anything.
 
-    The case leg's SQL folds ASCII case (SQLite's ``lower()``), which is what a case-insensitive
-    store's own folding covers for every path Cairn writes in practice; the Python confirmation
-    below is strictly narrower, never wider, so the pair can only ever under-defer, never
-    over-displace.
+    The case leg folds through ``casefold`` — the SQL function registered on every connection in
+    :func:`src.database._configure_sqlite`, which is Python's ``str.casefold`` — on BOTH sides, so
+    the two keys are computed by one rule. SQLite's built-in ``lower()`` cannot be used here: it
+    folds ASCII only, so a recorded ``Å.txt.ots`` and a member's ``å.txt.ots`` produced no
+    candidate at all and the guard missed the alias entirely on a case-insensitive store. Full
+    Unicode folding only widens CANDIDATE selection; :func:`ots.same_directory_entry` remains the
+    decider, so a case-sensitive store still never defers a genuinely distinct slot.
     """
     wanted = sorted({str(p) for p in paths})
     if not wanted:
@@ -89,14 +92,14 @@ async def _slot_references(
     # as large as the operator likes.
     for start in range(0, len(wanted), _SLOT_QUERY_CHUNK):
         group = wanted[start : start + _SLOT_QUERY_CHUNK]
-        lowered = sorted({p.lower() for p in group})
+        folded = sorted({p.casefold() for p in group})
         rows = await session.execute(
             select(FileEntry.id, FileEntry.relpath, FileEntry.ots_path).where(
                 FileEntry.collection_id == collection_id,
                 FileEntry.ots_path.is_not(None),
                 or_(
                     FileEntry.ots_path.in_(group),
-                    func.lower(FileEntry.ots_path).in_(lowered),
+                    func.casefold(FileEntry.ots_path).in_(folded),
                 ),
             )
         )
@@ -115,13 +118,16 @@ def _blocking_reference(
     canonical path is uninteresting, and that is what ``own_id`` skips.
     """
     out_s = str(out)
-    out_lower = out_s.lower()
+    # The same full-Unicode fold the candidate query used (`str.casefold`, registered as the
+    # `casefold` SQL function): the two keys must be computed by ONE rule, or a candidate the SQL
+    # surfaced could be silently dropped here.
+    out_folded = out_s.casefold()
     for rid, relpath, recorded in candidates:
         if rid == own_id:
             continue
         if recorded == out_s:
             return rid, relpath, recorded
-        if recorded.lower() == out_lower and ots.same_directory_entry(recorded, out_s):
+        if recorded.casefold() == out_folded and ots.same_directory_entry(recorded, out_s):
             return rid, relpath, recorded
     return None
 
@@ -426,20 +432,33 @@ async def stamp_pending(
     comparison) and nothing is committed after it fires.
 
     A fence read alone is still check-then-act, though: a reclamation landing in the gap between
-    "the lease is held" and the batch's ``os.replace`` puts two placers on one canonical path. So
-    each batch's placement ALSO runs inside the collection's proof-store lock
-    (:class:`ots.CollectionProofLock`, ``<proof_store>/<collection_id>/.lock``) and the lease is
-    re-read **after** the lock is taken: whichever placer wins the lock does its inspect → preserve
-    → place → record turn alone, and the one whose claim was reclaimed finds it gone on the
-    re-read and raises before touching anything (design D10). The lock is taken per BATCH, never
-    across the whole pass, so a stale holder can delay a live one by one calendar round-trip at
-    most rather than by hours.
+    "the lease is held" and the batch's ``os.replace`` puts two placers on one canonical path — and
+    worse, a reclamation landing between the GUARD and the placement lets a replacement scan's move
+    reconciliation newly reference a slot this batch is about to write, which is exactly the loss
+    the guard exists to prevent (the calendar round-trip is minutes long, and a keepalive can fail
+    on a perfectly live process). **So the window is closed by lock discipline, not by a
+    point-in-time read** (design D1): this pass takes the collection's proof-store lock
+    (:class:`ots.CollectionProofLock`, ``<proof_store>/<collection_id>/.lock``) ONCE and holds it
+    continuously across its whole critical section — the guard, the adoption pass, staging,
+    calendar submission, placement, and every post-guard state commit — releasing it only when the
+    pass ends. :func:`collections.reclaim_stale_claim` (and the scheduler's reaper) probe that same
+    lock non-blocking BEFORE reclaiming, and refuse while it is held: a held lock means the claim's
+    holder is alive inside a proof critical section. A move reconciliation that would newly
+    reference one of this pass's output slots can only commit under a replacement claim, and the
+    probe rule makes that claim unobtainable while this pass runs.
 
-    That same fence is what closes the window between the guard and placement, and no re-query
-    substitutes for it: a move reconciliation that would newly reference one of this batch's output
-    slots can only commit under the collection's operation claim — the claim this pass holds — so
-    such a reconciliation implies this pass's claim was reclaimed, and the fence then refuses the
-    batch's placements entirely with its members left ``pending``.
+    The lease fences remain, and every post-guard state commit is fenced — the adoption pass's own
+    commit included, even when no placement chunk survives it. They are the guard for the two cases
+    lock discipline cannot cover: a holder that CRASHED (the operating system releases its
+    ``flock``, so its claim is reclaimed normally) and a proof store whose filesystem cannot lock at
+    all (:class:`ots.CollectionProofLock` degrades there, and reclamation degrades with it). No
+    re-query of the slots themselves substitutes for either mechanism.
+
+    Holding the lock for the pass rather than per batch is deliberate: the guard's answer must stay
+    true until the proof it authorises is on disk, and a per-batch hold reopens the window at every
+    batch boundary. The cost is that a second placer waits out the pass instead of one round-trip —
+    but the only legitimate second placer is an operation holding this collection's claim, which
+    this pass holds.
     """
     settings = settings or get_settings()
     # Read the identity up front, as a plain local: the fence below rolls the session back, which
@@ -483,11 +502,13 @@ async def stamp_pending(
     batches = (len(work) + batch_size - 1) // batch_size
 
     async def _fence(batch_no: int, stage: str) -> None:
-        """Stop the pass unless ``run_id`` still holds the collection's claim (design D10).
+        """Stop the pass unless ``run_id`` still holds the collection's claim (design D10/D1).
 
-        Called twice per batch: once before the lock is taken (cheap, so a reclaimed pass does not
-        queue for a resource it may not touch) and once after (authoritative — the reclamation may
-        have landed while this pass waited for the lock).
+        Called at three points: before the proof-store lock is taken (cheap, so a reclaimed pass
+        does not queue for a resource it may not touch), immediately after it is taken (the
+        reclamation may have landed while this pass waited), and once per batch **before that
+        batch's state commit** — placement and adoption-only alike, since an adoption commit
+        records a proof under a claim exactly as a placement does.
         """
         if run_id is None or await collections.lease_held(run_id):
             return
@@ -512,34 +533,40 @@ async def stamp_pending(
             f"mid-stamp"
         )
 
-    for start in range(0, len(work), batch_size):
-        chunk = work[start : start + batch_size]
-        batch_no = start // batch_size + 1
-        # The fence, immediately before this chunk mutates the proof store (design D10). A caller
-        # that named its claim gets it checked; one that did not (a direct test call) is unchanged.
-        await _fence(batch_no, "before")
-        # …and the fence AT the resource. The read above is check-then-act on its own: a
-        # reclamation landing between it and the `os.replace` below would put this pass and the
-        # replacement claimant on one canonical path at once. The collection's proof lock makes
-        # the two take turns, and the re-read inside it makes the loser abort (design D10).
-        lock = ots.CollectionProofLock(store_root, collection_id)
-        try:
-            await asyncio.to_thread(lock.acquire)
-        except ots.OtsError as exc:
-            # Someone else holds the lock (or it cannot be taken at all). Transient by
-            # construction: nothing was placed and every remaining file stays `pending`. Stop the
-            # pass rather than re-queueing for every later batch — whatever holds the resource will
-            # still hold it, so retrying would burn one timeout per batch to make no progress.
-            log.warning(
-                "collection %s: stopping the stamp pass at batch %d of %d — %s",
-                collection_id,
-                batch_no,
-                batches,
-                exc,
-            )
-            break
-        try:
-            await _fence(batch_no, "after taking the proof-store lock for")
+    if not work:
+        return 0
+
+    # The fence, before this pass queues for a resource it may not be allowed to touch (design
+    # D10). A caller that named its claim gets it checked; one that did not (a direct test call) is
+    # unchanged.
+    await _fence(1, "before taking the proof-store lock for")
+    # …and then the lock, ONCE, for the whole critical section (design D1). Everything from the
+    # first guard decision to the last state commit happens under it, so no reclamation can land
+    # between the guard and the placement it authorised: reclamation probes this lock first and
+    # refuses while it is held. `flock` lives on the open file description, so holding it across
+    # `await`s (including the `asyncio.to_thread`-ed `ots` subprocess calls) is exactly right — the
+    # hold belongs to the process, not to the thread that took it.
+    lock = ots.CollectionProofLock(store_root, collection_id)
+    try:
+        await asyncio.to_thread(lock.acquire)
+    except ots.OtsError as exc:
+        # Someone else holds the lock (or it cannot be taken at all). Transient by construction:
+        # nothing was placed, nothing was dropped to `none`, and every file stays `pending` for the
+        # next pass.
+        log.warning(
+            "collection %s: the stamp pass placed nothing (%d file(s) still queued) — %s",
+            collection_id,
+            len(work),
+            exc,
+        )
+        return 0
+    try:
+        # The claim, re-confirmed AFTER the lock: the reclamation may have landed while this pass
+        # waited for it, and every decision below is made on the strength of this read.
+        await _fence(1, "after taking the proof-store lock for")
+        for start in range(0, len(work), batch_size):
+            chunk = work[start : start + batch_size]
+            batch_no = start // batch_size + 1
             # THE FIRST canonical-slot decision, under the lock and after the claim was
             # re-confirmed: nothing may be stamped into a slot another row records as its proof
             # (design D1). Deferred members leave the batch here — before adoption, before staging,
@@ -552,14 +579,14 @@ async def stamp_pending(
             # a slot the guard has already ruled out.
             chunk, chunk_verdicts, adopted_now = await _adoption_pass(chunk, settings)
             stamped += adopted_now
+            # The state-commit fence, before ANY of this batch's state reaches the datastore —
+            # whether that state comes from a placement or from adoption alone. An adoption-only
+            # batch records a proof on a row exactly as a placement does, so skipping the fence
+            # when no placement chunk survives would let a reclaimed claim commit it. The lock
+            # above already excludes a live rival; this is the guard for a crashed holder (whose
+            # `flock` the OS released) and for a store whose filesystem cannot lock.
+            await _fence(batch_no, "at the state-commit fence of")
             if chunk:
-                # The placement fence. The guard's answer is only as good as the claim it was read
-                # under: a move reconciliation that would newly reference one of this batch's
-                # output slots can only be committed by an operation holding this collection's
-                # claim, so it implies this pass's claim was reclaimed. Re-reading the claim here
-                # refuses the WHOLE batch on that — no re-query of the slots themselves, which the
-                # design forbids as a substitute for exactly this check.
-                await _fence(batch_no, "at the placement fence of")
                 stamped, skipped, deferred = await _stamp_one_batch(
                     chunk,
                     chunk_verdicts,
@@ -572,37 +599,41 @@ async def stamp_pending(
                     skipped=skipped,
                     deferred=deferred,
                 )
-        finally:
-            # Releasing is a non-blocking syscall on a descriptor the process owns, so it needs no
-            # worker thread — and the lock lives on the file description, not on the thread that
-            # took it, so releasing here is the same lock the worker thread acquired.
-            lock.release()
-        if progress is not None:
-            # Persist progress per batch (the callback commits) so the badge advances live.
-            await progress(stamped)
+            if progress is not None:
+                # Persist progress per batch (the callback commits) so the badge advances live.
+                # Inside the lock: it is a post-guard state commit like any other.
+                await progress(stamped)
 
-    if skipped:
-        log.warning(
-            "collection %s: skipped %d file(s) with an unwritable proof path (set ots_state=none)",
-            collection_id,
-            skipped,
-        )
-    if deferred:
-        log.warning(
-            "collection %s: deferred %d proof placement(s) — the existing proof's anchor could not "
-            "be checked, so both proofs were kept and the files stay pending for the next pass",
-            collection_id,
-            deferred,
-        )
-    if blocked:
-        log.warning(
-            "collection %s: deferred %d stamp(s) whose proof slot is still recorded by another "
-            "file row (design D1) — those files stay queued and nothing was displaced; run "
-            "`cairn upgrade` to relocate the blocking proofs to their files' current paths",
-            collection_id,
-            blocked,
-        )
-    await session.commit()
+        if skipped:
+            log.warning(
+                "collection %s: skipped %d file(s) with an unwritable proof path (set "
+                "ots_state=none)",
+                collection_id,
+                skipped,
+            )
+        if deferred:
+            log.warning(
+                "collection %s: deferred %d proof placement(s) — the existing proof's anchor could "
+                "not be checked, so both proofs were kept and the files stay pending for the next "
+                "pass",
+                collection_id,
+                deferred,
+            )
+        if blocked:
+            log.warning(
+                "collection %s: deferred %d stamp(s) whose proof slot is still recorded by another "
+                "file row (design D1) — those files stay queued and nothing was displaced; run "
+                "`cairn upgrade` to relocate the blocking proofs to their files' current paths",
+                collection_id,
+                blocked,
+            )
+        await session.commit()
+    finally:
+        # Releasing is a non-blocking syscall on a descriptor the process owns, so it needs no
+        # worker thread — and the lock lives on the file description, not on the thread that took
+        # it, so releasing here is the same lock the worker thread acquired. In a `finally` so a
+        # `LeaseLost` (or any other exception) can never leave the collection's proof lock held.
+        lock.release()
     return stamped
 
 
@@ -639,6 +670,13 @@ async def run_stamp_backfill(
     propagate: it is recorded as ``result='error'`` on the run. Returns the finalized run (a refused
     one comes back still ``running``, the one state a finished backfill can never be in).
     ``kind='stamp'`` runs never count toward scan freshness.
+
+    Its guard-through-placement critical section is :func:`stamp_pending`'s, and the proof-store
+    lock that closes the guard-to-placement window is held there, continuously, across the whole
+    stamping body (design D1). Everything this function does outside that call — claiming the slot,
+    queueing the baseline, recording ``total``, finalizing the run — happens BEFORE the first
+    canonical-slot decision or AFTER the last one and mutates no proof, so it needs no hold of its
+    own (and must not take one: the lock is not reentrant within a process).
     """
     settings = settings or get_settings()
     # Read the identity BEFORE the claim: a lost claim rolls back, which expires the ORM object,
@@ -804,10 +842,16 @@ class PointerWork:
     ``stale`` — the recorded ``ots_path`` is not the canonical location for the row's current
     relpath. ``absent`` — the recorded ``ots_path`` names nothing on disk (design D4b).
 
-    The two are DISJOINT by construction, and that is deliberate accounting rather than tidiness: a
-    row whose recorded entry is absent receives exactly one operation this pass (the restore), so
-    counting it once in each list would give the run a ``total`` its ``processed`` could never
-    reach. Such a row is surveyed as ``absent``; if it is also stale, the next sweep relocates it.
+    The two are classified INDEPENDENTLY and may overlap, because they name OPERATIONS, not rows. A
+    row that is both — the shape a moved file whose old proof entry went missing leaves — receives
+    two operations in one sweep: the restore that puts the proof back at the recorded path, then
+    the relocation that carries it to the canonical one. ``items`` counts one per operation, which
+    is exactly what the run's ``total`` means, and ``processed`` advances once per completed
+    operation, so the two still meet.
+
+    Classifying them disjointly ("absent only") was the bug: such a row was restored to its
+    OBSOLETE location, the run ended ``ok``, and the pointer stayed non-canonical — still blocking
+    a newcomer's stamp at that slot — until some later pass happened to pick it up.
     """
 
     stale: tuple[int, ...] = ()
@@ -845,10 +889,13 @@ async def survey_pointer_work(
 ) -> PointerWork:
     """Survey the sweep's work for one collection: stale pointers + absent recorded entries.
 
-    Called BEFORE the operation claims its run, because the existence of either shape is an
-    independent admission reason: a collection with no incomplete proofs — a tripwire collection
-    carrying historical proofs included — still claims, sweeps, and counts this work in its run's
-    ``total``.
+    The existence of either shape is an independent admission reason: a collection with no
+    incomplete proofs — a tripwire collection carrying historical proofs included — still claims,
+    sweeps, and counts this work in its run's ``total``. It is called twice by
+    :func:`upgrade_collection`: once as a cheap advisory pre-check (so a collection with nothing to
+    do never claims a slot or writes a run row), and again UNDER the claim, where its answer is the
+    authoritative work set and the run's ``total``. Only the second answer may be believed: between
+    the two, a rival pass holding the slot can finish the very work this one surveyed.
 
     Staleness is decided by :func:`proof_path` and nothing else (design D6). SQL computes the same
     comparison as a pre-filter, but only the helper's verdict admits a row, so the two can never
@@ -878,12 +925,12 @@ async def survey_pointer_work(
     absent = await asyncio.to_thread(
         _absent_recorded_entries, [(rid, recorded) for rid, _rel, recorded, _flag in rows]
     )
+    # Independent of `absent`: a row can be both, and then it is two operations, not one (the
+    # restore first, the relocation after it — see :class:`PointerWork`).
     stale = [
         rid
         for rid, relpath, recorded, sql_stale in rows
-        if sql_stale
-        and rid not in absent
-        and Path(recorded) != proof_path(settings, collection_id, relpath)
+        if sql_stale and Path(recorded) != proof_path(settings, collection_id, relpath)
     ]
     return PointerWork(stale=tuple(stale), absent=tuple(sorted(absent)))
 
@@ -1126,19 +1173,36 @@ async def _sweep_relocate(
             collection_id=ctx.collection_id,
         )
     except ots.OtsError as exc:
-        # Post-commit. The committed pointer is truthful and is NOT rolled back to a location the
-        # proof may be about to leave; a surviving source copy sits in an unreferenced slot, which a
-        # future stamp there archives under the never-destroy rules.
-        log.warning(
-            "collection %s: %s's proof is now recorded at %s, but its old copy at %s could not be "
-            "cleared away (%s). Nothing was lost — the pointer is correct and the leftover copy is "
-            "preserved rather than overwritten",
-            ctx.collection_id,
-            entry.relpath,
-            dst,
-            src,
-            exc,
-        )
+        # Post-commit. The committed pointer is NOT rolled back to a location the proof may be
+        # about to leave. What the operator needs to hear depends on what is actually at the
+        # destination now, so it is read rather than assumed: telling them "nothing was lost, the
+        # pointer is correct" when the pointer resolves to nothing is the false reassurance this
+        # product exists to not give.
+        if await asyncio.to_thread(os.path.lexists, str(dst)):
+            log.warning(
+                "collection %s: %s's proof is now recorded at %s, but its old copy at %s could not "
+                "be cleared away (%s). Nothing was lost — the pointer is correct and the leftover "
+                "copy is preserved rather than overwritten",
+                ctx.collection_id,
+                entry.relpath,
+                dst,
+                src,
+                exc,
+            )
+        else:
+            log.warning(
+                "collection %s: %s's proof is now recorded at %s, but that entry is ABSENT — the "
+                "loss-proof removal took it and the immediate restoration could not run (%s). "
+                "Nothing was discarded: the corroborated copy is in the store's .superseded/%s/ "
+                "archive, and the next sweep admits this row through its restore leg and "
+                "republishes the proof at that path",
+                ctx.collection_id,
+                entry.relpath,
+                dst,
+                exc,
+                ctx.collection_id,
+            )
+        return "parked" if parking else "relocated"
 
     log.info(
         "collection %s: relocated %s's proof %s -> %s",
@@ -1298,7 +1362,10 @@ async def heal_pointers(
     """Relocate this collection's stored proofs to their files' current canonical locations.
 
     The restore leg runs first (a pointer naming nothing is repaired before anything is moved), then
-    the stale set is worked until it converges. Deferrals are re-tried within the pass as earlier
+    the stale set is worked until it converges — so a row that is BOTH (its recorded entry absent
+    AND that entry no longer canonical) is restored and then relocated within this one sweep, each
+    operation counted as its own work item, instead of being restored to a location it is only
+    going to leave. Deferrals are re-tried within the pass as earlier
     relocations vacate slots, so a chain (A→B and C→A in one scan) converges in one sweep. A CYCLE —
     two files whose paths were swapped, each row's destination being the other's recorded proof —
     cannot converge by deferral at all: when a full pass makes no progress and reference-deferred
@@ -1531,8 +1598,59 @@ class UpgradePass:
     upgraded: int = 0
     still_incomplete: int = 0
     refused: bool = False  # the collection's single-operation slot was already held
-    idle: bool = False  # no work of any kind (nothing incomplete, no pointers to heal); no run
+    # No work of any kind (nothing incomplete, no pointers to heal, no absent recorded entries), so
+    # no run row survives -- whether that was true at the pre-check or became true under the claim.
+    idle: bool = False
     sweep: SweepOutcome = field(default_factory=SweepOutcome)  # what the healing sweep did
+
+
+async def _count_incomplete(session: AsyncSession, collection_id: int) -> int:
+    """How many of this collection's proofs are still waiting for a Bitcoin attestation."""
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(FileEntry)
+            .where(FileEntry.collection_id == collection_id, FileEntry.ots_state == "incomplete")
+        )
+        or 0
+    )
+
+
+async def _upgrade_work_exists(
+    session: AsyncSession, collection_id: int, settings: Settings | None
+) -> bool:
+    """Whether any of the upgrade pass's three admission reasons holds right now (advisory)."""
+    if await _count_incomplete(session, collection_id):
+        return True
+    return bool((await survey_pointer_work(session, collection_id, settings)).items)
+
+
+async def _discard_unstarted_run(
+    session: AsyncSession, run: Run, collection_id: int
+) -> None:
+    """Delete a claim row whose work vanished before it began — guarded, so a reclaim is respected.
+
+    The DELETE re-asserts ``result='running'``: if the claim was reclaimed between the commit and
+    this call, the reclamation's ``interrupted`` row is the true record of what happened and must
+    stand. The ORM object is expunged either way, so nothing in this session can flush it back.
+    """
+    run_id = run.id
+    result = await session.execute(delete(Run).where(Run.id == run_id, Run.result == "running"))
+    await session.commit()
+    session.expunge(run)
+    if not result.rowcount:
+        log.warning(
+            "collection %s: the upgrade claim (run %s) had no work left to do and was RECLAIMED "
+            "before it could be discarded — leaving the terminal state the reclamation wrote",
+            collection_id,
+            run_id,
+        )
+        return
+    log.debug(
+        "collection %s: the upgrade's work was completed by another pass between the pre-check and "
+        "the claim; the empty run row was discarded",
+        collection_id,
+    )
 
 
 async def upgrade_collection(
@@ -1555,6 +1673,18 @@ async def upgrade_collection(
     healing sweep runs BEFORE the proof upgrades so a relocated proof is upgraded at its new
     canonical location in the same pass. ``kind='upgrade'`` runs never feed scan freshness, so this
     can never refresh the dead-man's switch.
+
+    **The work set is surveyed under the claim, not before it.** The pre-claim look is advisory —
+    it only decides whether to try for the slot at all — because the pass that currently holds the
+    slot may complete the surveyed work before this one claims it: a run created on the older
+    answer would state a ``total`` for work that no longer exists (and, at the limit, record an
+    empty run in violation of "no work -> no run"). The authoritative survey happens immediately
+    after the claim; if it comes back empty the provisional claim row is discarded.
+
+    **The run's terminal numbers are what actually happened.** ``processed`` is the shared counter
+    both halves advance, never the admission total, and an ``ok`` pass that did not reach its total
+    (the sweep or the upgrade loop stopped early rather than wait out a proof-store lock someone
+    else holds) finalizes ``partial`` — the run-health vocabulary for "completed, work skipped".
     """
     settings = settings or get_settings()
     # Identity read up front: a lost claim rolls back and expires the ORM object, and a lazy
@@ -1566,19 +1696,11 @@ async def upgrade_collection(
     if await collections.blocking_run(session, collection_id) is not None:
         result.refused = True
         return result
-    incomplete = int(
-        await session.scalar(
-            select(func.count())
-            .select_from(FileEntry)
-            .where(FileEntry.collection_id == collection_id, FileEntry.ots_state == "incomplete")
-        )
-        or 0
-    )
-    # Surveyed BEFORE the claim, because either shape admits the collection on its own and the run's
-    # `total` must be known when the run is created. The sweep re-reads every row it acts on under
-    # the claim, and its fenced compare-and-set refuses anything that moved in between.
-    pointer_work = await survey_pointer_work(session, collection_id, settings)
-    if not incomplete and not pointer_work.items:
+    # An ADVISORY pre-check only, exactly like `blocking_run` above: it exists so a collection with
+    # nothing to do never claims a slot or writes a run row. Its numbers are NOT used — a rival
+    # pass holding the slot can complete this very work between here and the claim below, and a run
+    # created on the strength of a pre-claim survey states a `total` for work that no longer exists.
+    if not await _upgrade_work_exists(session, collection_id, settings):
         result.idle = True
         return result
 
@@ -1587,7 +1709,6 @@ async def upgrade_collection(
         kind="upgrade",
         started=_utcnow(),
         result="running",
-        total=incomplete + pointer_work.items,
     )
     # The `blocking_run` pre-check above is only advisory; this commit (guarded by the partial unique
     # index) is the race-free claim.
@@ -1597,6 +1718,25 @@ async def upgrade_collection(
     result.run = run
 
     run_id = run.id
+    # THE AUTHORITATIVE SURVEY, taken under the claim. Nothing else may hold the collection's slot
+    # now, so this answer cannot be completed out from under the run: it is both the work set the
+    # pass will execute and the `total` it will be measured against. (`total` is briefly NULL —
+    # indeterminate progress on the badge — between the claim and the commit below, exactly as the
+    # stamp backfill's is.)
+    incomplete = await _count_incomplete(session, collection_id)
+    pointer_work = await survey_pointer_work(session, collection_id, settings)
+    total_items = incomplete + pointer_work.items
+    if not total_items:
+        # The work was completed by whoever held the slot between the pre-check and this claim.
+        # There is nothing to record, and "no work of any kind -> no run" is a rule about what the
+        # pass FOUND, not about when it looked: the provisional claim row is discarded so the daily
+        # pass does not leave an empty run behind it.
+        await _discard_unstarted_run(session, run, collection_id)
+        result.run = None
+        result.idle = True
+        return result
+    run.total = total_items
+    await session.commit()
     run_result = "ok"
     upgraded_count = 0
     # Tracked as plain locals: a fence hit rolls the session back, expiring `run`, so the finalizing
@@ -1652,12 +1792,30 @@ async def upgrade_collection(
             log.exception("upgrade failed for collection %s (%s)", collection_id, collection_name)
             run_result = "error"
 
+    # `processed` is the ACTUAL shared counter, never the admission total: a pass that stopped
+    # early — the healing sweep swallowing a contended proof-store lock, `upgrade_incomplete`
+    # breaking on the same — leaves items undone, and writing `total` over the count would report
+    # them as finished. An `ok` run that did not reach its total is `partial`, the run-health
+    # vocabulary's word for "this pass completed, work was skipped": honest on the card, and the
+    # next pass simply picks the rest up. No retry loop belongs here — whoever holds that lock is
+    # doing the work this pass would have waited for.
+    if run_result == "ok" and processed_count < total_items:
+        run_result = "partial"
+        log.warning(
+            "upgrade for collection %s (%s) completed %d of %d work item(s) — the rest were "
+            "skipped this pass (typically the collection's proof-store lock held elsewhere, which "
+            "the pass refuses to wait out) and are retried by the next pass",
+            collection_id,
+            collection_name,
+            processed_count,
+            total_items,
+        )
     finalized = await collections.finalize_if_held(
         session,
         run_id,
         result=run_result,
         upgraded=upgraded_count,
-        processed=(incomplete + pointer_work.items) if run_result == "ok" else processed_count,
+        processed=processed_count,
         finished=_utcnow(),
     )
     if not finalized:

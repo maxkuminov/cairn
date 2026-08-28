@@ -27,7 +27,7 @@ from __future__ import annotations
 import errno
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -531,6 +531,216 @@ async def test_a_reclaimed_claim_after_the_guard_places_nothing(cairn_env, monke
     assert old_slot.read_bytes() == proof_bytes, "the newly referenced proof was not displaced"
     assert (await _row(cid, "a.txt")).ots_state == "pending"
     assert _archive_files(cairn_env / "proofs", cid) == []
+
+
+async def _stale_claim(cid: int, kind: str = "stamp") -> int:
+    """A ``running`` run for ``cid`` whose heartbeat is already past the abandonment interval."""
+    from src.database import get_sessionmaker
+    from src.models.db import Run
+    from src.services.collections import RUN_HEARTBEAT_TIMEOUT_SECONDS
+
+    dead = datetime.now(timezone.utc) - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS + 60)
+    async with get_sessionmaker()() as s:
+        run = Run(collection_id=cid, kind=kind, result="running", started=dead, heartbeat_at=dead)
+        s.add(run)
+        await s.commit()
+        return run.id
+
+
+async def test_a_live_batch_inside_its_critical_section_cannot_be_reclaimed(cairn_env, caplog):
+    """Scenario: a live batch cannot be reclaimed out from under its critical section.
+
+    The stamp pass holds the collection's proof-store lock from its first guard decision to its
+    last state commit — across a calendar round-trip minutes long, in which a keepalive can fail on
+    a perfectly live process. Reclaiming there is not bookkeeping: the replacement claim is exactly
+    what a move reconciliation needs in order to newly reference a slot this batch is about to
+    write. So both reclamation paths probe the lock first and refuse while it is held. Process
+    death releases an ``flock``; a failing DB keepalive does not, which is the whole distinction.
+    """
+    from src.database import get_sessionmaker
+    from src.services import collections as collections_svc
+    from src.services import ots
+    from src.services import scheduler as scheduler_svc
+
+    cid = await _seed(cairn_env / "vault", {"a.txt": b"being stamped right now"})
+    await _stale_claim(cid)
+
+    # Exactly what `stamp_pending` holds across its guard-through-placement critical section.
+    lock = ots.CollectionProofLock(cairn_env / "proofs", cid)
+    lock.acquire()
+    try:
+        with caplog.at_level(logging.INFO, logger="cairn.collections"):
+            assert await collections_svc.reclaim_stale_claim(cid) is False, (
+                "a claim whose holder is inside a proof critical section must not be reclaimed"
+            )
+        # …and the fleet-wide reaper, which runs on every scheduler tick, refuses the same claim.
+        async with get_sessionmaker()() as s:
+            assert await scheduler_svc.reap_orphaned_runs(s) == 0
+        runs = await _runs(cid)
+        assert [r.result for r in runs] == ["running"], "the run row was not touched"
+        assert runs[0].finished is None
+    finally:
+        lock.release()
+
+    assert any("proof-store lock" in r.getMessage() for r in caplog.records), (
+        "the refusal must say why the claim was left alone"
+    )
+    # The holder is gone: the very same claim is now reclaimable, so the refusal was liveness, not
+    # a new way to wedge a collection.
+    assert await collections_svc.reclaim_stale_claim(cid) is True
+    assert (await _runs(cid))[0].result == "interrupted"
+
+
+async def test_a_crashed_holders_stale_claim_reclaims_normally(cairn_env):
+    """Scenario: a crashed batch's claim reclaims normally (the OS released its ``flock``).
+
+    The probe must not become a second way for a dead process to hold a collection hostage: with
+    nothing holding the lock, reclamation behaves exactly as it did before the probe existed.
+    """
+    from src.services import collections as collections_svc
+
+    cid = await _seed(cairn_env / "vault", {"a.txt": b"the dead process was stamping this"})
+    run_id = await _stale_claim(cid)
+
+    assert await collections_svc.reclaim_stale_claim(cid) is True
+    runs = await _runs(cid)
+    assert [(r.id, r.result) for r in runs] == [(run_id, "interrupted")]
+    assert runs[0].finished is not None
+
+
+async def test_an_adoption_only_batch_reclaimed_before_its_commit_is_fenced(cairn_env, monkeypatch):
+    """Scenario: an adoption-only batch is fenced too.
+
+    Every member here resolves by ADOPTION, so no placement chunk survives the adoption pass. An
+    adoption records a proof on a row exactly as a placement does, so the state-commit fence must
+    still fire: fencing only when a placement chunk remains let a reclaimed claim commit adoption
+    state (the crashed-holder / degraded-store hole the lock discipline cannot cover).
+    """
+    from sqlalchemy import update as sql_update
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry, Run
+    from src.services import collections as collections_svc
+    from src.services import ots, proofs
+    from src.services.scanner import _utcnow
+
+    data = b"a file whose canonical proof is already anchored"
+    cid = await _seed(cairn_env / "vault", {"a.txt": data})
+    slot = _slot(cid, "a.txt")
+    proof_bytes = _write_proof(slot, _sha(data), height=800_000)
+    await _set_row(cid, "a.txt", ots_state="pending")
+    # Adoption's every condition: the proof parses, commits to the row's own sha256, and its anchor
+    # verifies right now.
+    monkeypatch.setattr(
+        ots,
+        "verify",
+        lambda *a, **k: ots.VerifyResult(verified=True, state="complete", block_height=800_000),
+    )
+    stamp_calls: list[list[str]] = []
+    monkeypatch.setattr(ots, "_run_ots", _stamp_fake(stamp_calls))
+
+    real_adoption = proofs._adoption_pass
+
+    async def adopt_then_reclaim(chunk, settings):
+        keep, verdicts, adopted = await real_adoption(chunk, settings)
+        assert not keep and adopted == 1, "the batch must resolve entirely by adoption"
+        # The claim is reclaimed between the adoption and the commit that would record it.
+        async with get_sessionmaker()() as other:
+            await other.execute(
+                sql_update(Run)
+                .where(Run.collection_id == cid, Run.result == "running")
+                .values(result="interrupted", finished=_utcnow())
+            )
+            await other.commit()
+        return keep, verdicts, adopted
+
+    monkeypatch.setattr(proofs, "_adoption_pass", adopt_then_reclaim)
+
+    async with get_sessionmaker()() as s:
+        run = Run(collection_id=cid, kind="stamp", started=_utcnow(), result="running")
+        assert await collections_svc.claim_run(s, run) is not None
+        with pytest.raises(collections_svc.LeaseLost):
+            await proofs.stamp_pending(s, await s.get(Collection, cid), run_id=run.id)
+
+    row = await _row(cid, "a.txt")
+    assert row.ots_state == "pending", "the adoption must not commit under a reclaimed claim"
+    assert row.ots_path is None and row.ots_digest is None, "no row recorded another's artifact"
+    assert slot.read_bytes() == proof_bytes, "the artifact on disk is untouched either way"
+    assert stamp_calls == [], "an adoption-only batch makes no calendar traffic"
+    async with get_sessionmaker()() as s:
+        others = list(
+            await s.scalars(
+                select(FileEntry).where(
+                    FileEntry.collection_id == cid, FileEntry.ots_path.is_not(None)
+                )
+            )
+        )
+    assert others == []
+
+
+async def test_a_non_ascii_case_respelled_slot_is_surfaced_by_the_casefold_key(
+    cairn_env, monkeypatch
+):
+    """Scenario: a non-ASCII respelled path cannot evade candidate selection.
+
+    SQLite's ``lower()`` folds ASCII only, so ``Å.txt.ots`` and ``å.txt.ots`` produced no candidate
+    at all and the guard missed the alias entirely — on a case-insensitive store, the stamp then
+    displaced a proof another row records. The candidate key is now ``casefold`` (Python's
+    ``str.casefold``, registered on every connection), and ``same_directory_entry`` stays the
+    decider, so a case-sensitive store still never defers a genuinely distinct slot.
+    """
+    from sqlalchemy import text
+
+    from src.database import get_sessionmaker
+    from src.services import ots, proofs
+
+    root = cairn_env / "vault"
+    cid = await _seed(root, {"\u00e5.txt": b"newcomer bytes", "b.txt": b"moved bytes"})
+    upper_slot = _slot(cid, "\u00c5.txt")
+    _write_proof(upper_slot, _sha(b"moved bytes"))
+    moved_id = await _set_row(
+        cid,
+        "b.txt",
+        ots_path=str(upper_slot),
+        ots_state="incomplete",
+        ots_digest=_sha(b"moved bytes"),
+    )
+    await _set_row(cid, "\u00e5.txt", ots_state="pending")
+    monkeypatch.setattr(ots, "_run_ots", _stamp_fake())
+
+    async with get_sessionmaker()() as s:
+        # The ASCII-only fold the prefilter used to key on cannot see these two as one name…
+        assert await s.scalar(text("SELECT lower('\u00c5')")) == "\u00c5"
+        # …while the candidate query surfaces the blocking row.
+        found = await proofs._slot_references(s, cid, [_slot(cid, "\u00e5.txt")])
+    assert [(rid, relpath) for rid, relpath, _p in found] == [(moved_id, "b.txt")]
+
+    # The store here is ext4 (case-sensitive): two genuinely distinct slots, so no deferral.
+    assert await _stamp(cid) == 1
+    assert (await _row(cid, "\u00e5.txt")).ots_path == str(_slot(cid, "\u00e5.txt"))
+    assert upper_slot.exists(), "the other slot was never touched"
+
+    # Now the case-insensitive answer: the filesystem says the two spellings are one entry.
+    await _set_row(cid, "\u00e5.txt", ots_state="pending", ots_path=None, ots_digest=None)
+    monkeypatch.setattr(ots, "same_directory_entry", lambda a, b: True)
+    assert await _stamp(cid) == 0
+    assert (await _row(cid, "\u00e5.txt")).ots_state == "pending"
+    assert (await _row(cid, "b.txt")).ots_path == str(upper_slot)
+
+
+async def test_the_casefold_sql_function_is_registered_on_every_connection(cairn_env):
+    """The candidate key is only as good as its registration: every connection must carry it."""
+    from sqlalchemy import text
+
+    from src.database import get_sessionmaker
+
+    async with get_sessionmaker()() as s:
+        assert await s.scalar(text("SELECT casefold('\u00c5')")) == "\u00e5"
+        # Full folding, not a lowercase alias: the German sharp s folds to two characters.
+        assert await s.scalar(text("SELECT casefold('\u00df')")) == "ss"
+        # A SQL function sees NULLs and non-text values too, and must pass them through.
+        assert await s.scalar(text("SELECT casefold(NULL)")) is None
+        assert await s.scalar(text("SELECT casefold(7)")) == 7
 
 
 # ==============================================================================================
@@ -1097,6 +1307,182 @@ async def test_an_absent_proof_with_no_corroborated_copy_is_loud_not_silent(cair
         assert "MISSING from the store" in "\n".join(r.getMessage() for r in caplog.records)
 
 
+async def _archived(cid: int, payload: bytes, digest: str) -> Path:
+    """Put ``payload`` in the collection's superseded archive under ``digest`` (content-addressed)."""
+    from src.config import get_settings
+    from src.services import ots
+
+    family = ots.superseded_root(get_settings().proof_store_path, cid) / digest[:2]
+    family.mkdir(parents=True, exist_ok=True)
+    copy = family / f"{digest}.ots"
+    copy.write_bytes(payload)
+    return copy
+
+
+async def test_a_failed_restoration_is_loud_and_heals_on_the_next_sweep(cairn_env, monkeypatch, caplog):
+    """Scenario: a failed restoration is loud and heals on the next sweep.
+
+    The nastiest shape in phase 5: the store lies about identity, so unlinking the source takes the
+    destination with it — and then the restoration from the archive copy cannot run either (the
+    store briefly refuses writes). The pointer is already committed, so it now names an absent
+    entry. That must NEVER be a clean return: the primitive raises, the sweep says the entry is
+    absent (not "nothing was lost"), and the state left behind is precisely the restore leg's own
+    admission shape, so the next sweep republishes the proof there.
+    """
+    import errno as _errno
+
+    from src.services import ots
+
+    cid, _row_id, old_slot, new_slot, payload = await _moved_row(cairn_env)
+
+    real_unlink = os.unlink
+
+    def unlink_takes_both(path, **kw):
+        real_unlink(path, **kw)
+        if Path(path) == old_slot and new_slot.exists():
+            real_unlink(new_slot)
+
+    real_copy = ots._copy_no_replace
+
+    def copy_refuses_the_destination(data, target, **kw):
+        if Path(target) == new_slot:
+            raise OSError(_errno.ENOSPC, "No space left on device")
+        return real_copy(data, target, **kw)
+
+    monkeypatch.setattr(os, "unlink", unlink_takes_both)
+    monkeypatch.setattr(ots, "_copy_no_replace", copy_refuses_the_destination)
+
+    with caplog.at_level(logging.WARNING, logger="cairn.proofs"):
+        outcome = await _sweep(cid)
+    monkeypatch.undo()
+
+    assert outcome.items == 1
+    row = await _row(cid, "b.txt")
+    assert row.ots_path == str(new_slot), "the committed pointer is not rolled back"
+    assert not new_slot.exists() and not old_slot.exists(), "the identity lie took both entries"
+    warnings = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ABSENT" in warnings, "a pointer that resolves to nothing must be said out loud"
+    assert "restore leg" in warnings
+    assert "Nothing was lost — the pointer is correct" not in warnings, (
+        "the leftover-copy reassurance is false here and must not be printed"
+    )
+
+    # The archive kept the corroborated copy, which is what makes the next sweep able to repair it.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="cairn.proofs"):
+        second = await _sweep(cid)
+    assert (second.items, second.restored) == (1, 1)
+    assert new_slot.read_bytes() == payload, "the restore leg republished the proof"
+    assert (await _row(cid, "b.txt")).ots_path == str(new_slot)
+    assert "RESTORED" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+async def test_a_source_that_cannot_be_removed_is_reported_not_swallowed(cairn_env, monkeypatch, caplog):
+    """A post-commit removal failure surfaces as the post-commit warning — never a clean success.
+
+    Suppressing it returned "relocated" with a redundant copy sitting in an unreferenced canonical
+    slot and nobody told: the next stamp there would archive it (never destroy it), but the
+    operator learns of the leftover only from this warning.
+    """
+    import errno as _errno
+
+    cid, _row_id, old_slot, new_slot, payload = await _moved_row(cairn_env)
+    real_unlink = os.unlink
+
+    def unlink_refuses_the_source(path, **kw):
+        if Path(path) == old_slot:
+            raise PermissionError(_errno.EACCES, "Permission denied")
+        return real_unlink(path, **kw)
+
+    monkeypatch.setattr(os, "unlink", unlink_refuses_the_source)
+    with caplog.at_level(logging.WARNING, logger="cairn.proofs"):
+        outcome = await _sweep(cid)
+    monkeypatch.undo()
+
+    assert (outcome.items, outcome.relocated) == (1, 1)
+    assert (await _row(cid, "b.txt")).ots_path == str(new_slot), "the committed pointer is kept"
+    assert new_slot.read_bytes() == payload, "the destination the pointer names holds the proof"
+    assert old_slot.read_bytes() == payload, "the leftover source is preserved, never destroyed"
+    warnings = "\n".join(r.getMessage() for r in caplog.records)
+    assert "could not be removed" in warnings and "Permission denied" in warnings
+    assert "leftover" in warnings
+
+
+async def test_the_aliased_branch_records_the_spelling_and_removes_nothing(cairn_env, monkeypatch, caplog):
+    """The sweep's case-only rename path, end to end: pointer re-spelled, nothing removed.
+
+    A case-insensitive store reports the recorded spelling and the canonical one as ONE directory
+    entry. The proof is already where it belongs, so the sweep commits the canonical spelling and
+    must not call the removal phase at all — there may be a single entry, and removing it would
+    destroy the only copy.
+    """
+    from src.services import ots
+
+    x = b"a proof whose slot was only re-spelled"
+    root = cairn_env / "vault"
+    cid = await _seed(root, {"b.txt": x})
+    recorded = _slot(cid, "B.txt")
+    canonical = _slot(cid, "b.txt")
+    payload = _write_proof(recorded, _sha(x))
+    # On a case-insensitive store these two names ARE one entry; ext4 needs the two files plus the
+    # identity answer such a store would give.
+    canonical.write_bytes(payload)
+    await _set_row(
+        cid, "b.txt", ots_path=str(recorded), ots_state="complete", ots_digest=_sha(x)
+    )
+    monkeypatch.setattr(ots, "same_directory_entry", lambda a, b: True)
+
+    finished: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        ots,
+        "finish_relocation",
+        lambda src, dst, **kw: finished.append((str(src), str(dst))),
+    )
+
+    with caplog.at_level(logging.INFO, logger="cairn.proofs"):
+        outcome = await _sweep(cid)
+
+    assert (outcome.items, outcome.relocated) == (1, 1)
+    assert (await _row(cid, "b.txt")).ots_path == str(canonical), "the spelling was re-recorded"
+    assert finished == [], "the removal phase must never run for an aliased entry"
+    assert recorded.read_bytes() == payload and canonical.read_bytes() == payload, (
+        "nothing may be removed when the store may hold only one entry"
+    )
+    assert _archive_files(cairn_env / "proofs", cid) == [], "nothing was displaced"
+    assert "one entry" in "\n".join(r.getMessage() for r in caplog.records)
+
+
+async def test_an_absent_and_stale_row_is_restored_then_relocated_in_one_sweep(cairn_env):
+    """A row that is BOTH absent and stale gets both operations — and both work items — this pass.
+
+    Classifying the two shapes disjointly restored such a row to its OBSOLETE location: the proof
+    came back at the moved file's FORMER canonical slot, the run said ``ok``, and the pointer stayed
+    non-canonical — still blocking a newcomer's stamp there — until some later pass.
+    """
+    x = b"the moved file's bytes"
+    root = cairn_env / "vault"
+    cid = await _seed(root, {"b.txt": x})
+    old_slot = _slot(cid, "a.txt")
+    new_slot = _slot(cid, "b.txt")
+    payload = _write_proof(old_slot, _sha(x))
+    copy = await _archived(cid, payload, _sha(x))
+    old_slot.unlink()  # the recorded entry is gone; the archive holds the corroborated copy
+    await _set_row(
+        cid, "b.txt", ots_path=str(old_slot), ots_state="complete", ots_digest=_sha(x)
+    )
+
+    outcome = await _upgrade(cid)
+
+    assert (outcome.sweep.restored, outcome.sweep.relocated) == (1, 1)
+    assert outcome.sweep.items == 2, "one work item per operation, not per row"
+    assert new_slot.read_bytes() == payload, "the proof ends this sweep at its file's own slot"
+    assert not old_slot.exists(), "and does not linger at the obsolete one"
+    assert (await _row(cid, "b.txt")).ots_path == str(new_slot)
+    run = (await _runs(cid))[-1]
+    assert (run.kind, run.total, run.processed, run.result) == ("upgrade", 2, 2, "ok")
+    assert copy.exists(), "the archive copy is never consumed"
+
+
 # --- admission + run accounting ----------------------------------------------------------------
 
 
@@ -1170,6 +1556,84 @@ async def test_the_sweep_runs_before_the_proof_upgrades(cairn_env, monkeypatch):
     assert upgraded == [str(new_slot)], "the upgrade must not follow the pointer's old value"
     run = (await _runs(cid))[-1]
     assert (run.total, run.processed) == (2, 2), "one item for the relocation, one for the upgrade"
+
+
+async def test_a_pass_that_could_not_take_the_lock_finalizes_partial(cairn_env, monkeypatch, caplog):
+    """A pass that skipped work finalizes ``partial`` with the count it actually completed.
+
+    Force-writing ``processed = total`` on an ``ok`` finalize reported skipped work as finished:
+    the healing sweep swallows a contended proof-store lock (correctly — it refuses to wait out a
+    resource another operation holds), and the run then claimed it had done every item. ``partial``
+    is the run-health vocabulary's word for "this pass completed, work was skipped", and the next
+    pass simply picks the rest up — no retry loop belongs here.
+    """
+    from src.services import ots
+
+    cid, _row_id, old_slot, new_slot, payload = await _moved_row(cairn_env, ots_state="complete")
+    # A bounded wait is the point; sixty real seconds in a test is not.
+    monkeypatch.setattr(ots, "PLACEMENT_LOCK_TIMEOUT_SECONDS", 0.2)
+    other_process = ots.CollectionProofLock(cairn_env / "proofs", cid)
+    other_process.acquire()
+    try:
+        with caplog.at_level(logging.WARNING, logger="cairn.proofs"):
+            outcome = await _upgrade(cid)
+    finally:
+        other_process.release()
+
+    assert outcome.sweep.items == 0, "nothing could be swept while the lock was held elsewhere"
+    run = (await _runs(cid))[-1]
+    assert (run.kind, run.total, run.processed) == ("upgrade", 1, 0)
+    assert run.result == "partial", "an ok run must never report skipped work as finished"
+    assert "completed 0 of 1 work item(s)" in "\n".join(r.getMessage() for r in caplog.records)
+    assert old_slot.read_bytes() == payload and not new_slot.exists(), "nothing was moved"
+
+    # …and the next pass, with the lock free, converges it and finalizes ok.
+    again = await _upgrade(cid)
+    assert again.sweep.relocated == 1
+    latest = (await _runs(cid))[-1]
+    assert (latest.result, latest.total, latest.processed) == ("ok", 1, 1)
+
+
+async def test_work_completed_between_the_pre_check_and_the_claim_records_no_run(
+    cairn_env, monkeypatch
+):
+    """The authoritative survey is the one taken UNDER the claim; an empty one records no run.
+
+    The admission survey is only advisory: the pass that currently holds the collection's slot can
+    complete the surveyed work before this one claims it. Believing the pre-claim answer wrote a
+    run whose ``total`` counted work that no longer existed — and, with nothing left at all, an
+    empty ``upgrade`` run, which "no work of any kind -> no run" forbids.
+    """
+    from src.database import get_sessionmaker
+    from src.models.db import FileEntry
+    from src.services import collections as collections_svc
+
+    cid, row_id, old_slot, new_slot, payload = await _moved_row(cairn_env, ots_state="complete")
+
+    real_claim = collections_svc.claim_run
+    stolen: list[int] = []
+
+    async def steal_then_claim(session, run):
+        if not stolen:
+            stolen.append(run.collection_id)
+            # A rival pass held the slot and converged the pointer between the pre-check and here.
+            new_slot.parent.mkdir(parents=True, exist_ok=True)
+            new_slot.write_bytes(old_slot.read_bytes())
+            old_slot.unlink()
+            async with get_sessionmaker()() as other:
+                entry = await other.get(FileEntry, row_id)
+                entry.ots_path = str(new_slot)
+                await other.commit()
+        return await real_claim(session, run)
+
+    monkeypatch.setattr(collections_svc, "claim_run", steal_then_claim)
+    outcome = await _upgrade(cid)
+    monkeypatch.undo()
+
+    assert stolen == [cid], "the test must actually have raced the claim"
+    assert outcome.idle and outcome.run is None
+    assert await _runs(cid) == [], "no run may survive stating a total for work that was gone"
+    assert new_slot.read_bytes() == payload, "the rival's work is left exactly as it was"
 
 
 # ==============================================================================================

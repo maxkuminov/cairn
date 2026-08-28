@@ -17,9 +17,12 @@ never falsely refresh a dead collection's dead-man's switch.
 collection's DB-enforced operation claim, and that is deliberate: proof placement is check-then-act
 (inspect the canonical path -> preserve -> place -> record), so two writers would silently destroy a
 proof. :func:`run_due_scans` claims via ``scan_collection``'s own ``claim_run``; :func:`run_daily_upgrade`
-delegates to ``proofs.upgrade_collection``, which claims a ``kind='upgrade'`` run of its own. No
-lock belongs inside ``_place_proof``, ``stamp_pending`` or ``upgrade_incomplete`` — the claim wraps
+delegates to ``proofs.upgrade_collection``, which claims a ``kind='upgrade'`` run of its own. The
+CLAIM is never taken inside ``_place_proof``, ``stamp_pending`` or ``upgrade_incomplete`` — it wraps
 them from the caller, and ``stamp_pending`` is called from inside a scan that already holds one.
+(The per-collection proof-store *flock* is a different rung, taken by the proof-mutating passes
+themselves; :func:`reap_orphaned_runs` probes it before reaping, since a held lock means the claim's
+holder is alive inside a proof critical section — design D1.)
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import Settings, get_settings
 from ..database import get_sessionmaker
 from ..models.db import Collection, FileEntry, Run
-from . import proofs, scanner
+from . import ots, proofs, scanner
 from .collections import (
     RUN_HEARTBEAT_TIMEOUT_SECONDS,  # noqa: F401  -- re-exported: callers read it from here
     abandoned_claim_clause,
@@ -251,15 +254,16 @@ async def compute_health(
 
 async def _stale_run_ids(
     session: AsyncSession, now: datetime
-) -> tuple[list[int], int]:
-    """Ids of the ``running`` runs whose claim is abandoned at ``now``, plus the count still running.
+) -> tuple[list[tuple[int, int]], int]:
+    """``(run id, collection id)`` for every abandoned ``running`` run at ``now``, plus the live count.
 
     Split out from :func:`reap_orphaned_runs` so the read and the guarded write are separately
     visible (and separately testable), exactly as :func:`collections._stale_claim_id` is on the
     claim path: between the two, a live process may heartbeat, and the write must lose that race.
+    The collection id rides along because the proof-lock probe below is per collection.
     """
     running = list(await session.scalars(select(Run).where(Run.result == "running")))
-    stale = [run.id for run in running if not claim_is_live(run, now)]
+    stale = [(run.id, run.collection_id) for run in running if not claim_is_live(run, now)]
     return stale, len(running)
 
 
@@ -309,6 +313,18 @@ async def reap_orphaned_runs(session: AsyncSession) -> int:
     ``<= cutoff``) inside the WHERE makes the decision atomic with the write: a heartbeat that lands
     first fails the predicate, that row is simply not matched, and the returned count reflects what
     was actually reaped rather than what was selected.
+
+    **And a held proof-store lock vetoes the reap.** This runs on every tick, not only at startup,
+    and the claim is cross-process — so "no other Cairn is alive" is never something it may assume.
+    A stamping operation holds its collection's proof lock across the whole guard-through-placement
+    critical section (design D1), a section that spans a minutes-long calendar round-trip in which a
+    keepalive can fail on a live process; reclaiming there would let a replacement scan reference a
+    slot the live batch is about to write. So each abandoned claim's collection lock is probed
+    non-blocking first and **held across the UPDATE**, exactly as
+    :func:`collections.reclaim_stale_claim` does — a held lock means the holder is alive inside a
+    proof critical section and its run is left alone. A crashed holder's lock is released by the
+    operating system, so it reaps as before; a store that cannot lock degrades to the guarded
+    UPDATE alone.
     """
     now = _utcnow()
     cutoff = heartbeat_cutoff(now)
@@ -319,16 +335,51 @@ async def reap_orphaned_runs(session: AsyncSession) -> int:
                 "%d in-progress run(s) still heartbeating — left claimed, not reaped", live
             )
         return 0
-    result = await session.execute(
-        update(Run)
-        .where(
-            Run.id.in_(stale),
-            Run.result == "running",
-            abandoned_claim_clause(cutoff),
+    store_root = get_settings().proof_store_path
+    eligible: list[int] = []
+    locks: list[ots.CollectionProofLock] = []
+    try:
+        for run_id, collection_id in stale:
+            try:
+                locks.append(
+                    await asyncio.to_thread(
+                        ots.acquire_proof_lock_now, store_root, collection_id
+                    )
+                )
+            except ots.LockContended:
+                log.info(
+                    "collection %s: stale claim (run %s) holds the proof-store lock — alive inside "
+                    "a proof critical section, so it was NOT reaped",
+                    collection_id,
+                    run_id,
+                )
+                continue
+            except ots.OtsError:
+                # Fail SAFE: a claim whose liveness could not be checked is left claimed. The cost
+                # is a delayed operation; the alternative risks a second proof writer.
+                log.warning(
+                    "collection %s: could not probe the proof-store lock — leaving run %s claimed",
+                    collection_id,
+                    run_id,
+                    exc_info=True,
+                )
+                continue
+            eligible.append(run_id)
+        if not eligible:
+            return 0
+        result = await session.execute(
+            update(Run)
+            .where(
+                Run.id.in_(eligible),
+                Run.result == "running",
+                abandoned_claim_clause(cutoff),
+            )
+            .values(result="interrupted", finished=now)
         )
-        .values(result="interrupted", finished=now)
-    )
-    await session.commit()
+        await session.commit()
+    finally:
+        for lock in locks:
+            lock.release()
     return result.rowcount or 0
 
 
