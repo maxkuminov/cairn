@@ -80,16 +80,21 @@ the same per-file verify flow for every state (consistent with D3).
 Three properties close the holes the first spec round left open:
 
 - **Blank stays default.** A blank or whitespace-only query (`GET /verify/search?q=` included)
-  renders the anchored-only recent listing, never the widened search — the widened population is
-  reachable only via a non-blank query, so clearing the input restores the page's default state
-  instead of leaking unstamped rows under the "Recent proofs" heading.
-- **Deterministic path order + disclosed truncation.** Search orders by `relpath ASC` (with a
-  collection tiebreaker), not `ots_stamped_at DESC` — a recency order plus a silent 50-row cap
-  makes an unstamped file that shares a searchable name with ≥50 stamped files unreachable by
-  any query. The result partial states the true total (`COUNT(*)` alongside the capped page):
-  "showing 50 of N matches — narrow your search" whenever total > cap. No pagination; a bounded
-  search whose truncation is disclosed and whose order is path-deterministic makes every target
-  reachable by refining, which is this page's job (finding one file to verify, not browsing).
+  renders the default recent-proofs listing, never the widened search — the widened population
+  is reachable only via a non-blank query, so clearing the input restores the page's default
+  state instead of leaking unstamped rows under the recent-proofs heading. That listing's
+  heading/copy must say recent *proofs*, not "anchored": its population includes `incomplete`
+  proofs, and sprint-1's vocabulary rule forbids calling an unconfirmed proof anchored (audit
+  round 2 caught the delta itself using "anchored-only" for this list).
+- **Unique deterministic order + disclosed truncation.** Search orders by
+  `relpath ASC, collection_id ASC` (a unique total key), not `ots_stamped_at DESC` — a recency
+  order plus a silent 50-row cap makes an unstamped file that shares a searchable name with ≥50
+  stamped files unreachable by any query. The result partial states the true total (`COUNT(*)`
+  alongside the capped page): "showing 50 of N matches" whenever total > cap, inviting a
+  narrower query and naming the per-collection file browser (which paginates) as the escape
+  hatch. No pagination here. *Accepted limitation:* the same path replicated across more
+  collections than the cap cannot be disambiguated by narrowing — synthetic for this product's
+  fleet sizes, and the browser escape hatch covers it.
 - **State-neutral search copy on both render paths.** The searchable-count line, search heading,
   and no-match copy in `verify.html` + `partials/verify_results.html` describe *tracked files*,
   not anchored files/proofs — an operator whose files are all unstamped must not read "0 files
@@ -136,9 +141,13 @@ operator wants. The spec states this weakening so it is a decision, not an overs
   "File status: X ok, Y new, Z modified, W missing" (counts from the same `c.counts` the
   segments render from — one source, no drift).
 - The anchored line's wording changes from `"{a} / {b} anchored"` to
-  `"{a} / {b} present files anchored"`, and the `all_confirmed` branch keeps its existing
-  identity (D5 of sprint 1: `complete_active == stampable > 0`) — only words change, no
-  computed value changes.
+  `"{a} / {b} present files anchored"`. The `all_confirmed` branch keeps its computed identity
+  (D5 of sprint 1: `complete_active == stampable > 0`) but its wording also names the
+  population: `"all {a} present files anchored"` instead of `"{a} anchored · all confirmed"` —
+  round 2 of the spec audit caught that leaving that branch's words alone reproduces issue
+  #40's second half (Max Documents: "all confirmed" with a count visibly below Total because
+  missing files are excluded, explained nowhere). Only words change; no computed value changes
+  anywhere.
 - No second segbar (per Non-goals): the misread is "unlabelled bar adjacent to a ratio";
   labelling the bar and the ratio's denominator removes the ambiguity without adding a second
   visual channel to maintain.

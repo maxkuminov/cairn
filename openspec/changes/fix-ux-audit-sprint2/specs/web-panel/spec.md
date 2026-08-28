@@ -55,18 +55,24 @@ hand-typed URL, which means the card's advice is invisible to exactly the operat
 The verify page's tracked-file search SHALL likewise include files in every proof state, showing
 each result's proof state so an unstamped file is visibly unstamped in the list. A search scoped
 to already-anchored files silently hides the files whose verify card carries actionable guidance.
-The verify page's *recent anchored* listing keeps its anchored-only meaning — the state filter
-belongs to that list's stated purpose, not to search. A **blank or whitespace-only query SHALL
-render the anchored-only recent listing**, never the widened search: the widened population is
-reachable only through a non-blank query, so clearing the search input restores exactly the
-page's default state.
+The verify page's *recent proofs* listing keeps its existing population (files with a submitted
+proof — awaiting confirmation or confirmed) — the state filter belongs to that list's stated
+purpose, not to search. That listing's heading and copy SHALL describe it as recent **proofs**,
+not as anchored files: its population includes proofs not yet confirmed, and sprint-1's
+vocabulary rule forbids presenting an unconfirmed proof as anchored. A **blank or
+whitespace-only query SHALL render that default recent listing**, never the widened search: the
+widened population is reachable only through a non-blank query, so clearing the search input
+restores exactly the page's default state.
 
-Search results SHALL be **ordered deterministically by path**, and a result set truncated by the
-row cap SHALL say so, naming the true total match count and inviting a narrower query. With a
-recency-of-stamping order and a silent cap, an unstamped file sharing a searchable name with
-enough stamped files is unreachable no matter what the operator types — a silent cap on a search
-whose purpose is finding a specific file is the "silently hides files" defect reintroduced one
-level down.
+Search results SHALL be **ordered by a unique deterministic key** — path first, then collection —
+and a result set truncated by the row cap SHALL say so, naming the true total match count and
+inviting a narrower query. With a recency-of-stamping order and a silent cap, an unstamped file
+sharing a searchable name with enough stamped files is unreachable no matter what the operator
+types — a silent cap on a search whose purpose is finding a specific file is the "silently hides
+files" defect reintroduced one level down. *Accepted limitation:* a query whose matches are the
+same path replicated across more collections than the cap cannot be disambiguated by narrowing
+the path; the truncation notice SHALL direct the operator to the per-collection file browser
+(which paginates) for that case.
 
 Search copy SHALL match the widened population on **every render path** (full-page and
 partial-refinement alike): the search heading, the searchable-file count, and the no-match copy
@@ -95,15 +101,26 @@ on the recent-anchored listing, whose population it correctly describes.
 #### Scenario: A blank query does not widen the listing
 
 - **WHEN** the verify page's search input is cleared (or submitted blank / whitespace-only)
-- **THEN** the page SHALL render the anchored-only recent listing in its existing form, and
-  SHALL NOT render unstamped files under an anchored heading
+- **THEN** the page SHALL render the default recent-proofs listing in its existing form, and
+  SHALL NOT render unstamped files under it
+
+#### Scenario: The recent listing is not captioned as anchored
+
+- **WHEN** the recent-proofs listing contains a proof still awaiting Bitcoin confirmation
+- **THEN** the listing's heading and copy SHALL NOT describe its contents as anchored
 
 #### Scenario: A capped result set discloses its truncation
 
 - **WHEN** a search query matches more tracked files than the result cap
-- **THEN** the results SHALL be ordered deterministically by path, SHALL state the true total
-  match count and that the list is truncated, and a file excluded by the cap SHALL be reachable
-  by narrowing the query
+- **THEN** the results SHALL be ordered by the unique path-then-collection key, SHALL state the
+  true total match count and that the list is truncated, and SHALL direct the operator to
+  narrow the query or use the per-collection file browser
+
+#### Scenario: Identical paths across collections order deterministically
+
+- **WHEN** a query's matches include the same path in several collections
+- **THEN** the rows SHALL appear in a stable collection order with each row's collection named,
+  so repeated searches render identically
 
 #### Scenario: Search copy describes the widened population
 
@@ -179,6 +196,14 @@ same counts the visuals render from, so the label and the picture cannot drift a
 - **WHEN** a collection card renders a notarization coverage ratio
 - **THEN** the wording SHALL state that the denominator counts the collection's present files, so
   the deliberate exclusion of missing files from the denominator is stated rather than implied
+
+#### Scenario: The completeness claim also names its population
+
+- **WHEN** a collection's stampable files are all confirmed while the collection also has
+  missing files (so the confirmed count is below the total file count)
+- **THEN** the completeness wording SHALL name the population it covers ("all N present files
+  anchored" rather than a bare "all confirmed"), so a count that visibly disagrees with the
+  card's total is explained on the card itself
 
 #### Scenario: Labels agree with the visual
 
