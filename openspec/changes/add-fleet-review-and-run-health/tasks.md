@@ -307,7 +307,7 @@ only).
 - [x] 3.15 `verify_run`: delete `ctx["message"]`, leaving a comment stating that the generic backend
   string must not be printed under a reason-attributed verdict (design D8).
 - [x] 3.16 `verify_result.html`: add a **Retry** control that re-posts the same `file_id` to
-  `/verify/run` (CSRF token from the context, swapping the result container), rendered **only** when
+  `POST /verify` (CSRF token from the context, swapping the result container), rendered **only** when
   `transport_error` or `inconclusive` decided the verdict. Not on never-notarized, queued,
   unreadable-proof or any mismatch verdict.
 - [x] 3.17 Verify — no regression: confirm the three `lookup_made` gates (detail row, copyable
@@ -327,7 +327,7 @@ only).
   **not** a failure marker, and its `last_scan` still reports the last *completed* scan.
 - [x] 3.22 A collection whose only run is `interrupted` renders "never" for last scan.
 - [x] 3.23 Verify — **retry offered**: a transport failure and an `inconclusive` result each render
-  the reason (transport) and a Retry control that posts the same `file_id` to `/verify/run`.
+  the reason (transport) and a Retry control that posts the same `file_id` to `POST /verify`.
 - [x] 3.24 Verify — **retry NOT offered**, one case each: never-notarized, queued-to-stamp,
   unreadable proof, and a digest mismatch under each `mismatch_blame` attribution. Assert
   `message` appears nowhere in any of these responses.
@@ -417,10 +417,6 @@ only).
     `app-runtime` "Datastore unreachable" (the 503/`error` leg of the dead-man's switch — the one
     `/healthz` outcome nothing asserted) → `test_healthz_reports_error_when_the_datastore_cannot_be_reached`;
     `web-panel` "Watched-but-not-baselined files are explained" → `test_the_new_files_tile_accounts_for_watched_but_not_baselined_files`.
-  - **Noted, not changed:** the `app-runtime` matrix carries one row ("A failed first scan inside
-    grace is stale, not pending") with no `#### Scenario:` heading of its own in the delta. It is not
-    a gap — the requirement prose covers it explicitly ("and when its only scan runs never
-    completed") and 3.25(d) tests it — but the delta could carry it as a scenario of its own.
 - [x] 4.5 Update `CLAUDE.md`'s working notes with a paragraph for this change (fleet review page,
   feed ordering, health pill, `runs.errors`/`error_sample`, migration 0012, and the
   `interrupted`-is-normal rendering rule).
@@ -438,6 +434,56 @@ only).
   owner-scoped pill hide a stale collection from the person who owns it, or `/healthz` omit one; can
   a bounded `error_sample` under-report `runs.errors`; can the last-activity tile present a `stamp`,
   `upgrade`, `partial`, `error` or `interrupted` run as a clean scan.
+- [x] 5.2a **Adversarial Codex round 1 findings, fixed** (2 MAJOR + 1 MINOR, plus the verifier's
+  smaller concerns). All three findings are one shape — a surface answering with something other
+  than a health verdict when its own dependencies fail, leaving the reader with the last verdict,
+  which on a monitor is the one most likely to have said "fine":
+  - **MAJOR 1 — `/healthz` did not contain a datastore failure that happened AFTER `ping()`.** The
+    probe and the freshness read are two separate trips; a session that could not be opened or a
+    freshness SELECT that raised escaped as a bare HTTP 500 (no `status`, no `mode`, no `version`,
+    indistinguishable from a proxy error page). `healthz()` now wraps probe + session +
+    `compute_health` in ONE boundary returning the structured 503 `status:"error"` for any failure,
+    catching `Exception` deliberately so no failure mode degrades into an unparseable 500. Spec:
+    `app-runtime` requirement text + new scenario "The datastore fails after the liveness probe
+    succeeds". Test: `test_healthz_reports_error_when_the_freshness_read_fails_after_ping_succeeds`.
+  - **MAJOR 2 — a failed poll left a stale "Healthy" pill standing.** htmx does not swap a 4xx/5xx,
+    and there was no error hook, so once the datastore went down the last green verdict stayed on
+    screen indefinitely (every later poll failed the same way) and the template's error branch was
+    unreachable. Fixed in both halves: `/health-pill` catches a raising `compute_health` and renders
+    the `error` pill with **HTTP 200** so the swap happens ("Health check failed", `is-error`,
+    non-green); and the pill element carries `hx-on::response-error` / `::send-error` / `::timeout`
+    → `window.cairnHealthPillFailed(this)` (defined in `base.html`, plus a delegated document-level
+    listener as belt-and-braces) for what the route never sees — a failing dependency, a dropped
+    connection, a timeout. The element keeps polling, so a good answer swaps the real verdict back.
+    Spec: `web-panel` health-pill requirement + new scenario "A failed health poll does not leave a
+    health claim standing". Tests: `test_the_health_pill_fails_closed_after_a_successful_healthy_fill`,
+    `test_the_health_pill_carries_client_side_error_hooks_for_what_the_route_cannot_catch`.
+  - **MINOR — the liveness predicate was spelled three times and disagreed at the boundary.** Health
+    called a heartbeat exactly one interval old *live* (`age <= timeout`) while both reclaimers
+    called it *abandoned* (`heartbeat <= cutoff`) — so a claim could be reclaimed out from under a
+    collection the switch was still reporting fresh. `collections.py` now owns the ONE predicate:
+    `heartbeat_cutoff(now)`, `abandoned_claim_clause(cutoff)` (SQL, both reclaimers) and
+    `claim_is_live(run, now)` (Python, `compute_health` leg (b)), exact complements, boundary =
+    abandoned everywhere. `scheduler._as_aware` is now `collections.as_aware`. Spec: `app-runtime`
+    shared-interval paragraph. Test:
+    `test_the_exact_abandonment_boundary_reads_the_same_to_health_and_to_both_reclaimers`
+    (frozen clock, heartbeat exactly one interval old).
+  - **Verifier concerns, folded in:** (a) `run_health_note` is gated on `last_result == "partial"`,
+    not on the count, so a pre-0012 legacy row (`errors = 0` because the column did not exist) reads
+    "partial — files skipped (count not recorded)" instead of rendering as a clean scan; self-heals
+    on the next scan (`test_a_legacy_partial_run_with_no_recorded_count_still_says_files_were_skipped`).
+    (b) Fleet group headers state BOTH counts including zeros ("0 missing · 2 modified"), muted dot
+    on a zero (requirement + `test_fleet_page_groups_every_affected_collection_missing_first`).
+    (c) A group crowded out by the page-wide budget now reads "Budget spent — … open {name}'s own
+    review for its N issues" instead of "Showing the first 0 of N"
+    (`test_a_collection_past_the_total_budget_is_still_listed_with_its_counts`). (d) 3.16/3.30 and
+    `design.md` corrected: the retry posts to `POST /verify` (the shipped, tested route) — the text
+    was the drift, no alias route added. (e) 3.29's perfile claim is now real:
+    `test_a_partial_completed_scan_says_so_at_every_site` is parametrized over both `ots_mode`
+    values, so the detail header — the ONLY partial-disclosure site a `perfile` collection has — is
+    asserted for both. (f) 4.4's stale "Noted, not changed" bullet deleted (the scenario heading
+    landed in fae9fed).
+  - Gates re-run after the fixes: see 5.2b.
 - [ ] 5.3 Deploy (`make deploy`, then `make migrate` — this change adds revision 0012).
 - [ ] 5.4 `user-representative` pass on the live panel: the fleet page as an operator with issues in
   several collections, the tile→`/review` path, the feed's new top rows, the health pill on a phone
@@ -491,6 +537,7 @@ gap** — add the test, do not delete the row.
 | Scenario | Test |
 | --- | --- |
 | A degraded pill names the number and links to the list | 3.19 |
+| A failed health poll does not leave a health claim standing | 5.2a (`test_the_health_pill_fails_closed_after_a_successful_healthy_fill`, `test_the_health_pill_carries_client_side_error_hooks_for_what_the_route_cannot_catch`) |
 | The pill claims nothing before it has been computed | 3.19 (`Checking…`, no "Healthy" in `base.html`) |
 | The stale collection is identified where the link lands | 3.19 + 3.27 |
 | The panel's health is scoped to the viewer | 3.26 |
@@ -529,6 +576,7 @@ gap** — add the test, do not delete the row.
 | The reported age describes a completed scan | 3.25(b) (`last_scan_age_seconds is None`) |
 | A stamp or upgrade run does not refresh freshness | 3.25(e) |
 | Datastore unreachable | 4.4 (`test_healthz_reports_error_when_the_datastore_cannot_be_reached`) |
+| The datastore fails after the liveness probe succeeds | 5.2a (`test_healthz_reports_error_when_the_freshness_read_fails_after_ping_succeeds`) |
 | Each freshness record identifies its corpus | 3.18 |
 | The endpoint reports every owner's corpora | 3.26 (`/healthz` half) |
 

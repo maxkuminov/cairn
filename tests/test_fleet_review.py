@@ -254,6 +254,11 @@ def test_fleet_page_groups_every_affected_collection_missing_first(cairn_env):
     # scoped bulk verbs live.
     assert 'href="/collection/1/review"' in body and 'href="/collection/2/review"' in body
     assert "Review all in alpha" in body and "Review all in beta" in body
+    # BOTH counts in every group header, including a zero (the requirement's literal reading):
+    # "1 missing" alone leaves the reader to infer whether the other count is zero or unmentioned,
+    # and the two kinds carry different consequences.
+    assert body.count("missing</span>") == 2 and body.count("modified</span>") == 2
+    assert "0 missing" in body  # beta has no missing files and says so
     # Per-group unreviewed pill, id-scoped so the OOB swap cannot hit another group (design D10).
     assert 'id="review-open-pill-1"' in body and 'id="review-open-pill-2"' in body
     # The accept forms post from the fleet surface, so a refusal comes back here.
@@ -773,6 +778,11 @@ def test_a_collection_past_the_total_budget_is_still_listed_with_its_counts(cair
     assert last["more"] == CAP
     assert f"Review all in {last['name']}" in body
     assert f'href="/collection/{last["id"]}/review"' in body
+    # A group with ZERO rows is not "showing the first 0" — that describes a listing, and this is a
+    # listing that could not start. It says what happened and points at the page that can show them.
+    assert "Budget spent" in body
+    assert f"Open {last['name']}'s own review" in body
+    assert f"Showing the first 0 of {CAP}" not in body
 
 
 # --- 2.23: the two empty states ---------------------------------------------------------------

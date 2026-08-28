@@ -26,7 +26,11 @@ switch itself. Leg (b) SHALL be gated on liveness, not merely on the run being `
 whose claim has been abandoned (no progress within the abandonment interval) SHALL confer **no**
 freshness, because a process that died mid-scan is exactly the condition the dead-man's switch
 exists to report. The two legs SHALL use the same abandonment interval as claim reclamation, so the
-switch and the reaper cannot disagree about which claims are alive.
+switch and the reaper cannot disagree about which claims are alive. The predicate SHALL be shared
+rather than restated, and SHALL agree at the **exact** boundary: a run whose last reported progress
+is precisely one abandonment interval old SHALL be treated as abandoned by the freshness check and
+by both reclaimers alike, so a claim can never be reclaimed out from under a collection the switch is
+still reporting fresh.
 
 A corpus is **pending** when it has no scan run at all but was created within the freshness window
 (startup grace), and **stale** otherwise — including when its only scan run is `running` with an
@@ -42,7 +46,14 @@ The endpoint SHALL return:
 - HTTP 200 with `status:"ok"` when the datastore is reachable and no corpus is stale;
 - HTTP 503 with `status:"degraded"` when the datastore is reachable but at least one corpus is
   stale;
-- HTTP 503 with `status:"error"` when the datastore is unreachable.
+- HTTP 503 with `status:"error"` when the datastore is unreachable **or the freshness read fails for
+  any other reason**.
+
+The `status:"error"` response SHALL cover the whole read, not the liveness probe alone: a datastore
+that answers the probe and then fails — a session that cannot be opened, a freshness query that
+raises — SHALL still produce the structured 503 body, never an unstructured HTTP 500. The endpoint's
+one caller is a machine, and a 500 carries no `status`, no `mode` and no `version` for it to parse
+and is indistinguishable from an error page emitted by something in front of Cairn.
 
 The body SHALL include the active auth `mode`, the version, and a per-corpus freshness list
 (identifier, name, last-scan age, state). The identifier is what lets a caller — the panel included
@@ -96,6 +107,12 @@ constraint makes unique.
 
 - **WHEN** the datastore cannot be opened
 - **THEN** `/healthz` SHALL return HTTP 503 with `status:"error"`
+
+#### Scenario: The datastore fails after the liveness probe succeeds
+
+- **WHEN** the liveness probe succeeds but the per-collection freshness read then fails
+- **THEN** `/healthz` SHALL return the same HTTP 503 `status:"error"` body, so that every way the
+  endpoint can fail to compute a verdict is reported in one shape a monitor can parse
 
 #### Scenario: Each freshness record identifies its corpus
 

@@ -28,7 +28,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import func, select, update
@@ -38,7 +38,15 @@ from ..config import Settings, get_settings
 from ..database import get_sessionmaker
 from ..models.db import Collection, FileEntry, Run
 from . import proofs, scanner
-from .collections import RUN_HEARTBEAT_TIMEOUT_SECONDS, blocking_run, list_collections
+from .collections import (
+    RUN_HEARTBEAT_TIMEOUT_SECONDS,  # noqa: F401  -- re-exported: callers read it from here
+    abandoned_claim_clause,
+    as_aware,
+    blocking_run,
+    claim_is_live,
+    heartbeat_cutoff,
+    list_collections,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from fastapi import FastAPI
@@ -61,11 +69,8 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _as_aware(dt: datetime) -> datetime:
-    """Treat a naive datetime (SQLite round-trips timezone-aware values as naive) as UTC."""
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
+# One definition, shared with the claim predicate it is read alongside (``collections.as_aware``).
+_as_aware = as_aware
 
 
 # --- Freshness model ------------------------------------------------------------------------
@@ -183,10 +188,10 @@ async def compute_health(
             .order_by(Run.started.desc())
             .limit(1)
         )
-        live_scan = running is not None and (
-            (now - _as_aware(running.heartbeat_at or running.started)).total_seconds()
-            <= RUN_HEARTBEAT_TIMEOUT_SECONDS
-        )
+        # THE shared predicate (`collections.claim_is_live`), not a second spelling of it: health
+        # and both reclaimers must agree about the exact abandonment boundary, or a claim can be
+        # reclaimed out from under a collection this switch is still calling fresh.
+        live_scan = running is not None and claim_is_live(running, now)
 
         if (age is not None and age <= threshold) or live_scan:
             state: CollectionState = "fresh"
@@ -217,18 +222,16 @@ async def compute_health(
 
 
 async def _stale_run_ids(
-    session: AsyncSession, cutoff: datetime
+    session: AsyncSession, now: datetime
 ) -> tuple[list[int], int]:
-    """Ids of the ``running`` runs whose last reported liveness predates ``cutoff``, plus the live count.
+    """Ids of the ``running`` runs whose claim is abandoned at ``now``, plus the count still running.
 
     Split out from :func:`reap_orphaned_runs` so the read and the guarded write are separately
     visible (and separately testable), exactly as :func:`collections._stale_claim_id` is on the
     claim path: between the two, a live process may heartbeat, and the write must lose that race.
     """
     running = list(await session.scalars(select(Run).where(Run.result == "running")))
-    stale = [
-        run.id for run in running if _as_aware(run.heartbeat_at or run.started) <= cutoff
-    ]
+    stale = [run.id for run in running if not claim_is_live(run, now)]
     return stale, len(running)
 
 
@@ -280,8 +283,8 @@ async def reap_orphaned_runs(session: AsyncSession) -> int:
     was actually reaped rather than what was selected.
     """
     now = _utcnow()
-    cutoff = now - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS)
-    stale, live = await _stale_run_ids(session, cutoff)
+    cutoff = heartbeat_cutoff(now)
+    stale, live = await _stale_run_ids(session, now)
     if not stale:
         if live:
             log.debug(
@@ -293,7 +296,7 @@ async def reap_orphaned_runs(session: AsyncSession) -> int:
         .where(
             Run.id.in_(stale),
             Run.result == "running",
-            func.coalesce(Run.heartbeat_at, Run.started) <= cutoff,
+            abandoned_claim_clause(cutoff),
         )
         .values(result="interrupted", finished=now)
     )

@@ -85,8 +85,12 @@
       <div class="review-list__head">
         <h3><a href="/collection/{{ g.id }}/review" style="color:inherit">{{ g.name }}</a></h3>
         <div class="review-list__legend">
-          {% if g.missing %}<span class="legend__stat">{{ m.dot("var(--danger)", size=7) }}{{ g.missing }} missing</span>{% endif %}
-          {% if g.modified %}<span class="legend__stat">{{ m.dot("var(--warn)", size=7) }}{{ g.modified }} modified</span>{% endif %}
+          {#- BOTH counts, always, including a zero. "12 missing" alone leaves the reader to infer
+              whether the modified count is zero or simply unmentioned, and the two carry different
+              consequences (a missing file is gone; a modified one changed under the baseline). The
+              zero is stated in a muted dot so an absent problem is not drawn as a present one. -#}
+          <span class="legend__stat">{{ m.dot("var(--danger)" if g.missing else "var(--text-3)", size=7) }}{{ g.missing }} missing</span>
+          <span class="legend__stat">{{ m.dot("var(--warn)" if g.modified else "var(--text-3)", size=7) }}{{ g.modified }} modified</span>
           {# One pill per group, so its OOB id carries the collection id (design D10). #}
           <span id="review-open-pill-{{ g.id }}">
             {% with review_open = g.review_open %}{% include "partials/_review_open_pill.html" %}{% endwith %}
@@ -101,8 +105,19 @@
       {% endfor %}
       {% if g.more > 0 %}
         <div class="review-list__more">
-          Showing the first {{ g.shown }} of {{ g.issues }} in {{ g.name }} — {{ g.more }} more.
-          <a href="/collection/{{ g.id }}/review">Review all in {{ g.name }}</a> to see them.
+          {%- if g.shown == 0 -%}
+            {#- The page-wide row budget was spent by the groups above, so this collection has its
+                heading and its counts but not one row. "Showing the first 0 of N" describes that
+                as a listing, which it is not — it is a listing that could not start. Say what
+                happened and point at the page that can show them. -#}
+            Budget spent — the collections above used this page's row limit, so none of
+            {{ g.name }}'s rows are listed here.
+            <a href="/collection/{{ g.id }}/review">Open {{ g.name }}'s own review</a> for its
+            {{ g.issues }} issue{{ "" if g.issues == 1 else "s" }}.
+          {%- else -%}
+            Showing the first {{ g.shown }} of {{ g.issues }} in {{ g.name }} — {{ g.more }} more.
+            <a href="/collection/{{ g.id }}/review">Review all in {{ g.name }}</a> to see them.
+          {%- endif -%}
         </div>
       {% endif %}
     </div>

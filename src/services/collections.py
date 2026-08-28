@@ -12,7 +12,7 @@ import logging
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from sqlalchemy import case, func, select, update
@@ -43,6 +43,53 @@ KEEPALIVE_INTERVAL_SECONDS = RUN_HEARTBEAT_TIMEOUT_SECONDS / 3
 # construction: the operation keeps running, the lease simply ages out, and the fence below stops it
 # before it can mutate anything under a claim it no longer holds.
 _KEEPALIVE_MAX_CONSECUTIVE_FAILURES = 3
+
+
+# --- the ONE liveness predicate ---------------------------------------------------------------
+#
+# Three sites decide whether an in-progress claim is still alive: the dead-man's switch
+# (``scheduler.compute_health`` leg (b)), the in-band reclaimer (:func:`reclaim_stale_claim`) and the
+# fleet reaper (``scheduler.reap_orphaned_runs``). They used to spell the test three times -- a
+# Python ``age <= TIMEOUT`` on one side and a SQL ``coalesce(heartbeat_at, started) <= cutoff`` on
+# the other -- which put the EXACT boundary on both sides of the line at once: a heartbeat exactly
+# one interval old read *live* to health and *abandoned* to both reclaimers, so a claim could be
+# reclaimed out from under a collection the switch was still calling fresh. One rule, defined once,
+# in two forms that are exact complements of each other:
+#
+#   abandoned  <=>  coalesce(heartbeat_at, started) <= now - RUN_HEARTBEAT_TIMEOUT_SECONDS
+#   live       <=>  coalesce(heartbeat_at, started) >  now - RUN_HEARTBEAT_TIMEOUT_SECONDS
+#
+# The boundary itself is therefore ABANDONED, on every surface. That is the safe direction: at the
+# instant a lease may be taken, nothing may still be calling the collection fresh on the strength of
+# the run that lease belonged to.
+
+
+def as_aware(dt: datetime) -> datetime:
+    """Treat a naive datetime (SQLite round-trips timezone-aware values as naive) as UTC."""
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def heartbeat_cutoff(now: datetime) -> datetime:
+    """The instant at or before which a run's last reported progress makes its claim abandoned."""
+    return now - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS)
+
+
+def abandoned_claim_clause(cutoff: datetime):
+    """SQL form of the predicate: this run has reported no progress since ``cutoff``.
+
+    Used by both reclaimers, in the SELECT that finds a stale claim and again in the guarded UPDATE
+    that takes it, so the decision is atomic with the write.
+    """
+    return func.coalesce(Run.heartbeat_at, Run.started) <= cutoff
+
+
+def claim_is_live(run: Run, now: datetime) -> bool:
+    """Python form of the predicate: this ``running`` run is still reporting progress.
+
+    The exact complement of :func:`abandoned_claim_clause` at the same ``now`` -- including at the
+    boundary, where both agree the claim is abandoned.
+    """
+    return as_aware(run.heartbeat_at or run.started) > heartbeat_cutoff(now)
 
 
 class LeaseLost(RuntimeError):
@@ -126,7 +173,7 @@ async def _stale_claim_id(
         select(Run.id).where(
             Run.collection_id == collection_id,
             Run.result == "running",
-            func.coalesce(Run.heartbeat_at, Run.started) <= cutoff,
+            abandoned_claim_clause(cutoff),
         )
     )
 
@@ -157,7 +204,7 @@ async def reclaim_stale_claim(collection_id: int) -> bool:
     that merely asked whether the collection was busy.
     """
     now = utcnow()
-    cutoff = now - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS)
+    cutoff = heartbeat_cutoff(now)
     try:
         async with get_sessionmaker()() as session:
             stale_id = await _stale_claim_id(session, collection_id, cutoff)
@@ -168,7 +215,7 @@ async def reclaim_stale_claim(collection_id: int) -> bool:
                 .where(
                     Run.id == stale_id,
                     Run.result == "running",
-                    func.coalesce(Run.heartbeat_at, Run.started) <= cutoff,
+                    abandoned_claim_clause(cutoff),
                 )
                 .values(result="interrupted", finished=now)
             )

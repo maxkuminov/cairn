@@ -10,6 +10,13 @@
        answers. It must NEVER default to Healthy: asserting a verdict that has not been computed, on
        the one surface that means "the dead-man's switch is fine", is this change's whole defect
        class in miniature.
+    4. It FAILS CLOSED, and the failing half is split between the server and these hooks. htmx does
+       not swap a 4xx/5xx response, so without them a poll that errors leaves the LAST verdict on
+       screen — and a "Healthy" that outlives the datastore is the same fabricated assurance as (3),
+       only harder to notice because it was true once. `/health-pill` renders `status="error"` for
+       what it can catch; `hx-on::response-error` / `::send-error` / `::timeout` cover what it
+       cannot (a 500 from a failing dependency, a dropped network, a hung request) by neutralizing
+       the pill in place. The element keeps its poll, so the next good answer swaps it back.
 
     `stale_count` is the number of the VIEWER's own stale collections, from the same HealthReport
     that produced `status` (the panel's health is owner-scoped; /healthz stays fleet-global). -#}
@@ -18,6 +25,9 @@
 {%- set n = stale_count | default(0) -%}
 <a id="health-pill" href="/collections"
    hx-get="/health-pill" hx-trigger="{{ health_pill_trigger | default('every 30s') }}" hx-swap="outerHTML"
+   hx-on::response-error="window.cairnHealthPillFailed(this)"
+   hx-on::send-error="window.cairnHealthPillFailed(this)"
+   hx-on::timeout="window.cairnHealthPillFailed(this)"
    class="health-pill {% if unknown %}is-unknown{% elif not ok %}is-{{ status }}{% endif %}"
    title="Collection scan freshness — exposed at /healthz for external monitors">
   {{ m.dot("var(--text-3)" if unknown else ("var(--ok)" if ok else "var(--danger)"), size=7, pulse=not unknown) }}
@@ -25,7 +35,7 @@
     {%- if unknown -%}Checking&hellip;
     {%- elif ok -%}Healthy
     {%- elif status == "degraded" -%}Degraded &middot; {{ n }} collection{{ "" if n == 1 else "s" }}
-    {%- else -%}Error
+    {%- else -%}Health check failed
     {%- endif -%}
   </span>
   <span class="health-pill__url mono">/healthz</span>

@@ -168,9 +168,19 @@
    stored as text at all — never usable paths. They are labelled as such and are deliberately not
    offered through any "Copy paths" control. #}
 {% macro run_health_note(c, sample_mode="details") -%}
-{%- if c.last_result == "partial" and c.last_errors -%}
+{#- The `partial` arm is gated on the RESULT, never on the count. A run row written before
+    migration 0012 carries `errors = 0` because the column did not exist when it ran, not because
+    nothing was skipped — and `partial` is written by exactly one thing: files the scan could not
+    read or store. Gating on the count rendered those legacy rows as a clean scan, which is the
+    false assurance this note exists to remove, restricted to the rows nobody has rescanned yet.
+    They say what is known and admit what is not; the next scan replaces them with a real count. -#}
+{%- if c.last_result == "partial" -%}
   <div class="run-health run-health--warn">
+    {%- if c.last_errors %}
     {{ icon("alert", size=12, stroke=2) }} partial &mdash; {{ "{:,}".format(c.last_errors) }} file{{ "" if c.last_errors == 1 else "s" }} skipped
+    {%- else %}
+    {{ icon("alert", size=12, stroke=2) }} partial &mdash; files skipped (count not recorded)
+    {%- endif %}
     {%- if c.last_error_sample %}
       {%- if sample_mode == "inline" -%}
         {# The collection CARD is itself one big <a>, so the sample cannot be a <details> there:

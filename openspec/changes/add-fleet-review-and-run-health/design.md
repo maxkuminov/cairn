@@ -286,7 +286,7 @@ Therefore:
    **deleted**, with a comment naming this reason, so the next reader does not re-derive #24's
    original wording.
 2. **Retry**, offered only where retrying can change the answer: `transport_error` and
-   `inconclusive`. It re-posts the same `file_id` to `/verify/run` with the page's CSRF token and
+   `inconclusive`. It re-posts the same `file_id` to `POST /verify` with the page's CSRF token and
    swaps the result container in place. It is **not** offered on `Not notarized yet`, `Queued to
    stamp`, `Proof file could not be read`, or any digest-mismatch verdict: those re-run to the same
    answer, and a Retry button beside them implies the result is provisional when it is settled.

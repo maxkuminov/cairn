@@ -149,8 +149,12 @@ The panel SHALL serve a fleet-wide review page listing every missing or modified
 the collections the current user owns, grouped by collection, so that a fleet-wide issue count has a
 destination that can act on it. Collections with no missing or modified files SHALL NOT be listed.
 
-Each group SHALL name its collection, state that collection's missing and modified counts, show its
-count of unreviewed events, and offer a link to that collection's own review view. Within a group,
+Each group SHALL name its collection, state **both** that collection's missing and modified counts —
+including a count that is zero, since an unstated count cannot be told apart from an absent one, and
+the two kinds carry different consequences — show its count of unreviewed events, and offer a link to
+that collection's own review view. A group rendered with **no** rows because the page-wide render
+budget was already spent SHALL say that is what happened and point at the collection's own review
+view for its issues, rather than describing itself as showing the first none of them. Within a group,
 missing files SHALL be listed before modified files. Groups SHALL be ordered worst-first (by missing
 count, then modified count, then name).
 
@@ -270,7 +274,16 @@ answer different questions.
 
 The indicator SHALL NOT assert a health verdict it has not computed. Before the first health poll of
 a page has answered, it SHALL render a neutral "checking" state; it SHALL NOT render a healthy state
-as a placeholder. There SHALL be exactly one health indicator implementation in the panel: no page
+as a placeholder.
+
+The indicator SHALL also fail **closed**: a health poll that does not produce a verdict SHALL NOT
+leave the previous verdict displayed. Where the failure is reachable by the server (the health
+computation itself raising), the poll SHALL answer with a rendered non-healthy "health check failed"
+state rather than an error status, since an error status is not swapped into the page. Where it is
+not (a failing request dependency, a transport error, a timeout), the rendered indicator SHALL carry
+a client-side error hook that replaces the standing verdict with the same failed state. A previously
+healthy indicator surviving a datastore or transport outage is the same fabricated assurance as a
+placeholder verdict, and a more durable one, because every subsequent poll fails the same way. There SHALL be exactly one health indicator implementation in the panel: no page
 SHALL hand-render a duplicate of it, and no page SHALL show a static health status that is computed
 from nothing.
 
@@ -290,6 +303,13 @@ collection's identifier, so a card can be matched to its freshness without match
 - **WHEN** a panel page is rendered before its health poll has answered
 - **THEN** the health indicator SHALL render a neutral checking state and SHALL NOT render a healthy
   verdict
+
+#### Scenario: A failed health poll does not leave a health claim standing
+
+- **WHEN** the indicator has rendered a healthy verdict and a subsequent poll fails, whether because
+  the health computation raises or because the request never reaches the handler
+- **THEN** the indicator SHALL stop claiming health and SHALL show a non-healthy "health check
+  failed" state until a poll produces a verdict again
 
 #### Scenario: The stale collection is identified where the link lands
 

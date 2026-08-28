@@ -129,8 +129,10 @@ app.add_middleware(SessionMiddleware, secret_key=_session_secret, same_site="lax
 async def healthz() -> JSONResponse:
     """Liveness + per-collection scan freshness, for an external dead-man's-switch monitor.
 
-    Returns 503 ``error`` when the datastore is unreachable, 503 ``degraded`` when any collection is
-    stale, and 200 ``ok`` only when reachable AND no collection is stale.
+    Returns 503 ``error`` when the datastore is unreachable **or the freshness read fails for any
+    other reason**, 503 ``degraded`` when any collection is stale, and 200 ``ok`` only when reachable
+    AND no collection is stale. Every failure mode answers in the same parseable shape: a monitor
+    that receives an unstructured 500 learns nothing about the installation it is watching.
 
     **Fleet-global, deliberately.** ``compute_health`` is called with no ``user_id``: this endpoint
     monitors the *installation*, not a user, and a machine-facing dead-man's switch that silently
@@ -151,14 +153,29 @@ async def healthz() -> JSONResponse:
     from .services.scheduler import compute_health
 
     settings = get_settings()
-    if not await ping():
-        return JSONResponse(
-            {"status": "error", "mode": settings.auth_mode, "version": __version__},
-            status_code=503,
-        )
+    unreachable = JSONResponse(
+        {"status": "error", "mode": settings.auth_mode, "version": __version__},
+        status_code=503,
+    )
 
-    async with get_sessionmaker()() as session:
-        report = await compute_health(session, settings)
+    # ONE datastore-error boundary around the whole read, not just around `ping()`. The probe and
+    # the freshness queries are two separate trips to the datastore: a database that answers the
+    # first and fails the second (or a session that cannot be opened at all, or a freshness SELECT
+    # that raises) is exactly the outage this endpoint exists to report. Leaving that gap open
+    # returned a bare, unstructured HTTP 500 — a body the polling monitor cannot parse, carrying no
+    # `status`, no `mode` and no `version`, and indistinguishable from a reverse proxy's own error.
+    # `Exception`, deliberately, not `SQLAlchemyError`: the contract of a dead-man's switch is that
+    # every way it can fail to answer produces the SAME structured "error" verdict. A driver-level
+    # OSError, a cancelled connection or a bug in the freshness read must not be the one path that
+    # degrades into an unreadable 500.
+    try:
+        if not await ping():
+            return unreachable
+        async with get_sessionmaker()() as session:
+            report = await compute_health(session, settings)
+    except Exception:
+        logger.warning("/healthz: health computation failed — reporting error", exc_info=True)
+        return unreachable
 
     body = {
         "status": report.status,

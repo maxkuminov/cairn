@@ -565,11 +565,30 @@ async def health_pill(
 
     Both the verdict and the count come from the SAME :class:`HealthReport` — never a second query,
     which could disagree with the first.
+
+    **It fails CLOSED.** htmx does not swap a 4xx/5xx response, so a poll that raises leaves the
+    previously rendered verdict standing — and the verdict most likely to be standing is "Healthy".
+    A green pill that survives the datastore going down is precisely the false assurance this
+    indicator was rebuilt to remove, and it would be indefinite: every subsequent poll fails the
+    same way. So a failure here is answered with a rendered ``error`` pill (HTTP 200, so the swap
+    happens) rather than propagated. The transport and dependency failures this handler never sees —
+    a network drop, a timeout, a failing ``get_session``/``current_user`` dependency, a 500 from
+    anywhere above — are caught by the pill's own htmx error hooks (``partials/health_pill.html``),
+    which neutralize the standing verdict client-side. Server and client cover disjoint halves of
+    the same rule: **no poll failure may leave a health claim on screen.**
     """
     from ..services.scheduler import compute_health
 
     settings = get_settings()
-    report = await compute_health(session, settings, user_id=user.id)
+    try:
+        report = await compute_health(session, settings, user_id=user.id)
+    except Exception:
+        logging.getLogger("cairn.panel").warning(
+            "health pill: health computation failed — rendering the failed state", exc_info=True
+        )
+        return templates.TemplateResponse(
+            request, "partials/health_pill.html", {"status": "error", "stale_count": 0}
+        )
     return templates.TemplateResponse(
         request,
         "partials/health_pill.html",

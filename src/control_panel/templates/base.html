@@ -20,6 +20,34 @@
         var meta = document.querySelector('meta[name="csrf-token"]');
         if (meta) { e.detail.headers["X-CSRF-Token"] = meta.getAttribute("content"); }
       });
+
+      // The health pill fails CLOSED. htmx does not swap a 4xx/5xx response, so a failing poll
+      // would otherwise leave the LAST rendered verdict on screen indefinitely — and the verdict
+      // most likely to be standing is "Healthy". A green pill that outlives the datastore is the
+      // fabricated assurance this indicator exists to prevent, so any error that never reaches the
+      // route (a 500 from a failing dependency, a dropped connection, a timeout) neutralizes the
+      // pill in place instead. Defined here, before htmx loads, so both the server-rendered pill
+      // and every swapped-in replacement find it; the element keeps polling, so the next good
+      // answer swaps the real verdict back.
+      window.cairnHealthPillFailed = function (el) {
+        if (!el) { return; }
+        el.classList.remove("is-unknown", "is-degraded");
+        el.classList.add("is-error");
+        var label = el.querySelector(".health-pill__label");
+        if (label) { label.textContent = "Health check failed"; }
+        el.querySelectorAll(".dot__core, .dot__pulse").forEach(function (d) {
+          d.style.background = "var(--danger)";
+        });
+        el.setAttribute("title", "The panel could not reach its own health check — this pill is not reporting a verdict.");
+      };
+      // Belt and braces: a delegated listener catches the same failures even if the element's
+      // inline hooks are ever lost to a swap or a CSP that drops attribute handlers.
+      ["htmx:responseError", "htmx:sendError", "htmx:timeout"].forEach(function (evt) {
+        document.addEventListener(evt, function (e) {
+          var el = e.target;
+          if (el && el.id === "health-pill") { window.cairnHealthPillFailed(el); }
+        });
+      });
     </script>
   </head>
   <body>

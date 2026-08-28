@@ -55,7 +55,9 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def _new_collection(root: Path, *, cadence: int = 900, name: str | None = None) -> int:
+async def _new_collection(
+    root: Path, *, cadence: int = 900, name: str | None = None, ots_mode: str = "none"
+) -> int:
     """One collection owned by the implicit (single-mode) user. Threshold = max(2*cadence, floor)."""
     from src.database import ensure_implicit_user, get_sessionmaker
     from src.models.db import User
@@ -71,7 +73,7 @@ async def _new_collection(root: Path, *, cadence: int = 900, name: str | None = 
             name=name or root.name,
             root=str(root),
             mode="worm",
-            ots_mode="none",
+            ots_mode=ots_mode,
             hash_cadence_seconds=cadence,
         )
         return c.id
@@ -764,11 +766,18 @@ def _seed_run_state(root_name: str):
     return build
 
 
-def test_a_partial_completed_scan_says_so_at_every_site(cairn_env):
+@pytest.mark.parametrize("ots_mode", ["none", "perfile"])
+def test_a_partial_completed_scan_says_so_at_every_site(cairn_env, ots_mode):
+    """3.29, both ``ots_mode`` values at the detail header.
+
+    A `perfile` collection has no "Last scan" tile — that tile exists only for `ots_mode == "none"`
+    — so the header note under the status pill is the ONLY place such a collection can learn its
+    last scan was partial. Testing one mode left the other's single disclosure site unasserted.
+    """
     holder = {}
 
     async def seed():
-        cid = await _new_collection(cairn_env / "rh-partial")
+        cid = await _new_collection(cairn_env / f"rh-partial-{ots_mode}", ots_mode=ots_mode)
         now = _utcnow()
         await _add_run(
             cid, result="partial", started=now - timedelta(minutes=5), finished=now,
@@ -1087,3 +1096,199 @@ def test_a_transport_failure_under_a_verified_verdict_still_discloses_its_reason
         assert not _has_retry(html)
         assert BACKEND_MESSAGE not in html
 
+
+
+# --- post-audit: the failure paths the audit found open ---------------------------------------
+#
+# All three findings are one shape: a surface that answers with something OTHER than a health
+# verdict when its own dependencies fail, leaving the reader with the last verdict — which, on a
+# monitor, is the one most likely to have been "fine".
+
+
+def test_healthz_reports_error_when_the_freshness_read_fails_after_ping_succeeds(cairn_env):
+    """MAJOR 1: the probe and the freshness read are two trips to the datastore.
+
+    `ping()` answering does not mean the next query will. Before the fix, only a false `ping()` was
+    converted into the structured 503; a session that could not be opened, or a freshness SELECT
+    that raised, escaped as a bare HTTP 500 — a body the polling monitor cannot parse, with no
+    `status`, no `mode` and no `version`, indistinguishable from a reverse proxy's own error page.
+    """
+
+    async def seed():
+        await _new_collection(cairn_env / "hz-midway", cadence=900)
+
+    with _make_client(seed) as client:
+        from src.services import scheduler as scheduler_svc
+
+        async def _boom(*a, **kw):
+            raise RuntimeError("datastore went away mid-read")
+
+        original = scheduler_svc.compute_health
+        scheduler_svc.compute_health = _boom
+        try:
+            resp = client.get("/healthz")
+        finally:
+            scheduler_svc.compute_health = original
+
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["status"] == "error"
+        assert body["mode"] and body["version"]  # still parseable by the monitor
+        assert "collections" not in body
+
+        # …and it recovers rather than latching.
+        assert client.get("/healthz").status_code == 200
+
+
+def test_the_health_pill_fails_closed_after_a_successful_healthy_fill(cairn_env):
+    """MAJOR 2 (server half): htmx does not swap a 5xx, so a raising poll must not raise.
+
+    The sequence is the one that matters: a poll answers "Healthy", then the datastore goes away.
+    Every later poll fails the same way, so a propagated error would leave that green verdict on
+    screen indefinitely — a health claim outliving the health of the thing it describes.
+    """
+
+    async def seed():
+        cid = await _new_collection(cairn_env / "pill-failclosed", cadence=900)
+        now = _utcnow()
+        await _add_run(cid, result="ok", started=now, finished=now)
+
+    with _make_client(seed) as client:
+        assert "Healthy" in client.get("/health-pill").text  # the verdict that must not survive
+
+        from src.services import scheduler as scheduler_svc
+
+        async def _boom(*a, **kw):
+            raise RuntimeError("freshness read failed")
+
+        original = scheduler_svc.compute_health
+        scheduler_svc.compute_health = _boom
+        try:
+            resp = client.get("/health-pill")
+        finally:
+            scheduler_svc.compute_health = original
+
+        # 200, deliberately: an error status would not be swapped in, which is the defect.
+        assert resp.status_code == 200
+        html = resp.text
+        assert "Healthy" not in html
+        assert "Health check failed" in html
+        assert "is-error" in html  # non-green
+        assert "var(--danger)" in html
+
+        # It is not latched either: the next good poll states the real verdict again.
+        assert "Healthy" in client.get("/health-pill").text
+
+
+def test_the_health_pill_carries_client_side_error_hooks_for_what_the_route_cannot_catch(
+    cairn_env,
+):
+    """MAJOR 2 (client half): a failing dependency, a timeout or a dropped connection never reaches
+    the route handler, so the fragment carries htmx error hooks and the shell defines what they do.
+
+    Asserted by presence and shape — this suite has no browser — but the shape is the contract: the
+    hooks name the three htmx failure events, and the handler they call replaces the label with the
+    failed state rather than merely styling it.
+    """
+
+    async def seed():
+        cid = await _new_collection(cairn_env / "pill-hooks", cadence=900)
+        now = _utcnow()
+        await _add_run(cid, result="ok", started=now, finished=now)
+
+    with _make_client(seed) as client:
+        for html in (client.get("/").text, client.get("/health-pill").text):
+            # On the element itself, so a swapped-in replacement carries them too.
+            assert 'hx-on::response-error="window.cairnHealthPillFailed(this)"' in html
+            assert 'hx-on::send-error="window.cairnHealthPillFailed(this)"' in html
+            assert 'hx-on::timeout="window.cairnHealthPillFailed(this)"' in html
+
+        page = client.get("/").text
+        assert "window.cairnHealthPillFailed = function" in page
+        assert 'label.textContent = "Health check failed"' in page
+        assert 'el.classList.add("is-error")' in page
+        # The delegated listener covers the same events for a pill whose attributes were lost.
+        assert '"htmx:responseError", "htmx:sendError", "htmx:timeout"' in page
+
+
+def test_the_exact_abandonment_boundary_reads_the_same_to_health_and_to_both_reclaimers(
+    cairn_env, monkeypatch
+):
+    """MINOR: one predicate, frozen clock, heartbeat EXACTLY one interval old.
+
+    Health used to call that heartbeat live (`age <= timeout`) while both reclaimers called it
+    abandoned (`heartbeat <= cutoff`), so at the boundary a claim could be reclaimed out from under
+    a collection the dead-man's switch was still calling fresh. The boundary is now abandoned
+    everywhere.
+    """
+
+    async def go():
+        from src.services import collections as collections_svc
+        from src.services import scheduler as scheduler_svc
+        from src.services.collections import (
+            RUN_HEARTBEAT_TIMEOUT_SECONDS,
+            claim_is_live,
+            heartbeat_cutoff,
+        )
+        from src.database import get_sessionmaker
+        from src.models.db import Run
+
+        cid = await _new_collection(cairn_env / "boundary", cadence=900)
+        await _age_collection(cid, seconds=6 * 3600)  # past the startup grace
+        frozen = _utcnow()
+        on_the_line = frozen - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS)
+        run_id = await _add_run(
+            cid, result="running", started=on_the_line, heartbeat=on_the_line
+        )
+
+        # Freeze both clocks so the boundary is exact rather than "a few microseconds past".
+        monkeypatch.setattr(scheduler_svc, "_utcnow", lambda: frozen)
+        monkeypatch.setattr(collections_svc, "utcnow", lambda: frozen)
+
+        async with get_sessionmaker()() as s:
+            run = await s.get(Run, run_id)
+            # The predicate itself, and the SQL clause the reclaimers use, at the same instant.
+            assert claim_is_live(run, frozen) is False
+            stale_id = await collections_svc._stale_claim_id(
+                s, cid, heartbeat_cutoff(frozen)
+            )
+            assert stale_id == run_id
+
+        # The switch agrees: no freshness from an abandoned claim, at the boundary included.
+        report = await _health()
+        assert report.collections[0].state == "stale"
+        assert report.status == "degraded"
+
+        # …and the claim is genuinely reclaimable at that same instant, so the two never disagree.
+        assert await collections_svc.reclaim_stale_claim(cid) is True
+
+    asyncio.run(go())
+
+
+def test_a_legacy_partial_run_with_no_recorded_count_still_says_files_were_skipped(cairn_env):
+    """Verifier concern (a): a `partial` row written before migration 0012 has `errors = 0`.
+
+    The zero means "this column did not exist when the run happened", not "nothing was skipped" —
+    and `partial` is written by exactly one thing. Gating the note on the count rendered those rows
+    as a clean scan. It now says what is known and admits what is not; the next scan replaces it
+    with a real count.
+    """
+    holder = {}
+
+    async def seed():
+        cid = await _new_collection(cairn_env / "rh-legacy-partial")
+        now = _utcnow()
+        await _add_run(
+            cid, result="partial", started=now - timedelta(minutes=5), finished=now,
+            errors=0, error_sample=None,
+        )
+        holder["cid"] = cid
+
+    with _make_client(seed) as client:
+        for site, html in _render_sites(client, holder["cid"]).items():
+            assert "partial" in html, site
+            assert "files skipped (count not recorded)" in html, site
+            assert "run-health--warn" in html, site
+            # No fabricated number, and no sample it does not have.
+            assert "0 files skipped" not in html, site
+            assert "What was skipped" not in html, site
