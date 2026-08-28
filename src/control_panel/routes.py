@@ -500,7 +500,9 @@ async def _event_view(session: AsyncSession, event: Event) -> dict[str, Any]:
         "id": event.id,
         "kind": event.kind,
         "relpath": relpath,
-        # Free-text context (set for `moved` events: "old → new path").
+        # Free-text context. `moved` carries "old → new path"; `restored_changed` carries the
+        # recorded and observed digests in full; a `restored` event whose bytes could not be
+        # compared (no digest was on record) says so here.
         "detail": event.detail,
         "collection_name": collection.name if collection else "—",
         "at": humanize_delta(event.detected_at),

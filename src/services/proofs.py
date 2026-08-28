@@ -328,38 +328,53 @@ async def run_stamp_backfill(
 ) -> Run:
     """On-demand "Stamp all" backfill recorded as a typed ``kind='stamp'`` run with live progress.
 
-    Queues the `none`-state baseline (:func:`mark_unstamped_pending`), opens a ``running`` stamp run
-    whose ``total`` is the number of files now pending (the work it will do — known up front, so the
-    badge is exact), then stamps them via the batched :func:`stamp_pending`, advancing ``processed``
-    per batch. A stamp failure can never propagate: it is recorded as ``result='error'`` on the run.
-    Returns the finalized run. ``kind='stamp'`` runs never count toward scan freshness.
+    Claims the collection's single-operation slot with a ``running`` stamp run, THEN queues the
+    `none`-state baseline (:func:`mark_unstamped_pending`) and records ``total`` — the number of
+    files now pending, i.e. the work it will do, so the badge is exact — then stamps them via the
+    batched :func:`stamp_pending`, advancing ``processed`` per batch. A stamp failure can never
+    propagate: it is recorded as ``result='error'`` on the run. Returns the finalized run (a refused
+    one comes back still ``running``, the one state a finished backfill can never be in).
+    ``kind='stamp'`` runs never count toward scan freshness.
     """
     settings = settings or get_settings()
     # Read the identity BEFORE the claim: a lost claim rolls back, which expires the ORM object,
     # and an async lazy refresh on the refusal path raises instead of reporting the refusal.
     collection_id = collection.id
-    await mark_unstamped_pending(session, collection)
-    total = await session.scalar(
-        select(func.count())
-        .select_from(FileEntry)
-        .where(FileEntry.collection_id == collection_id, FileEntry.ots_state == "pending")
-    )
     run = Run(
         collection_id=collection_id,
         kind="stamp",
         started=_utcnow(),
         result="running",
-        total=int(total or 0),
     )
     # Atomically claim the collection's single in-progress slot (partial unique index on a `running`
     # run) so a concurrent scan/stamp can't run a second writer over the same collection. A lost claim
     # means an op is already in flight — refuse this backfill rather than starting it.
+    #
+    # The claim comes FIRST, before `mark_unstamped_pending`, and that order is load-bearing:
+    # queueing the baseline is itself a committed write to the collection's files, so doing it up
+    # front meant a REFUSED backfill still flipped every `ots_state='none'` row to `pending` — a
+    # mutation made outside the claim, which the operation actually holding the slot would then pick
+    # up in its own stamp pass, while the caller was told "nothing was stamped" (design D10; a
+    # refusal must change nothing).
     if await collections.claim_run(session, run) is None:
         log.info(
             "stamp backfill refused for collection %s — another operation already claimed it",
             collection_id,
         )
         return run
+
+    # Inside the claim now: queue the `none`-state baseline and take the exact denominator for the
+    # badge. `total` is briefly NULL (indeterminate progress) between the claim and this commit.
+    await mark_unstamped_pending(session, collection)
+    run.total = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(FileEntry)
+            .where(FileEntry.collection_id == collection_id, FileEntry.ots_state == "pending")
+        )
+        or 0
+    )
+    await session.commit()
 
     async def _progress(done: int) -> None:
         run.processed = done

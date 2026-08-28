@@ -131,9 +131,16 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                     skipped_names.append(name)
                     continue
                 examined += 1
+                # A restored-changed file is ALSO counted in `modified` (its status is `modified`),
+                # so the line would otherwise report a wrong restore as an ordinary edit. Appended
+                # only when non-zero, so the ordinary line stays byte-identical.
+                came_back = (
+                    f" restored_changed={s.restored_changed}" if s.restored_changed else ""
+                )
                 print(
                     f"[{name}] added={s.added} modified={s.modified} "
-                    f"missing={s.missing} restored={s.restored} baselined={s.baselined} "
+                    f"missing={s.missing} restored={s.restored}{came_back} "
+                    f"baselined={s.baselined} "
                     f"ok={s.ok} errors={s.errors} -> {s.result}"
                 )
                 if s.result == "error":

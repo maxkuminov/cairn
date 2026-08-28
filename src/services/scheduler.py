@@ -17,9 +17,9 @@ never falsely refresh a dead collection's dead-man's switch.
 collection's DB-enforced operation claim, and that is deliberate: proof placement is check-then-act
 (inspect the canonical path -> preserve -> place -> record), so two writers would silently destroy a
 proof. :func:`run_due_scans` claims via ``scan_collection``'s own ``claim_run``; :func:`run_daily_upgrade`
-claims a ``kind='upgrade'`` run before calling into ``proofs``. No lock belongs inside
-``_place_proof``, ``stamp_pending`` or ``upgrade_incomplete`` — the claim wraps them from the caller,
-and ``stamp_pending`` is called from inside a scan that already holds one.
+delegates to ``proofs.upgrade_collection``, which claims a ``kind='upgrade'`` run of its own. No
+lock belongs inside ``_place_proof``, ``stamp_pending`` or ``upgrade_incomplete`` — the claim wraps
+them from the caller, and ``stamp_pending`` is called from inside a scan that already holds one.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from ..config import Settings, get_settings
 from ..database import get_sessionmaker
 from ..models.db import Collection, FileEntry, Run
 from . import proofs, scanner
-from .collections import active_run, claim_run, list_collections
+from .collections import active_run, list_collections
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from fastapi import FastAPI
@@ -271,56 +271,26 @@ async def run_due_scans(
 async def run_daily_upgrade(session: AsyncSession) -> int:
     """Run the OTS upgrade pass across all collections; return the total proofs upgraded.
 
-    For a collection that actually has incomplete proofs to process we open a typed ``kind='upgrade'``
-    run whose ``total`` is the incomplete count (known up front → exact progress) and advance its
-    ``processed`` as proofs are examined. Because :func:`compute_health` keys freshness on
-    ``kind='scan'`` runs only, this ``upgrade`` run never refreshes the dead-man's switch — which is
-    why we can finally record a real run instead of the old "amend the latest scan run" workaround.
-    A collection with no incomplete proofs records nothing (no empty daily runs), and a collection that
-    already has an operation in flight is skipped so we never start a second writer on it.
+    The per-collection body (claim a typed ``kind='upgrade'`` run, upgrade, thread progress,
+    finalize) lives in :func:`proofs.upgrade_collection` so the scheduler and ``cairn upgrade``
+    cannot drift apart — this loop is the fleet iteration and the skip log, nothing more.
+
+    Because :func:`compute_health` keys freshness on ``kind='scan'`` runs only, an ``upgrade`` run
+    never refreshes the dead-man's switch — which is why we can record a real run instead of the old
+    "amend the latest scan run" workaround. A collection with no incomplete proofs records nothing
+    (no empty daily runs), and a collection that already has an operation in flight is skipped so we
+    never start a second writer on it.
     """
     total = 0
     for collection in await list_collections(session):
-        if await active_run(session, collection.id) is not None:
-            log.info("skip upgrade for collection %s — operation already in progress", collection.id)
+        outcome = await proofs.upgrade_collection(session, collection)
+        if outcome.refused:
+            log.info(
+                "skip upgrade for collection %s — operation already in progress",
+                outcome.collection_id,
+            )
             continue
-        incomplete = await session.scalar(
-            select(func.count())
-            .select_from(FileEntry)
-            .where(FileEntry.collection_id == collection.id, FileEntry.ots_state == "incomplete")
-        )
-        if not incomplete:
-            continue  # no work → no run row
-
-        run = Run(
-            collection_id=collection.id,
-            kind="upgrade",
-            started=_utcnow(),
-            result="running",
-            total=int(incomplete),
-        )
-        # Atomically claim the collection's single in-progress slot. The active_run pre-check above is
-        # only advisory; this commit (guarded by the partial unique index) is the race-free claim,
-        # so a manual scan/stamp that started in the same window can't run alongside this upgrade.
-        if await claim_run(session, run) is None:
-            log.info("skip upgrade for collection %s — operation already in progress", collection.id)
-            continue
-
-        async def _progress(done: int, _run: Run = run) -> None:
-            _run.processed = done
-            await session.commit()
-
-        try:
-            result = await proofs.upgrade_incomplete(session, collection, progress=_progress)
-            run.upgraded = result.get("upgraded", 0)
-            run.processed = int(incomplete)
-            run.result = "ok"
-        except Exception:
-            log.exception("upgrade failed for collection %s (%s)", collection.id, collection.name)
-            run.result = "error"
-        run.finished = _utcnow()
-        await session.commit()
-        total += run.upgraded
+        total += outcome.upgraded
     return total
 
 

@@ -399,28 +399,28 @@ new `tests/test_restored_changed.py`.
 
 ## 4. Integration (on the merged result, after both slices land)
 
-- [ ] 4.1 Merge both slices onto the base and run the authoritative gate **once on the merged tree**:
+- [x] 4.1 Merge both slices onto the base and run the authoritative gate **once on the merged tree**:
   `PYTHONPATH=. pytest -q`, `ruff check .`, `alembic upgrade head`.
-- [ ] 4.2 **The interlock test** (belongs to neither slice, so it is written here): a `perfile` file
+- [x] 4.2 **The interlock test** (belongs to neither slice, so it is written here): a `perfile` file
   goes missing → is restored with **different** bytes → the scan classifies `restored_changed` and
   queues a re-stamp → the stamp pass runs. Assert the **original bytes' proof still exists** in the
   archive and the canonical path now holds the new bytes' proof. Without #15 this scenario destroys
   the old proof; without #21 it never happens at all.
-- [ ] 4.2a **The accepted #39 limitation, pinned by a test** (it crosses both slices): move a file so
+- [x] 4.2a **The accepted #39 limitation, pinned by a test** (it crosses both slices): move a file so
   `_reconcile_moves` repoints its `relpath` while `ots_path` still names the old path, then add and
   stamp a new file at that old path. Assert the moved row's original proof is **preserved** (not
   destroyed), that `/verify` on the moved row now reports the established `proof` blame rather than
   passing green, and that verification / download / export / upgrade all still resolve the moved
   row's recorded `ots_path` — i.e. the other file's proof. This is the qualification the
   canonical-consumer scenario carries; the test exists so the limitation is asserted, not assumed.
-- [ ] 4.3 Grep for production callers of every new export (`_place_proof`'s outcome type, the archive
+- [x] 4.3 Grep for production callers of every new export (`_place_proof`'s outcome type, the archive
   path builder, the proof parser, `ots_digest`) — fan-out ships green-but-unwired code.
-- [ ] 4.4 `openspec validate guard-proof-and-restore-integrity --strict` green.
-- [ ] 4.5 `make audit` (pip-audit) green.
+- [x] 4.4 `openspec validate guard-proof-and-restore-integrity --strict` green.
+- [x] 4.5 `make audit` (pip-audit) green.
 
 ## 5. Gates
 
-- [ ] 5.1 **`openspec-verifier` subagent** audits the implementation against the spec deltas.
+- [x] 5.1 **`openspec-verifier` subagent** audits the implementation against the spec deltas.
   Iterate to zero blocking gaps. It must not be an agent that wrote any of the code.
 - [ ] 5.2 **Adversarial Codex pass — mandatory.** This change touches the scan→diff→classify path
   **and** OTS stamp/proof placement: both are CLAUDE.md's named mandatory triggers. Frame it as a

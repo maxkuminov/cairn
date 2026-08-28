@@ -244,7 +244,15 @@ async def scan_collection(
     root = Path(collection.root)
     globs = json.loads(collection.exclude_globs_json or "[]")
     now = _utcnow()
-    summary = RunSummary(collection_id=collection.id)
+    # Identity captured up front, as plain locals. Every `session.rollback()` below — the lost
+    # claim, and the scan-body failure handler — expires EVERY ORM object in the session
+    # (independent of `expire_on_commit=False`, which only covers commits), so a later
+    # `collection.id` would trigger a lazy refresh and raise `MissingGreenlet` from async code.
+    # A logging call on a refusal/failure path must never be the thing that crashes the scan, so
+    # nothing after the claim reads identity off the ORM object.
+    collection_id = collection.id
+    collection_name = collection.name
+    summary = RunSummary(collection_id=collection_id)
     perfile = collection.ots_mode == "perfile"
 
     # Progress estimate: the last completed scan's processed count is the best guess of how many
@@ -279,9 +287,20 @@ async def scan_collection(
 
     if await collections.claim_run(session, run) is None:
         logging.getLogger("cairn.scanner").info(
-            "scan refused for collection %s — another operation already claimed it", collection.id
+            "scan refused for collection %s — another operation already claimed it",
+            collection_id,
         )
         summary.result = "skipped"
+        # The lost claim rolled back, expiring `collection` along with everything else in the
+        # session. Hand it back usable: `run_due_scans` reads `collection.hash_cadence_seconds` in
+        # its `finally` the moment this returns, and a refusal must never be the thing that kills a
+        # scheduler tick. One SELECT, only on the rare contended path.
+        try:
+            await session.get(Collection, collection_id)
+        except Exception:  # pragma: no cover - the datastore is gone; the caller will find out
+            logging.getLogger("cairn.scanner").exception(
+                "reloading collection %s after a refused scan failed", collection_id
+            )
         return summary
     # Capture the id now (expire_on_commit=False keeps it populated): a later rollback expires the
     # ORM object, and the terminal-state fallback must reference the run by id without a lazy load.
@@ -592,13 +611,23 @@ async def scan_collection(
         summary.result = "partial" if summary.errors else "ok"
     except Exception:
         logging.getLogger("cairn.scanner").exception(
-            "scan failed for collection %s; finalizing run as error", collection.id
+            "scan failed for collection %s; finalizing run as error", collection_id
         )
         summary.result = "error"
         # A failed flush/commit leaves the session in a pending-rollback state. Clear it so the run
         # row (committed `running` up front) can still be moved to a terminal state below — otherwise
         # it stays `running` and the concurrency guard blocks the collection until the next restart.
         await session.rollback()
+        # That rollback also expired `collection`, so the stamp/alert tail below would raise
+        # `MissingGreenlet` on its first attribute read. Reload it (same identity-mapped instance,
+        # one SELECT). If even that fails the datastore is gone: the tail's own guards handle it,
+        # and the terminal-run write below is what must still happen.
+        try:
+            await session.get(Collection, collection_id)
+        except Exception:
+            logging.getLogger("cairn.scanner").exception(
+                "reloading collection %s after a failed scan body failed", collection_id
+            )
 
     # Stamp the files this scan queued (perfile only). A stamp failure must never fail the
     # scan: count what succeeded, log the rest, and finish the run normally.
@@ -609,7 +638,7 @@ async def scan_collection(
             run.stamped = await proofs.stamp_pending(session, collection)
         except Exception:
             logging.getLogger("cairn.scanner").exception(
-                "stamp_pending failed for collection %s", collection.id
+                "stamp_pending failed for collection %s", collection_id
             )
 
     run.added = summary.added
@@ -677,7 +706,7 @@ async def scan_collection(
                 logging.getLogger("cairn.scanner").exception(
                     "resolving effective settings failed for collection %s; "
                     "falling back to environment settings",
-                    collection.id,
+                    collection_id,
                 )
 
             # Guard 2 — the link itself, around the synchronous builder only. A corrupt stored
@@ -687,18 +716,18 @@ async def scan_collection(
                 from .panel_url import panel_link
 
                 review_url = panel_link(
-                    eff_settings.public_url, f"/collection/{collection.id}/review"
+                    eff_settings.public_url, f"/collection/{collection_id}/review"
                 )
             except Exception:
                 review_url = None
                 logging.getLogger("cairn.scanner").exception(
                     "building the alert review link failed for collection %s; "
                     "sending a link-free alert",
-                    collection.id,
+                    collection_id,
                 )
 
             alert = Alert(
-                collection_name=collection.name,
+                collection_name=collection_name,
                 summary=", ".join(parts) or "changes detected",
                 paths=[rp for _kind, rp in summary.alarming],
                 detected_at=now,
@@ -707,7 +736,7 @@ async def scan_collection(
             await notify_dispatch(alert, collection, eff_settings)
         except Exception:
             logging.getLogger("cairn.scanner").exception(
-                "alert dispatch failed for collection %s", collection.id
+                "alert dispatch failed for collection %s", collection_id
             )
 
     return summary
