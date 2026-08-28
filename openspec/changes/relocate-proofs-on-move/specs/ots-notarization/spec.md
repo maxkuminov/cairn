@@ -176,6 +176,17 @@ intermediate temp file SHALL use an exclusive non-colliding name, be fsynced bef
 and be removed on every handled failure; a temp file left by a crash is recoverable debris the
 store ignores. Durability SHALL use the proof store's existing directory-sync chain.
 
+**The restore leg.** The sweep SHALL also select rows whose recorded `ots_path` names an
+entry absent on disk — the shape a crash inside loss-proof removal can leave (the pointer
+committed to the canonical path, the aliased unlink took the destination with it, the process
+died before restoration), and generally the shape of a proof file lost to the store. Where the
+superseded archive holds a copy whose committed digest passes the row's corroboration rules
+(`ots_digest`, or `sha256` for a legacy row), the sweep SHALL republish it at the recorded path
+(same durability chain) and warn that a restore occurred; where no corroborated copy exists,
+the sweep SHALL warn loudly naming the row and change nothing. An absent recorded proof is
+thereby found and repaired or reported on every sweep — never discovered only when an operator
+happens to verify.
+
 **Failure classification** splits at the pointer commit. **Before** the commit, filesystem and
 precondition failures are per-row: the row is left unchanged (its pointer still truthful), a
 warning names it, and the sweep continues; they re-warn on every later sweep. A destination the
@@ -265,6 +276,20 @@ there archives it under the never-destroy rules.
   filesystem treats the two proof paths as one directory entry
 - **THEN** the sweep SHALL update `ots_path` to the canonical spelling and SHALL NOT remove the
   entry
+
+#### Scenario: A crash inside loss-proof removal is repaired by the next sweep
+
+- **WHEN** a relocation crashed after the pointer committed to the canonical path and an
+  aliased unlink removed the destination entry, before restoration ran — leaving `ots_path`
+  naming an absent entry while the superseded archive holds the corroborated copy
+- **THEN** the next sweep SHALL select the row (absent recorded entry is an admission shape),
+  republish the archived copy at the recorded path, and warn that a restore occurred
+
+#### Scenario: An absent proof with no corroborated copy is loud, not silent
+
+- **WHEN** a row's recorded `ots_path` names an absent entry and no archive copy passes the
+  row's corroboration rules
+- **THEN** every sweep SHALL warn naming the row and SHALL change nothing
 
 #### Scenario: A permanently refused destination never degrades proof state
 

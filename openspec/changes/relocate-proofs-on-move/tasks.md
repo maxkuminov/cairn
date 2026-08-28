@@ -77,6 +77,12 @@
   back, claim-lost, stop (published destination copy stays inert). A datastore failure at the
   commit follows the operation's normal error handling (rollback + run finalization), never a
   per-row skip on a broken session.
+- [ ] 3.4b The restore leg (design D4b): admission also selects rows whose recorded
+  `ots_path` entry is absent on disk; a corroborated superseded-archive copy is republished
+  at the recorded path (durability chain, "restored" warning); no corroborated copy → loud
+  warning, nothing changed. Tests: the phase-5 crash shape (pointer canonical, entry absent,
+  archive copy present) repairs on the next sweep; absent with no corroborated copy warns
+  every sweep and never writes.
 - [ ] 3.5 Independent admission + typed-run totals (MODIFIED requirement): stale-pointer
   existence alone claims the collection and creates the `kind='upgrade'` run (tripwire
   included); `total` = one work item per operation (one per incomplete + one per stale row; a

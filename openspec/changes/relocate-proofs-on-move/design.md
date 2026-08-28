@@ -182,6 +182,17 @@ copy handled as above. The invariant holds at every boundary, and every completi
 re-established that the bytes at the destination are this row's proof (corroborated at D3,
 byte-compared at 2b) before the pointer moved.
 
+### D4b — The restore leg (audit round 7)
+
+The phase-5 crash window (pointer committed to `dst`; aliased unlink killed `dst`; crash
+before restore) leaves a pointer that is canonical-by-spelling, so staleness never re-selects
+it — a silent break. The sweep therefore has a second admission shape: `ots_path` set but the
+entry absent on disk. With a corroborated superseded-archive copy (same digest rules as D3) →
+republish at the recorded path and warn "restored"; without → warn loudly, change nothing.
+This also surfaces any proof file lost to the store for unrelated reasons, daily, instead of
+at the operator's next manual verify. Cost: one lstat per proof-bearing row per sweep —
+trivial next to the pass's subprocess work.
+
 ### D5 — Failure classification
 
 Filesystem/precondition failures (phases 1–3, 5) are per-row: warn, leave the row unchanged
