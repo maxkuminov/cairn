@@ -204,7 +204,7 @@
 
   <div class="card card--flush review-list">
     <div class="review-list__head">
-      <h3>{{ total_issues }} {{ "file" if total_issues == 1 else "files" }} need attention</h3>
+      <h3>{{ total_issues }} {{ "file" if total_issues == 1 else "files" }} to review</h3>
       <div class="review-list__legend">
         {% if c.counts.missing %}<span class="legend__stat">{{ m.dot("var(--danger)", size=7) }}{{ c.counts.missing }} missing</span>{% endif %}
         {% if c.counts.modified %}<span class="legend__stat">{{ m.dot("var(--warn)", size=7) }}{{ c.counts.modified }} modified</span>{% endif %}

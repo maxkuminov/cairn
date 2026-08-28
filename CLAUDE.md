@@ -301,6 +301,34 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > re-stamp can overwrite an existing proof for a *different* digest (`_place_proof` has no existence
 > check) — is GitHub #15, queued with the restore-digest fix (#21).
 
+> UX-audit sprint 1 (fix-ux-audit-sprint1): the 13 `sprint-1` issues from the Aug-2026 six-auditor
+> UX walk (#13,#14,#17-#20,#22,#23,#26,#31-#34 — meta #12) — every false-reassurance string fixable
+> without new routes or schema. Verify: `VerifyResult` carries typed outcomes (`digest_mismatch`,
+> `proof_mismatch`, `transport_error`+`transport_failures`, `inconclusive`, `unreadable_proof`);
+> verdicts branch by reason (mismatch before transport; verified wins if ANY attestation validates);
+> blame is attributed only via the recorded baseline (re-stamp window reads amber "proof predates
+> this version"; definitive proof-blame deferred to per-proof digests → #15); transport/queued/
+> never-stamped/unreadable/missing-file cards are neutral, never red speculation; same ladder in
+> `cairn verify` (CLI). Vocabulary: `pending`="Queued to stamp", `incomplete`="Pending confirmation"
+> (never summed; stale-incomplete past the upgrade alarm drops the "settles in hours" reassurance);
+> "Acknowledge"→"Mark reviewed"; "Verified OK"→"Matching baseline". Coverage claims are ratios over
+> `status != 'missing'` within `ots_mode='perfile'` only; "all confirmed" ⇔ `complete_active ==
+> stampable > 0`; zero-file collections read muted "No files indexed yet" on every surface.
+> **Accept guard (D14):** every accept-family POST carries a `population_fp` fingerprint (files by
+> identity+generation incl. `first_seen`, open events by id/kind/detected_at, US/RS/GS-framed,
+> sha256) minted from ONE compound UNION-ALL snapshot per GET and recomputed inside a write-locked
+> transaction at POST; drift/absence/BUSY ⇒ fail-closed 303 to `review?stale=1` ("Your action was
+> NOT applied"). Detail header offers no Accept while issues exist ("Review issues" is primary);
+> baseline-new renders only at zero issues AND zero open events; the review-accept's `new`-set
+> promotion is the one disclosed fingerprint exception. Scanner: a restore system-acks the file's
+> open `missing` events (kind-scoped, inside `_drain`'s commit). Dashboard tile links to review
+> (multi → `/collections` until #27's fleet page), sidebar badge counts missing+modified via one
+> helper. One shared clipboard helper (secure-context fallback) serves every copy button. **No
+> schema change.** Gates: 5-round adversarial spec review, 2×2-round + final implementation review
+> (all PASS), openspec-verifier 86/86, live user-representative pass + re-verify (6/6). Follow-ons
+> ticketed: #36 inert global search, #37 detail-page new count, #38 scan-all labelling; fleet-wide
+> `/review` is #27 (later change flips the multi-collection tile href).
+
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
   Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).
