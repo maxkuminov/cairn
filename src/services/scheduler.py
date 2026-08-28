@@ -28,7 +28,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import func, select, update
@@ -145,6 +145,22 @@ async def compute_health(session: AsyncSession, settings: Settings) -> HealthRep
     return HealthReport(status="degraded" if any_stale else "ok", collections=rows)
 
 
+async def _stale_run_ids(
+    session: AsyncSession, cutoff: datetime
+) -> tuple[list[int], int]:
+    """Ids of the ``running`` runs whose last reported liveness predates ``cutoff``, plus the live count.
+
+    Split out from :func:`reap_orphaned_runs` so the read and the guarded write are separately
+    visible (and separately testable), exactly as :func:`collections._stale_claim_id` is on the
+    claim path: between the two, a live process may heartbeat, and the write must lose that race.
+    """
+    running = list(await session.scalars(select(Run).where(Run.result == "running")))
+    stale = [
+        run.id for run in running if _as_aware(run.heartbeat_at or run.started) <= cutoff
+    ]
+    return stale, len(running)
+
+
 async def reap_orphaned_runs(session: AsyncSession) -> int:
     """Mark every STALE ``result='running'`` run as ``interrupted`` (finished now); return the count.
 
@@ -179,25 +195,32 @@ async def reap_orphaned_runs(session: AsyncSession) -> int:
     reads "in progress" — while the dead-man's switch is untouched, since freshness is keyed on
     completed ``kind='scan'`` runs and an unreaped run was never going to refresh it. A collection
     that is late by a threshold's worth of minutes is a delay; a second proof writer is evidence loss.
+
+    **The UPDATE re-asserts staleness, so a concurrent heartbeat wins.** The selection above and the
+    write below are separate statements, and a live holder may report progress in between: writing on
+    the strength of the earlier read alone would revoke a lease the reader had just proved alive —
+    the same race :func:`collections.reclaim_stale_claim` guards against, and the same loss (a second
+    proof writer). Re-asserting the full stale condition (``result='running'`` AND liveness
+    ``<= cutoff``) inside the WHERE makes the decision atomic with the write: a heartbeat that lands
+    first fails the predicate, that row is simply not matched, and the returned count reflects what
+    was actually reaped rather than what was selected.
     """
     now = _utcnow()
-    running = list(await session.scalars(select(Run).where(Run.result == "running")))
-    stale = [
-        run.id
-        for run in running
-        if (now - _as_aware(run.heartbeat_at or run.started)).total_seconds()
-        > RUN_HEARTBEAT_TIMEOUT_SECONDS
-    ]
+    cutoff = now - timedelta(seconds=RUN_HEARTBEAT_TIMEOUT_SECONDS)
+    stale, live = await _stale_run_ids(session, cutoff)
     if not stale:
-        if running:
+        if live:
             log.debug(
-                "%d in-progress run(s) still heartbeating — left claimed, not reaped",
-                len(running),
+                "%d in-progress run(s) still heartbeating — left claimed, not reaped", live
             )
         return 0
     result = await session.execute(
         update(Run)
-        .where(Run.id.in_(stale), Run.result == "running")
+        .where(
+            Run.id.in_(stale),
+            Run.result == "running",
+            func.coalesce(Run.heartbeat_at, Run.started) <= cutoff,
+        )
         .values(result="interrupted", finished=now)
     )
     await session.commit()

@@ -548,6 +548,28 @@ about a **claim** the surfaces made that the check behind it did not establish. 
   run with the module's fixed `NOW` (weeks stale) and no heartbeat, which the gate now — correctly —
   reclaims; it seeds a live heartbeat, which is what an actually in-flight run has.
 
+## 4c. Post-audit hardening (adversarial Codex final round)
+
+- [x] 5.3n **The fleet-wide reaper revoked live leases — the exact race the claim path already
+  guarded.** `scheduler.reap_orphaned_runs` selected the stale `running` runs, then UPDATEd them by
+  `id` with only `result='running'` re-asserted: a heartbeat committed by the live holder between
+  the read and the write was overwritten, marking a working `cairn stamp`/`upgrade` `interrupted`
+  and freeing its collection for a second proof writer (design D10) — the loss the lease exists to
+  prevent, reintroduced by the cleanup meant to protect it, and worse than the in-band path's
+  version because the sweep runs every tick against the whole fleet. The UPDATE's `WHERE` now
+  re-asserts the **full** stale condition (`result='running'` AND
+  `coalesce(heartbeat_at, started) <= cutoff`), mirroring `collections.reclaim_stale_claim`
+  exactly, so a heartbeat that lands first fails the predicate, that row is not matched, and the
+  returned count is what was actually reaped rather than what was selected. The selection moved to
+  `scheduler._stale_run_ids` (the counterpart of `collections._stale_claim_id`) so the read and the
+  guarded write are separately visible and separately testable; the liveness comparison is now the
+  claim path's `<= cutoff` in both, so the two paths cannot disagree at the boundary. Regression:
+  `tests/test_folder_tree_and_progress.py::test_a_concurrent_heartbeat_beats_the_reaping_update`
+  (a second connection commits a heartbeat between the selection and the UPDATE → zero rows reaped,
+  the run stays `running` with no `finished`; it fails without the guard). The `integrity-scanning`
+  delta's reaper requirement gains the guarded-write paragraph and the scenario **"A concurrent
+  heartbeat defeats the startup reconciliation"**.
+
 ## 5. Gates
 
 - [x] 5.1 **`openspec-verifier` subagent** audits the implementation against the spec deltas.

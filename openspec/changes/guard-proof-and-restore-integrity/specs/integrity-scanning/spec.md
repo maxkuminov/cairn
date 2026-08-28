@@ -92,6 +92,14 @@ run it on every tick, and a blocked claim SHALL reconcile a stale blocker in ban
 operation claim is reclaimed without a restart"), so a claim abandoned *after* startup does not
 wedge its collection until the next restart.
 
+Selecting the runs to reconcile and terminating them are separate steps, so a holder proved alive by
+the selection may report progress before the termination is applied. The termination SHALL therefore
+be conditional, at the moment of the write, on each run still being in progress and still stale —
+re-asserting the full stale condition rather than trusting the earlier selection — and the count it
+reports SHALL be the number of runs actually terminated. Revoking a lease whose holder is alive
+would admit a second writer to that collection's proofs, which is the loss the claim exists to
+prevent, so this reconciliation SHALL apply the same guarded write as the in-band reclamation path.
+
 #### Scenario: Abandoned running run is cleared at startup
 
 - **WHEN** the application starts and finds a `runs` row with `result` = `running`, no `finished`,
@@ -105,6 +113,13 @@ wedge its collection until the next restart.
   reported progress is recent, however long ago it started
 - **THEN** that run SHALL be left `running`, so the operation still performing it keeps sole
   ownership of that collection's proofs
+
+#### Scenario: A concurrent heartbeat defeats the startup reconciliation
+
+- **WHEN** the reconciliation selects a `running` run as stale, and that run reports progress before
+  the terminating write is applied
+- **THEN** that run SHALL remain `running` with no `finished`, and the reconciliation SHALL report
+  it as not terminated, so the live holder keeps sole ownership of that collection's proofs
 
 #### Scenario: Interruption is distinguished from failure
 

@@ -366,6 +366,62 @@ def test_reaper_leaves_a_live_claim_alone(cairn_env):
     assert run.result == "running" and run.finished is None
 
 
+
+def test_a_concurrent_heartbeat_beats_the_reaping_update(cairn_env, monkeypatch):
+    """The reaper's selection and its UPDATE are separate statements — the holder may revive between.
+
+    Same race the claim path guards (`test_a_concurrent_heartbeat_beats_the_reclaiming_update`), on
+    the fleet-wide sweep: the run reads stale, then the live process that owns it commits a heartbeat
+    from another connection before the reap lands. The UPDATE re-asserts `result='running'` AND
+    `coalesce(heartbeat_at, started) <= cutoff`, so it matches zero rows and the lease survives —
+    reaping it would have admitted a second writer over that collection's proofs (design D10).
+    """
+    root = cairn_env / "reap-race"
+    root.mkdir()
+
+    async def go():
+        from sqlalchemy import update as sql_update
+
+        from src.database import get_sessionmaker
+        from src.models.db import Run
+        from src.services import scheduler as scheduler_svc
+
+        cid = await _seed_collection(root)
+        dead = _utcnow() - timedelta(
+            seconds=scheduler_svc.RUN_HEARTBEAT_TIMEOUT_SECONDS + 60
+        )
+        async with get_sessionmaker()() as s:
+            s.add(Run(collection_id=cid, kind="upgrade", result="running",
+                      started=dead, heartbeat_at=dead))
+            await s.commit()
+
+        real_stale_run_ids = scheduler_svc._stale_run_ids
+
+        async def racing_stale_run_ids(session, cutoff):
+            stale, live = await real_stale_run_ids(session, cutoff)
+            if stale:
+                # The "dead" holder was not dead: it reports progress before we can reap it.
+                async with get_sessionmaker()() as other:
+                    await other.execute(
+                        sql_update(Run)
+                        .where(Run.id.in_(stale))
+                        .values(heartbeat_at=_utcnow())
+                    )
+                    await other.commit()
+            return stale, live
+
+        monkeypatch.setattr(scheduler_svc, "_stale_run_ids", racing_stale_run_ids)
+        async with get_sessionmaker()() as s:
+            reaped = await scheduler_svc.reap_orphaned_runs(s)
+        async with get_sessionmaker()() as s:
+            runs = list(await s.scalars(select(Run).where(Run.collection_id == cid)))
+        return reaped, runs
+
+    reaped, runs = _run_check(go)
+    assert reaped == 0  # the guarded UPDATE lost the race to the heartbeat
+    assert len(runs) == 1
+    assert runs[0].result == "running" and runs[0].finished is None
+
 def test_claiming_a_run_stamps_its_heartbeat(cairn_env):
     """A lease with no liveness signal is indistinguishable from a corpse, so the claim starts one."""
     root = cairn_env / "claimed"
