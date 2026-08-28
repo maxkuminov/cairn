@@ -355,6 +355,26 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > (coverage-bar labelling, unstamped verify card reachability). Gates: 5-round spec review, 2-scope
 > adversarial implementation review to PASS-zero, verifier 21/21 requirements, live user-rep pass.
 
+> Scoped accept verbs (split-accept-into-scoped-verbs): the unscoped accept UI (#16, #30, #35 —
+> meta #12 R2) is gone from the panel. Four constant-scope routes ride the D14 fingerprint guard:
+> `/collection/{id}/accept` (**Baseline N new files** — offered only at zero issues AND zero open
+> events, count from the minting snapshot), `/review/adopt-changed` (**Adopt N changed files**,
+> `btn--warn-outline` per row), `/review/stop-tracking` (**Stop tracking N missing files**,
+> `btn--danger`), and `/file/{id}/accept` (per-row, population-of-one fingerprint). `_narrow`
+> derives each form's population from the ONE wide `_read_population` snapshot that also mints its
+> fingerprint — **baseline-new is the explicit exception**: it hashes the collection-wide open-event
+> set (so an alert on any file refuses it). Every display claim an action makes (counts, confirm
+> strings, the ack-swapped row's verb) derives from its own minting snapshot; cross-form and
+> cross-row replay refused (12 ordered pairs tested). Service: `accept_collection(scope=...)`
+> (None = today's blanket behavior, `cairn accept` unchanged) acks ONLY the scope's own files'
+> events; `accept_file` resolves one row; the pre-delete event detach now backfills `events.detail`
+> with each file's relpath via one correlated subquery-keyed UPDATE (fills only NULL/empty — never
+> clobbers moved/restored_changed; survives >999 rows), so #35's "Missing — —" rows carry their
+> path going forward. `review-accept` (route + scope string) is retired — a stale tab 404s, nothing
+> forwards. **No schema change.** The old accepted limitation "review accept silently baselines new
+> files" is resolved: a new file appearing refuses nothing and is not promoted. Gates: 2-round spec
+> review, 3-round adversarial implementation review to PASS-zero, verifier 65/65, live pass 6/6.
+
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
   Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).
