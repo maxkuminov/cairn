@@ -104,11 +104,12 @@
   {{ status_badge(f.status, "sm") }}
   {% if has_ots %}
     <div class="file-row__notarized">
-      {% if f.ots == "complete" %}
-        <a class="ots-badge" href="/verify?file={{ f.id }}" title="Verify this proof for the block-confirmed date">{{ ots_badge(f.ots, "sm") }}</a>
-      {% else %}
-        {{ ots_badge(f.ots, "sm") }}
-      {% endif %}
+      {# The badge links in EVERY proof state, never only the confirmed one. The verify card renders
+         an honest, state-appropriate card for each state — queued, awaiting confirmation, never
+         stamped — and those are precisely the cards that carry an action; leaving them reachable
+         only by a hand-typed URL hides the advice from the operator it is addressed to. #}
+      <a class="ots-badge" href="/verify?file={{ f.id }}"
+         title="{% if f.ots == 'complete' %}Verify this proof for the block-confirmed date{% else %}Check this file's notarization status{% endif %}">{{ ots_badge(f.ots, "sm") }}</a>
       <span class="file-row__date">{{ f.notarized_at or f.modified_at or "—" }}</span>
     </div>
   {% else %}

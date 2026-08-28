@@ -2394,8 +2394,21 @@ async def collection_update(
 
 # --- verify ---------------------------------------------------------------------------------
 
+# The verify search's row cap. A search whose whole purpose is finding one file must not silently
+# drop matches, so the cap is paired with the TRUE match count in the render (see
+# `_search_tracked_files`): the operator is told the list is short and how short.
+VERIFY_SEARCH_ROW_LIMIT = 50
 
-async def _anchored_query(session: AsyncSession, user: User, q: str | None, limit: int):
+
+async def _recent_proofs_query(session: AsyncSession, user: User, limit: int):
+    """The verify page's DEFAULT listing: the user's most recently submitted proofs.
+
+    Deliberately narrower than search (design D2): its population is files with a proof that has
+    been submitted to a calendar — `incomplete` (awaiting Bitcoin) or `complete`. That filter is
+    this list's stated purpose, so it stays here; it must never travel into search, where it hides
+    exactly the files whose verify card carries actionable guidance. The rendered heading and copy
+    say *proofs*, never "anchored" — half this population is not anchored yet.
+    """
     stmt = (
         select(FileEntry, Collection)
         .join(Collection, FileEntry.collection_id == Collection.id)
@@ -2403,22 +2416,90 @@ async def _anchored_query(session: AsyncSession, user: User, q: str | None, limi
             Collection.user_id == user.id,
             FileEntry.ots_state.in_(("incomplete", "complete")),
         )
+        .order_by(FileEntry.ots_stamped_at.desc().nulls_last())
+        .limit(limit)
     )
-    if q:
-        stmt = stmt.where(
-            FileEntry.relpath.like(f"%{collections_svc._escape_like(q)}%", escape="\\")
-        )
-    stmt = stmt.order_by(FileEntry.ots_stamped_at.desc().nulls_last()).limit(limit)
     return list(await session.execute(stmt))
 
 
-def _anchored_view(fe: FileEntry, collection: Collection) -> dict[str, Any]:
+async def _search_tracked_files(
+    session: AsyncSession, user: User, q: str, limit: int = VERIFY_SEARCH_ROW_LIMIT
+) -> tuple[list[Any], int]:
+    """Search EVERY tracked file the user owns; return (capped rows, true match total).
+
+    Two properties are load-bearing (design D2) and neither is decoration:
+
+      * **No proof-state filter.** A never-stamped or queued file is exactly what an operator
+        searching for a file by name is looking for, and its verify card is where the advice for
+        that state lives.
+      * **A unique deterministic order, `relpath` then `collection_id`.** Ordering by recency of
+        stamping and then cutting at the cap makes a file that shares a searchable name with
+        enough stamped files unreachable by ANY query — the "silently hides files" defect one
+        level down. Path order plus the disclosed total lets a narrower query always converge.
+
+    The total is a separate COUNT over the same predicate, so the render can say "showing N of M"
+    rather than presenting a truncated page as the whole answer. Both statements are bounded; the
+    full match set is never materialized.
+    """
+    predicate = (
+        Collection.user_id == user.id,
+        FileEntry.relpath.like(f"%{collections_svc._escape_like(q)}%", escape="\\"),
+    )
+    total = await session.scalar(
+        select(func.count())
+        .select_from(FileEntry)
+        .join(Collection, FileEntry.collection_id == Collection.id)
+        .where(*predicate)
+    )
+    stmt = (
+        select(FileEntry, Collection)
+        .join(Collection, FileEntry.collection_id == Collection.id)
+        .where(*predicate)
+        .order_by(FileEntry.relpath.asc(), FileEntry.collection_id.asc())
+        .limit(limit)
+    )
+    return list(await session.execute(stmt)), int(total or 0)
+
+
+def _verify_row_view(fe: FileEntry, collection: Collection) -> dict[str, Any]:
+    """One row of the verify listing, rendered for BOTH populations.
+
+    It carries the row's own `state` unfiltered: that badge is what tells a never-stamped file
+    apart from an anchored one in a search that now returns both (design D2).
+    """
     return {
         "id": fe.id,
         "filename": Path(fe.relpath).name,
         "relpath": fe.relpath,
         "collection": collection.name,
         "state": fe.ots_state,
+    }
+
+
+async def _results_context(session: AsyncSession, user: User, q: str) -> dict[str, Any]:
+    """The one place the verify listing region is filled, for both render paths.
+
+    A blank (or whitespace-only) query is the page's DEFAULT state and renders the recent-proofs
+    listing — never the widened search (design D2). Clearing the input therefore restores exactly
+    what the page opened with instead of leaking every unstamped file under the "Recent proofs"
+    heading, and the full-page and htmx-refresh paths cannot disagree about which population is on
+    screen, because they compute it here.
+
+    `match_count` is the TRUE number of matches, not the number of rows returned; the partial
+    compares it against the rows it was given to decide whether to disclose the truncation.
+    """
+    if q:
+        rows, total = await _search_tracked_files(session, user, q)
+        return {
+            "results": [_verify_row_view(fe, c) for fe, c in rows],
+            "q": q,
+            "match_count": total,
+        }
+    recent = await _recent_proofs_query(session, user, 5)
+    return {
+        "results": [_verify_row_view(fe, c) for fe, c in recent],
+        "q": "",
+        "match_count": len(recent),
     }
 
 
@@ -2438,17 +2519,23 @@ async def verify_page(
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
     file: int | None = Query(None),
+    q: str = Query(""),
 ):
     ctx = await _base_context(request, session, user, "verify")
-    total_anchored = await session.scalar(
+    # The searchable population, and therefore what the input may claim to search: every tracked
+    # file this user owns. Counting anchored files here (what this used to do) advertised a search
+    # over proofs while the box searches paths — an operator whose files are all unstamped read
+    # "Search 0 files…" over a working search.
+    total_tracked = await session.scalar(
         select(func.count())
         .select_from(FileEntry)
         .join(Collection, FileEntry.collection_id == Collection.id)
-        .where(Collection.user_id == user.id, FileEntry.ots_state.in_(("incomplete", "complete")))
+        .where(Collection.user_id == user.id)
     )
-    ctx["total_anchored"] = int(total_anchored or 0)
-    recent = await _anchored_query(session, user, None, 5)
-    ctx["recent"] = [_anchored_view(fe, c) for fe, c in recent]
+    ctx["total_tracked"] = int(total_tracked or 0)
+    # `q` arrives from the top-bar search form (a plain GET navigation, design D1) as well as from
+    # a bookmarked/refreshed search URL; the htmx live search takes over for refinement from there.
+    ctx.update(await _results_context(session, user, q.strip()))
     ctx["preselect"] = None
     if file is not None:
         fe = await session.get(FileEntry, file)
@@ -2466,17 +2553,9 @@ async def verify_search(
     user: User = Depends(current_user),
     q: str = Query(""),
 ):
-    matches = await _anchored_query(session, user, q.strip() or None, 50)
-    return templates.TemplateResponse(
-        request,
-        "partials/verify_results.html",
-        {
-            "results": [_anchored_view(fe, c) for fe, c in matches],
-            "q": q.strip(),
-            "match_count": len(matches),
-            "csrf_token": generate_csrf_token(request),
-        },
-    )
+    ctx = await _results_context(session, user, q.strip())
+    ctx["csrf_token"] = generate_csrf_token(request)
+    return templates.TemplateResponse(request, "partials/verify_results.html", ctx)
 
 
 @router.post("/verify", response_class=HTMLResponse, dependencies=[Depends(verify_csrf)])
@@ -2750,6 +2829,11 @@ async def verify_run(
         "relpath": fe.relpath,
         "collection": collection.name,
         "collection_id": collection.id,
+        # The collection's notarization mode, so the never-stamped card's advice is an action the
+        # operator can actually take: a tripwire (`none`) collection has no "Stamp all" control and
+        # its stamp route refuses it, so telling its owner to use one sends them looking for a
+        # button that does not exist — the same silent dead end #41 is about, one surface along.
+        "collection_ots": collection.ots_mode,
         "sha256": digest or "(unknown)",
         # The live re-hash, or nothing. A card with no live digest must not present the recorded
         # baseline in the slot labelled "the file's fingerprint" — nothing was hashed this check.

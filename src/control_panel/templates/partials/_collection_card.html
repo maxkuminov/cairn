@@ -30,7 +30,16 @@
     </div>
 
     {% set total = (c.counts.ok + c.counts.new + c.counts.modified + c.counts.missing) or 1 %}
-    <div class="segbar">
+    {# The bar sits directly above the notarization ratio and measures something else entirely, so
+       unlabelled it reads as a contradiction ("all green" over "6.5% anchored") on the product's
+       headline claim. The label is built from the SAME counts the segments are sized from — one
+       source, so the words and the picture cannot drift — and `.segbar__seg`'s CSS `min-width`
+       keeps a status whose share rounds to 0.00% (one modified file in 200k) visible, so the bar
+       can never contradict its own label. #}
+    {% set seg_label = "File status: %s ok, %s new, %s modified, %s missing"|format(
+         "{:,}".format(c.counts.ok), "{:,}".format(c.counts.new),
+         "{:,}".format(c.counts.modified), "{:,}".format(c.counts.missing)) %}
+    <div class="segbar" role="img" title="{{ seg_label }}" aria-label="{{ seg_label }}">
       {% if c.counts.ok > 0 %}<div class="segbar__seg" style="width:{{ (c.counts.ok / total * 100)|round(2) }}%;background:var(--ok)"></div>{% endif %}
       {% if c.counts.new > 0 %}<div class="segbar__seg" style="width:{{ (c.counts.new / total * 100)|round(2) }}%;background:var(--accent)"></div>{% endif %}
       {% if c.counts.modified > 0 %}<div class="segbar__seg" style="width:{{ (c.counts.modified / total * 100)|round(2) }}%;background:var(--warn)"></div>{% endif %}
@@ -71,9 +80,14 @@
           {% if c.is_empty %}
             No files indexed yet
           {% elif c.all_confirmed %}
-            <strong style="color:var(--text)">{{ "{:,}".format(c.ots_counts.complete_active) }}</strong> anchored · all confirmed
+            {# Both branches name the POPULATION the ratio is over. `stampable` counts only files
+               that are present (design D5 of sprint 1), so on a collection with missing files the
+               anchored count sits visibly below the card's own file total — a bare "all confirmed"
+               left that gap unexplained on the surface that shows both numbers. Words only: every
+               computed identity here is untouched. #}
+            all <strong style="color:var(--text)">{{ "{:,}".format(c.ots_counts.complete_active) }}</strong> present files anchored
           {% else %}
-            <strong style="color:var(--text)">{{ c.anchored_ratio }}</strong> anchored{% if c.pending_line %}<span style="color:var(--warn)"> · {{ c.pending_line }}</span>{% endif %}{% if c.not_stamped > 0 %}<span style="color:var(--warn)"> · {{ "{:,}".format(c.not_stamped) }} not stamped</span>{% endif %}
+            <strong style="color:var(--text)">{{ c.anchored_ratio }}</strong> present files anchored{% if c.pending_line %}<span style="color:var(--warn)"> · {{ c.pending_line }}</span>{% endif %}{% if c.not_stamped > 0 %}<span style="color:var(--warn)"> · {{ "{:,}".format(c.not_stamped) }} not stamped</span>{% endif %}
           {% endif %}
         </span>
       {% endif %}

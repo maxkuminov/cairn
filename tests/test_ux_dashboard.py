@@ -27,6 +27,7 @@ import contextlib
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from sqlalchemy import event as sa_event
@@ -1813,3 +1814,214 @@ def test_a_changed_restore_keeps_its_collection_off_all_clear(cairn_env, mode):
     for name, body in (("dashboard", dash), ("detail", detail), ("op-status", frag)):
         assert "All clear" not in body, name
         assert "Attention" in body, name
+
+
+# =============================================================================================
+# UX audit sprint 2 (#37, #38, #40): a number the operator can act on is stated where they act,
+# a fleet-wide control says how far it reaches, and each figure names what it measures
+# =============================================================================================
+
+
+def test_the_detail_stat_row_states_the_new_count_in_the_dashboards_vocabulary(cairn_env):
+    """#37: `Total = baselined + new + issues`, and the `new` term appeared on no surface here.
+
+    It was reachable only inside the baseline button's `confirm()` — a number the page's own
+    arithmetic depends on, discoverable only by pressing a button.
+    """
+    root = cairn_env / "newfiles"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [
+            ("kept.txt", "ok", "complete"),
+            ("fresh-a.txt", "new", "complete"),
+            ("fresh-b.txt", "new", "pending"),
+        ]))
+
+    with _make_client(cairn_env, seed) as client:
+        dash = client.get("/").text
+        detail = client.get("/collection/1").text
+
+    assert "New files" in detail
+    assert "watched, not yet baselined" in detail
+    # One population, one wording: the tile and the stat say the same thing about the same number.
+    assert dash.count("watched, not yet baselined") == 1
+    row = detail.split('class="stat-row"')[1]
+    assert ">2</div>" in row.split("New files")[1][:400]
+    assert "var(--accent)" in row.split("New files")[1][:400]
+    # The row's populations now account for its own total: 1 baselined + 2 new + 0 issues = 3.
+    assert ">3</div>" in row.split("Total files")[1][:400]
+    assert ">1</div>" in row.split("Matching baseline")[1][:400]
+    assert ">0</div>" in row.split("Changed / missing")[1][:400]
+
+
+def test_the_new_count_renders_muted_at_zero_rather_than_vanishing(cairn_env):
+    """The concept is stated even when the count is zero, so the arithmetic is always accounted for."""
+    root = cairn_env / "nonew"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [("kept.txt", "ok", "complete")]))
+
+    with _make_client(cairn_env, seed) as client:
+        detail = client.get("/collection/1").text
+
+    stat = detail.split('class="stat-row"')[1].split("New files")[1][:400]
+    assert ">0</div>" in stat
+    assert "var(--text-3)" in stat and "var(--accent)" not in stat
+
+
+def test_the_new_count_stat_renders_for_a_tripwire_collection_too(cairn_env):
+    """Baselining is a scan concept, not a notary one, so it is not on the `perfile` branch."""
+    root = cairn_env / "tripwire-new"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root, ots_mode="none")
+        await _with_session(lambda s: _mk_files(s, cid, [("fresh.txt", "new", "none")]))
+
+    with _make_client(cairn_env, seed) as client:
+        detail = client.get("/collection/1").text
+
+    assert "Tripwire only" in detail  # the notarization tile is the `none` branch
+    assert "New files" in detail and "watched, not yet baselined" in detail
+
+
+# --- #38: the fleet-wide scan control states its scope ----------------------------------------
+
+
+def test_the_scan_control_names_its_scope_and_the_collection_count(cairn_env):
+    a, b = cairn_env / "a", cairn_env / "b"
+    a.mkdir()
+    b.mkdir()
+
+    async def seed():
+        for root in (a, b):
+            cid = await seed_collection(root)
+            await _with_session(lambda s, cid=cid: _mk_files(s, cid, [("f.txt", "ok", "complete")]))
+
+    with _make_client(cairn_env, seed) as client:
+        html = client.get("/").text
+
+    assert "Scan all collections" in html
+    assert "Run scan now" not in html
+    assert "confirm('Scan all 2 collections now?')" in html
+    # The POST itself is untouched — the confirm is a statement of scope, not a new guard. The
+    # count is a render-time statement, so the form carries no fingerprint binding it (design D5):
+    # a scan is read-only detection, and scanning a collection added since render is what the
+    # operator wants.
+    form = html.split('action="/scan"')[1].split("</form>")[0]
+    assert form.count('type="hidden"') == 1 and 'name="csrf_token"' in form
+    assert "fingerprint" not in form
+
+
+def test_the_scan_confirm_counts_one_collection_in_the_singular(cairn_env):
+    root = cairn_env / "solo"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [("f.txt", "ok", "complete")]))
+
+    with _make_client(cairn_env, seed) as client:
+        html = client.get("/").text
+
+    assert "confirm('Scan all 1 collection now?')" in html
+
+
+# --- #40: the status bar is labelled and the coverage ratio names its denominator -------------
+
+
+def test_the_segbar_is_labelled_with_the_counts_it_is_sized_from(cairn_env):
+    root = cairn_env / "labelled"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [
+            ("a.txt", "ok", "complete"),
+            ("b.txt", "ok", "complete"),
+            ("c.txt", "new", "pending"),
+            ("d.txt", "modified", "complete"),
+            ("e.txt", "missing", "complete"),
+        ]))
+
+    with _make_client(cairn_env, seed) as client:
+        html = client.get("/").text
+
+    label = "File status: 2 ok, 1 new, 1 modified, 1 missing"
+    assert f'role="img" title="{label}" aria-label="{label}"' in html
+    # The label's counts are the values the segments are sized from — same `c.counts`, one source.
+    segbar = html.split('class="segbar"')[1].split("</div>\n    <div class=\"legend\"")[0]
+    assert "width:40.0%" in segbar  # 2 of 5 ok
+    assert segbar.count("segbar__seg") == 4
+
+
+def test_a_status_whose_share_rounds_to_zero_still_gets_pixels(cairn_env):
+    """One modified file in a very large collection must not render an all-green bar.
+
+    The bar would then contradict its own label, which is the #40 misread in miniature.
+    """
+    root = cairn_env / "sliver"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        specs = [(f"ok-{i}.txt", "ok", "complete") for i in range(30000)]
+        specs.append(("changed.txt", "modified", "complete"))
+        await _with_session(lambda s: _mk_files(s, cid, specs))
+
+    with _make_client(cairn_env, seed) as client:
+        html = client.get("/").text
+
+    assert "1 modified" in html
+    # The segment is rendered (its width rounds to 0.0%), and CSS floors every segment's width.
+    segbar = html.split('class="segbar"')[1].split("</div>\n    <div class=\"legend\"")[0]
+    assert "width:0.0%;background:var(--warn)" in segbar
+    css = (
+        Path(__file__).resolve().parents[1]
+        / "src/control_panel/static/css/panel.css"
+    ).read_text()
+    assert ".segbar__seg { min-width: 3px; }" in css
+
+
+def test_the_anchored_ratio_names_the_population_its_denominator_counts(cairn_env):
+    root = cairn_env / "ratio"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [
+            ("a.txt", "ok", "complete"),
+            ("b.txt", "new", "none"),
+            ("gone.txt", "missing", "complete"),
+        ]))
+
+    with _make_client(cairn_env, seed) as client:
+        html = client.get("/").text
+
+    # `stampable` excludes the missing file (sprint-1 D5); the wording now says which files it counts.
+    assert "1 / 2</strong> present files anchored" in html
+    assert "</strong> anchored ·" not in html
+
+
+def test_the_all_confirmed_claim_names_its_population_when_files_are_missing(cairn_env):
+    """The Max-Documents reading of #40: "all confirmed" over a count below the card's own total."""
+    root = cairn_env / "allconfirmed"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [
+            ("a.txt", "ok", "complete"),
+            ("b.txt", "ok", "complete"),
+            ("gone.txt", "missing", "complete"),
+        ]))
+
+    with _make_client(cairn_env, seed) as client:
+        html = client.get("/").text
+
+    assert "all <strong style=\"color:var(--text)\">2</strong> present files anchored" in html
+    assert "all confirmed" not in html.split('class="collection-card__footer"')[1]

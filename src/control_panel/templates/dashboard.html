@@ -10,9 +10,15 @@
   <div class="page-header__actions">
     {# Plain POST→303 redirect (not htmx): the scan refreshes the whole dashboard, so let the redirect
        reload it. An htmx hx-post with hx-swap="none" would discard the redirected page and never update. #}
-    <form method="post" action="/scan" style="display:inline">
+    {# The control fans out over EVERY collection the operator owns (a multi-TiB walk on a real
+       host), so it says so in its label and names the count before it acts. The count is the
+       render-time snapshot deliberately: the POST scans whatever is owned at execution time, and
+       a scan is read-only detection, so a collection added since this page rendered is exactly
+       what the operator wants scanned — no fingerprint, no drift check (design D5). #}
+    <form method="post" action="/scan" style="display:inline"
+          onsubmit="return confirm('Scan all {{ collections|length }} collection{{ '' if collections|length == 1 else 's' }} now?')">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-      <button class="btn btn--subtle" type="submit">{{ m.icon("refresh", size=15) }} Run scan now</button>
+      <button class="btn btn--subtle" type="submit">{{ m.icon("refresh", size=15) }} Scan all collections</button>
     </form>
   </div>
 </div>

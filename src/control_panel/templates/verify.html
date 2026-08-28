@@ -25,18 +25,20 @@
         <div style="padding:18px 18px 16px">
           <div class="verify-search">
             {{ m.icon("search", size=18) }}
-            <input type="search" name="q" autofocus
-                   placeholder="Search {{ '{:,}'.format(total_anchored) }} files with proofs by path or collection…"
+            {# The search covers every tracked file, so the count it advertises is the tracked count
+               — and it arrives pre-filled when the operator came from the top-bar search (design
+               D1/D2), so the query that produced the rows below is visible and refinable. #}
+            <input type="search" name="q" autofocus value="{{ q }}"
+                   aria-label="Search tracked files by path or collection"
+                   placeholder="Search {{ '{:,}'.format(total_tracked) }} tracked files by path or collection…"
                    hx-get="/verify/search" hx-trigger="keyup changed delay:200ms, search"
                    hx-target="#verify-results" hx-swap="outerHTML" />
           </div>
         </div>
-        {% with results=recent, q="", match_count=recent|length %}
-          {% include "partials/verify_results.html" %}
-        {% endwith %}
+        {% include "partials/verify_results.html" %}
         <div class="info-strip" style="border-radius:0;background:transparent;border-top:1px solid var(--border)">
           {{ m.icon("info", size=14, cls="text-3") }}
-          <span>Or open any file from a collection and click its <strong class="text-2">Anchored</strong> badge to verify it directly.</span>
+          <span>Or open any file from a collection and click its <strong class="text-2">proof badge</strong> — in any state — to check it directly.</span>
         </div>
       </div>
     {% endif %}

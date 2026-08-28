@@ -91,6 +91,17 @@
     <div class="mini-stat__value" style="color:{{ 'var(--text-3)' if c.is_empty else 'var(--ok)' }}">{{ "{:,}".format(c.counts.ok) }}</div>
     {% if c.is_empty %}<div class="mini-stat__sub">No files indexed yet</div>{% endif %}
   </div>
+  {# `Total = baselined + new + changed/missing`, and the `new` term used to appear on no surface
+     of the page the operator acts on — it was reachable only inside the baseline button's
+     confirm(). Same vocabulary as the dashboard's New files tile, deliberately verbatim: two
+     wordings for one population read as two populations. Rendered for both notarization modes
+     (baselining is a scan concept, not a notary one) and at zero as well, so the arithmetic is
+     always accounted for. #}
+  <div class="card mini-stat">
+    <div class="mini-stat__label">{{ m.icon("file", size=15, stroke=1.9) }}<span>New files</span></div>
+    <div class="mini-stat__value" style="color:{{ 'var(--accent)' if c.counts.new > 0 else 'var(--text-3)' }}">{{ "{:,}".format(c.counts.new) }}</div>
+    <div class="mini-stat__sub">watched, not yet baselined</div>
+  </div>
   {% if c.issues %}
   <a class="card mini-stat mini-stat--link" href="/collection/{{ c.id }}/review">
     <div class="mini-stat__label">{{ m.icon("alert", size=15, stroke=1.9) }}<span>Changed / missing</span></div>

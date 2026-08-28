@@ -1,7 +1,17 @@
 {% import "_macros.html" as m %}
+{#- Two populations, one region (design D2): with a query it is a search over EVERY tracked file
+    the operator owns; without one it is the default listing of recently submitted proofs. The copy
+    has to follow the population — search wording says "tracked files" (an operator whose files are
+    all unstamped must not read a zero count of proofs over a working search), and only the default
+    listing may speak of proofs. Neither may say "anchored": both can contain a proof that is not
+    anchored yet. `match_count` is the TRUE total, so a capped page can say how much it is hiding. -#}
+{% set shown = results|length %}
+{% set truncated = q and match_count > shown %}
 <div id="verify-results">
   <div style="padding:0 18px 6px;font-size:11px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;color:var(--text-3)">
-    {% if q %}{{ match_count }} match{{ "" if match_count == 1 else "es" }}{% else %}Recent proofs{% endif %}
+    {% if q %}
+      {% if truncated %}Showing {{ shown }} of {{ match_count }} matches{% else %}{{ match_count }} match{{ "" if match_count == 1 else "es" }}{% endif %}
+    {% else %}Recent proofs{% endif %}
   </div>
   <div style="max-height:420px;overflow-y:auto;padding-bottom:6px">
     {% for f in results %}
@@ -16,11 +26,21 @@
         {{ m.icon("chevronR", size=15, cls="text-3") }}
       </button>
     {% endfor %}
+    {% if truncated %}
+      {# A cap the operator is not told about is the "silently hides files" defect this search was
+         widened to remove, reintroduced one level down: the rows are ordered by path, so narrowing
+         the query always converges — except for one path repeated across more collections than the
+         cap, which is what the file browser (paginated) is named for. #}
+      <div class="info-strip" style="border-radius:0;background:transparent;border-top:1px solid var(--border)">
+        {{ m.icon("info", size=14, cls="text-3") }}
+        <span>Only the first {{ shown }} of {{ match_count }} matching files are listed, in path order. Narrow the search, or open a collection and page through its file browser.</span>
+      </div>
+    {% endif %}
     {% if not results %}
       {% if q %}
-        <div class="empty-state" style="border-top:1px solid var(--border)">No anchored files match “{{ q }}”.</div>
+        <div class="empty-state" style="border-top:1px solid var(--border)">No tracked files match “{{ q }}”.</div>
       {% else %}
-        <div class="empty-state" style="border-top:1px solid var(--border)">No files have been anchored yet. Stamp a per-file-notarized collection (its <strong>Stamp all</strong> button) and its proofs will appear here once submitted.</div>
+        <div class="empty-state" style="border-top:1px solid var(--border)">No proofs have been submitted yet. Stamp a per-file-notarized collection (its <strong>Stamp all</strong> button) and its proofs will appear here once submitted.</div>
       {% endif %}
     {% endif %}
   </div>

@@ -11,6 +11,7 @@ cannot persist.
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 from tests.conftest import seed_collection
@@ -387,3 +388,50 @@ def test_the_fleet_group_header_wraps_rather_than_clipping_on_a_phone():
     joined = "\n".join(_media_blocks(640))
     assert ".review-list__legend" in joined
     assert "flex-wrap: wrap" in joined
+
+
+# --- sprint 2 (#36, #41): the chrome's search control, and the badge's one render path ---------
+
+TEMPLATES = Path(__file__).resolve().parents[1] / "src/control_panel/templates"
+
+
+def _rendered_text(name: str) -> str:
+    """A template with its `{# … #}` comments stripped — comments never reach an operator."""
+    return re.sub(r"\{#.*?#\}", "", (TEMPLATES / name).read_text(), flags=re.S)
+
+
+def test_the_topbar_search_input_is_never_rendered_without_its_form():
+    """A search box outside a form is the #36 defect itself: typing works, Enter does nothing."""
+    base = _rendered_text("base.html")
+    block = base.split('class="topbar__search"')[1].split("</form>")[0]
+    assert base.count('class="topbar__search"') == 1
+    assert '<form class="topbar__search" action="/verify" method="get"' in base
+    assert 'name="q"' in block
+    # The backend is a path LIKE; the control may not advertise a digest lookup.
+    assert "hashes" not in base
+
+
+def test_the_proof_badge_has_exactly_one_render_path_and_it_is_a_link():
+    """`file_row` serves both the flat list and the folder tree, so one wrapper covers both (#41)."""
+    macros = _rendered_text("_macros.html")
+    row = macros.split("{% macro file_row(")[1].split("{%- endmacro %}")[0]
+    assert row.count('ots_badge(f.ots, "sm")') == 1
+    assert 'href="/verify?file={{ f.id }}"' in row
+    # No state-gated branch may re-appear around it: the badge links in every proof state.
+    assert 'f.ots == "complete"' not in row
+
+
+def test_no_search_surface_calls_its_population_anchored():
+    """Search covers every tracked file and the recent listing includes unconfirmed proofs.
+
+    Neither may be captioned "anchored" — the vocabulary rule sprint 1 set for a proof that is not
+    confirmed yet, applied to the containers that hold them.
+    """
+    results = _rendered_text("partials/verify_results.html")
+    verify = _rendered_text("verify.html")
+    assert "anchored" not in results.lower()
+    # The verify page's search chrome describes tracked files; "anchor" survives only in the
+    # explainer below it, which is about the Bitcoin record itself, not about this list.
+    chrome = verify.split('class="verify-search"')[1].split("</div>")[2]
+    assert "anchored" not in chrome.lower()
+    assert "tracked files" in verify

@@ -89,7 +89,10 @@
         {% elif verdict == "unavailable" and ots_state == "none" %}
           {# Never stamped: neutral, not a failure. Saying "we couldn't confirm it" about a file no
              proof was ever made for blames the file for an absence of evidence nobody created. #}
-          No timestamp proof has been made for <span class="mono">{{ filename }}</span> yet, so there is nothing to check against the Bitcoin record. Cairn still watches the file for changes; use <strong>Stamp all</strong> on the collection to notarize it.
+          No timestamp proof has been made for <span class="mono">{{ filename }}</span> yet, so there is nothing to check against the Bitcoin record. Cairn still watches the file for changes;
+          {%- if collection_ots == "none" %} <strong>{{ collection }}</strong> is a tripwire-only collection, so no proofs are made for its files &mdash; switch it to per-file notarization to start stamping them.
+          {%- else %} use <strong>Stamp all</strong> on the collection to notarize it.
+          {%- endif %}
         {% else %}
           We couldn't confirm <span class="mono">{{ filename }}</span> against the public Bitcoin record. Its contents may have changed since it was recorded, or the proof isn't confirmed yet.
         {% endif %}

@@ -331,10 +331,14 @@ def test_fleet_page_offers_no_collection_spanning_bulk_verb(cairn_env):
         assert verb not in body, f"a bulk verb leaked onto the fleet page: {verb}"
     # The dashboard's fleet-wide acknowledge is not borrowed onto this page either.
     assert "/events/ack-all" not in body
-    # ...and no accept form posts anywhere but a single named file.
-    posts = re.findall(r'<form[^>]+action="([^"]+)"', body)
+    # ...and no accept form posts anywhere but a single named file. Only the POSTing forms are in
+    # scope: the chrome's top-bar search is a GET navigation to /verify (sprint 2, #36), not a verb.
+    posts = [
+        tag for tag in re.findall(r"<form[^>]*>", body) if 'method="get"' not in tag
+    ]
     assert posts, "expected the per-row accept forms to be rendered"
-    for action in posts:
+    for tag in posts:
+        action = re.search(r'action="([^"]+)"', tag).group(1)
         assert re.fullmatch(r"/collection/\d+/file/\d+/accept\?from=fleet", action), action
 
 

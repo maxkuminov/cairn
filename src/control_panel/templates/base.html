@@ -115,10 +115,16 @@
                   aria-label="Open navigation" aria-controls="sidebar">
             {{ m.icon("menu", size=18) }}
           </button>
-          <div class="topbar__search">
+          {# A real search, not a decoration: a plain GET navigation to the one bounded, owner-scoped
+             file search the panel has (design D1). It used to be a nameless, formless input — the
+             most prominent control in the chrome, doing nothing on Enter. The placeholder promises
+             only what the backend performs: paths and names, never hashes (a pasted digest would
+             come back "no matches", which an operator reads as "this digest is not tracked"). #}
+          <form class="topbar__search" action="/verify" method="get" role="search">
             {{ m.icon("search", size=16) }}
-            <input placeholder="Search files, paths, hashes…" aria-label="Search" />
-          </div>
+            <input type="search" name="q" placeholder="Search files and paths…"
+                   aria-label="Search files and paths" />
+          </form>
           <div class="topbar__spacer"></div>
 
           {# The ONE health indicator, in its neutral pre-poll state. This used to be a hand-copied

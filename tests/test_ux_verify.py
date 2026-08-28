@@ -372,7 +372,12 @@ def test_verify_page_empty_state_when_nothing_anchored(cairn_env):
 
     with _make_client(seed) as client:
         html = client.get("/verify").text
-        assert "No files have been anchored yet" in html
+        # Sprint 2 rewords this from "No files have been anchored yet": the listing's population is
+        # submitted proofs, half of which are not anchored yet, so its own empty state may not
+        # claim otherwise either. The requirement — a distinct empty state, separate from the
+        # no-search-matches message — is unchanged.
+        assert "No proofs have been submitted yet" in html
+        assert "anchored" not in html.lower().split("how this works")[0]
 
 
 # --- #34: the closing sentence is derived, not asserted -------------------------------------
@@ -1011,3 +1016,299 @@ def test_every_copy_control_on_the_verify_card_uses_the_shared_helper(verify_cli
     assert "window.cairnCopy" in page
     assert "execCommand" in page and ".catch(" in page
     assert "Couldn't copy" in page
+
+
+# =============================================================================================
+# UX audit sprint 2 (#36, #41): the search covers every tracked file, and every badge reaches it
+# =============================================================================================
+#
+# The defect both issues share is a surface that silently withholds files: a search filtered to
+# submitted proofs, and a badge that links only in the confirmed state. Between them, the verify
+# card's guidance for a never-stamped or queued file — the only card that carries an action — was
+# reachable only by hand-typing a URL.
+
+
+async def _seed_tracked(root, specs, *, ots_mode: str = "perfile") -> int:
+    """One collection seeded from ``(relpath, status, ots_state)`` triples; returns its id."""
+    from src.database import get_sessionmaker
+    from src.models.db import FileEntry
+
+    cid = await seed_collection(root, ots_mode=ots_mode)
+    now = datetime.now(timezone.utc)
+    async with get_sessionmaker()() as s:
+        for relpath, status, ots_state in specs:
+            stamped = ots_state in ("incomplete", "complete")
+            s.add(FileEntry(
+                collection_id=cid, relpath=relpath, size=5, sha256="a" * 64,
+                status=status, ots_state=ots_state,
+                ots_path=(f"/p/{relpath}.ots" if ots_state != "none" else None),
+                ots_stamped_at=(now if stamped else None),
+                first_seen=now, last_checked=now,
+            ))
+        await s.commit()
+    return cid
+
+
+_MIXED = [
+    ("anchored-report.pdf", "ok", "complete"),
+    ("submitted-report.pdf", "ok", "incomplete"),
+    ("queued-report.pdf", "new", "pending"),
+    ("raw-report.pdf", "new", "none"),
+]
+
+
+def test_search_returns_files_in_every_proof_state_with_the_state_visible(cairn_env):
+    """The widened population (design D2) — and it is visibly widened, row by row."""
+    root = cairn_env / "mixed"
+    root.mkdir()
+
+    with _make_client(lambda: _seed_tracked(root, _MIXED)) as client:
+        html = client.get("/verify/search", params={"q": "report"}).text
+
+    for relpath, _, _ in _MIXED:
+        assert relpath in html
+    # Each row wears its own state, so an unstamped row is visibly unstamped in the list.
+    assert "Not stamped" in html
+    assert "Queued to stamp" in html
+    assert "Pending confirmation" in html
+    # Every row — not only the confirmed one — posts into the per-file verify flow.
+    for file_id in (1, 2, 3, 4):
+        assert '{"file_id": %d}' % file_id in html
+    assert "4 matches" in html
+
+
+def test_a_blank_query_renders_the_recent_listing_on_both_routes(cairn_env):
+    """Blank stays default (design D2): clearing the box restores the page, never the wide list."""
+    root = cairn_env / "blank"
+    root.mkdir()
+
+    with _make_client(lambda: _seed_tracked(root, _MIXED)) as client:
+        partial = client.get("/verify/search", params={"q": "   "}).text
+        page = client.get("/verify", params={"q": "  "}).text
+
+    for html in (partial, page):
+        assert "Recent proofs" in html
+        # The two submitted proofs, and only those: the widened population is unreachable without
+        # a non-blank query, or clearing the input leaks every unstamped file under a heading that
+        # says "proofs".
+        assert "anchored-report.pdf" in html
+        assert "submitted-report.pdf" in html
+        assert "queued-report.pdf" not in html
+        assert "raw-report.pdf" not in html
+
+
+def test_a_capped_result_set_states_its_true_total_and_orders_by_path(cairn_env):
+    """A silent cap on a search whose purpose is finding one file re-hides files one level down."""
+    from src.control_panel.routes import VERIFY_SEARCH_ROW_LIMIT as CAP
+
+    root = cairn_env / "many"
+    root.mkdir()
+    over = CAP + 7
+    specs = [(f"doc-{i:03d}.txt", "ok", "complete") for i in range(over)]
+    # The one file the recency order would bury: alphabetically first, never stamped.
+    specs.append(("doc-000-unstamped.txt", "new", "none"))
+
+    with _make_client(lambda: _seed_tracked(root, specs)) as client:
+        html = client.get("/verify/search", params={"q": "doc-"}).text
+
+    assert f"Showing {CAP} of {over + 1} matches" in html
+    assert f"Only the first {CAP} of {over + 1} matching files are listed" in html
+    assert "Narrow the search" in html
+    assert "file browser" in html
+    # Path order, not recency of stamping — which is what makes the never-stamped file reachable
+    # at all: it sorts first, where a `ots_stamped_at DESC` order left it past the cap forever.
+    assert html.index("doc-000-unstamped.txt") < html.index("doc-000.txt")
+    # The page is the first CAP rows of the path order and stops there: 'doc-000-unstamped.txt'
+    # sorts ahead of 'doc-000.txt', so the last row shown is 'doc-048.txt'.
+    assert "doc-048.txt" in html and "doc-049.txt" not in html
+
+
+def test_identical_paths_across_collections_order_by_collection_and_name_it(cairn_env):
+    a, b = cairn_env / "alpha", cairn_env / "beta"
+    a.mkdir()
+    b.mkdir()
+
+    async def seed():
+        await _seed_tracked(a, [("same.txt", "ok", "complete")])
+        await _seed_tracked(b, [("same.txt", "ok", "none")])
+
+    with _make_client(seed) as client:
+        first = client.get("/verify/search", params={"q": "same.txt"}).text
+        second = client.get("/verify/search", params={"q": "same.txt"}).text
+
+    assert first == second  # the order key is unique, so repeated searches render identically
+    assert "2 matches" in first
+    # Each row names its collection, which is the only thing telling the two rows apart.
+    assert first.index("alpha") < first.index("beta")
+
+
+def test_search_copy_describes_tracked_files_for_an_all_unstamped_owner(cairn_env):
+    """An operator whose files are all unstamped must not read a zero count of proofs."""
+    root = cairn_env / "unstamped-only"
+    root.mkdir()
+
+    specs = [("a.txt", "new", "none"), ("b.txt", "new", "none"), ("c.txt", "new", "none")]
+    with _make_client(lambda: _seed_tracked(root, specs)) as client:
+        page = client.get("/verify").text
+        hit = client.get("/verify/search", params={"q": "a.txt"}).text
+        miss = client.get("/verify/search", params={"q": "zzz"}).text
+
+    assert "Search 3 tracked files by path or collection" in page
+    assert "files with proofs" not in page
+    assert "1 match" in hit and "a.txt" in hit
+    assert "No tracked files match “zzz”" in miss
+    for html in (hit, miss):
+        assert "anchored" not in html.lower()
+
+
+def test_the_recent_listing_keeps_its_population_and_never_says_anchored(cairn_env):
+    root = cairn_env / "recent"
+    root.mkdir()
+
+    with _make_client(lambda: _seed_tracked(root, _MIXED)) as client:
+        html = client.get("/verify").text
+
+    assert "Recent proofs" in html
+    assert "queued-report.pdf" not in html and "raw-report.pdf" not in html
+    # Its population includes a proof awaiting confirmation, so its own chrome may not call it
+    # anchored — only the confirmed row's badge may.
+    assert "Recently anchored" not in html
+    assert "anchored files" not in html.lower()
+
+
+def test_verify_search_is_scoped_to_the_owner_in_multi_mode(cairn_env, monkeypatch):
+    from src.config import get_settings
+
+    mine, theirs = cairn_env / "mine", cairn_env / "theirs"
+    mine.mkdir()
+    theirs.mkdir()
+
+    async def seed():
+        await _seed_tracked(mine, [("shared-name.txt", "ok", "none")])
+
+        from src.database import get_sessionmaker
+        from src.models.db import FileEntry, User
+        from src.services.collections import create_collection
+
+        async with get_sessionmaker()() as s:
+            u = User(username="bob", is_admin=False)
+            s.add(u)
+            await s.commit()
+            c = await create_collection(
+                s, user_id=u.id, name="Bobs Files", root=str(theirs), ots_mode="perfile"
+            )
+            now = datetime.now(timezone.utc)
+            s.add(FileEntry(
+                collection_id=c.id, relpath="shared-name.txt", size=5, sha256="b" * 64,
+                status="ok", ots_state="complete", ots_path="/p/bob.ots",
+                ots_stamped_at=now, first_seen=now, last_checked=now,
+            ))
+            await s.commit()
+
+    with _make_client(seed) as client:
+        monkeypatch.setenv("CAIRN_AUTH_MODE", "multi")
+        monkeypatch.setenv("CAIRN_SECRET_KEY", "0" * 64)
+        get_settings.cache_clear()
+        try:
+            html = client.get("/verify/search", params={"q": "shared-name"}).text
+            page = client.get("/verify", params={"q": "shared-name"}).text
+        finally:
+            get_settings.cache_clear()
+
+    for body in (html, page):
+        assert "Bobs Files" not in body
+        # The disclosed total is the owner's own count, not the fleet's — a truncation notice
+        # counting another user's files would leak their existence.
+        assert "1 match" in body
+
+
+# --- #36: the top-bar search is a real control ------------------------------------------------
+
+
+def test_the_topbar_search_is_a_form_that_promises_only_paths(cairn_env):
+    root = cairn_env / "chrome"
+    root.mkdir()
+
+    with _make_client(lambda: _seed_tracked(root, _MIXED)) as client:
+        html = client.get("/").text
+
+    assert '<form class="topbar__search" action="/verify" method="get"' in html
+    assert 'name="q"' in html
+    assert "Search files and paths…" in html
+    # The backend is a path LIKE, so the box may not advertise a digest lookup: a pasted hash would
+    # come back "no matches", which reads as "this digest is not tracked".
+    assert "hashes" not in html
+
+
+def test_the_verify_page_runs_a_submitted_query_and_prefills_the_input(cairn_env):
+    root = cairn_env / "fromtopbar"
+    root.mkdir()
+
+    with _make_client(lambda: _seed_tracked(root, _MIXED)) as client:
+        html = client.get("/verify", params={"q": "queued-report"}).text
+
+    assert 'value="queued-report"' in html
+    assert "queued-report.pdf" in html
+    assert "anchored-report.pdf" not in html
+    assert "1 match" in html
+
+
+def test_a_top_bar_query_with_no_matches_renders_the_search_empty_state(cairn_env):
+    root = cairn_env / "nomatch"
+    root.mkdir()
+
+    with _make_client(lambda: _seed_tracked(root, _MIXED)) as client:
+        r = client.get("/verify", params={"q": "no-such-file"})
+
+    assert r.status_code == 200
+    assert "No tracked files match “no-such-file”" in r.text
+    assert "raw-report.pdf" not in r.text
+
+
+# --- #41: the badge links in every proof state -----------------------------------------------
+
+
+def test_the_proof_badge_links_in_every_state_in_both_browser_views(cairn_env):
+    root = cairn_env / "browser"
+    root.mkdir()
+
+    with _make_client(lambda: _seed_tracked(root, _MIXED)) as client:
+        html = client.get("/collection/1").text
+
+    # The detail page renders the flat list AND the folder tree, both through `file_row`, so each
+    # file's badge appears twice — and every one of them is wrapped in the link.
+    assert html.count('class="ots-badge"') == 8
+    for file_id in (1, 2, 3, 4):
+        assert html.count(f'href="/verify?file={file_id}"') == 2
+    assert "Verify this proof for the block-confirmed date" in html  # the confirmed state's title
+    assert "Check this file's notarization status" in html  # every other state's
+
+
+def test_a_tripwire_collections_never_stamped_card_does_not_advise_stamp_all(cairn_env):
+    """The widened search reaches `none` rows in tripwire collections, where stamping is refused.
+
+    The card's guidance has to be an action the operator can take: a tripwire collection has no
+    "Stamp all" control and its stamp route refuses it, so pointing at one is the same dead end
+    #41 is about, one surface along.
+    """
+    root = cairn_env / "tripwire"
+    root.mkdir()
+    (root / "doc.txt").write_text("hello")
+
+    async def seed():
+        await _seed_tracked(root, [("doc.txt", "ok", "none")], ots_mode="none")
+
+    with _make_client(seed) as client:
+        token = _csrf_token(client)
+        html = client.post("/verify", data={"csrf_token": token, "file_id": 1}).text
+
+    assert "Not notarized yet" in html
+    assert "tripwire-only collection" in html
+    assert "Stamp all" not in html
+    assert "verdict--danger" not in html
+
+
+def test_a_notarized_collections_never_stamped_card_still_points_at_stamp_all(cairn_env):
+    html = _verify_unstamped(cairn_env, "perfile-unstamped", "none")
+    assert "Stamp all" in html
+    assert "tripwire-only collection" not in html
