@@ -112,7 +112,8 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   reliably the stronger one). Write it as an **exclusive create that does not require hard-link
   support**: `os.open(candidate, O_CREAT | O_EXCL | O_WRONLY)` — `EEXIST` ⇒ try the next index — then
   copy the source's bytes in, `flush` + `os.fsync` **the file**, `close`, then **fsync the archive's
-  directory chain** (`fd = os.open(dir, os.O_RDONLY)` → `os.fsync(fd)` → `os.close(fd)`), and
+  directory chain** through the shared helper of task 2.6b (`fd = os.open(dir, os.O_RDONLY)` →
+  `os.fsync(fd)` → `os.close(fd)`), and
   **only then** `os.unlink` the source. Fsyncing the file alone is not enough: a `fsync`ed file whose
   *directory entry* is not durable can lose its name across a power cut while the source's `unlink`
   persists — both names gone, the only proof destroyed. Order of the chain is **deepest-first,
@@ -128,12 +129,32 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   (task 2.8a) and the archive path is already scoped by `<collection_id>`.
 - [ ] 2.6a `_place_proof`: after the placement `os.replace(staged, canonical)` (the occupied-path
   branch's step 2, and the `mkdir` + `os.replace` of task 2.3), fsync the **canonical** parent
-  directory the same way — plus any canonical ancestor this call had to `mkdir`, in the same
+  directory the same way, through the same task-2.6b helper — plus any canonical ancestor this call had to `mkdir`, in the same
   deepest-first / parent-after-child order — **before** returning the outcome, and therefore before
   the caller records `ots_path`/`ots_state`/`ots_digest`. A rename is not durable until the directory
   holding it is; without this the datastore can record a proof path whose name did not survive a
   crash while the preserved copy sits under a name no row points at. One extra `fsync` per placement,
   on a path already off the hot loop.
+- [ ] 2.6b `ots.py`: every directory `fsync` in 2.6/2.6a goes through **one shared helper**
+  (`_fsync_dir(path)`), which is where the *unsupported-operation degrade* lives. An `OSError` whose
+  `errno` is exactly `EINVAL`, `ENOTSUP` or `EOPNOTSUPP` is **deterministic unsupported, never
+  transient** — the filesystem cannot make directory entries durable (SMB/CIFS, FUSE, FAT-derived
+  stores accept create/rename/file-`fsync` and reject this), and it will answer the same on every
+  retry. On the **first** such result **per proof store**, log **one** `WARNING` naming the
+  limitation — "a power loss in the instant between archiving and placement could lose the newest
+  archive entry's name; canonical proofs and all previously synced entries are unaffected" — and
+  record that store as **best-effort** in a module-level set keyed by the resolved proof-store path
+  (process memory only: **no schema, no setting, no startup probe**). Detection is **lazy and
+  in-band** — the first directory sync actually attempted for that store; do **not** add a probe or a
+  startup check. Thereafter `_fsync_dir` returns immediately for that store: the sync is skipped
+  **without error**, no warning repeats, and preservation/placement proceed unchanged — the file
+  `fsync` still happens, the source is still unlinked last, and the caller records normally. No retry
+  loop, no archive-family growth. **Any other errno** (`EIO`, `ENOSPC`, `EACCES`, …) propagates and
+  keeps the transient classification of task 2.5 — placement refused, member stays `pending`, source
+  never unlinked. Enumerate the three errnos **exactly**; never degrade on a bare `OSError`. This is
+  a recorded **accepted limitation** (design "Crash-safety of the shuffle"): degraded name-durability
+  on an exotic store beats a wedged notary, and only name-durability degrades — the proof's bytes are
+  still flushed.
 
 - [ ] 2.7 `_place_proof`: log at `WARNING` naming **both** paths whenever a proof is superseded or a
   staged proof is discarded — the archive has no panel surface, so the log is its discoverability.
@@ -283,6 +304,16 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   directory syncs. **A true power-loss test is out of scope** — nothing in this suite can cut power
   or model a filesystem's write reordering; this asserts the *call ordering* the durability argument
   rests on, which is the part the implementation can get wrong.
+- [ ] 2.29b **A store that cannot flush directories degrades instead of wedging**: patch `os.fsync`
+  to raise `OSError(errno.ENOTSUP)` **for directory descriptors only** (file descriptors still
+  succeed), then run two occupied-path placements. Assert both succeed — each superseded proof
+  preserved byte-identically, each new proof at its canonical path, no `OtsError`, both rows recorded
+  — that the archive family holds exactly the two preserved proofs (**no extra suffixed slot from a
+  retry**), that the file's own descriptor *was* `fsync`ed and the source `unlink`ed only after that
+  file `fsync`, and that **exactly one** `WARNING` naming the limitation was logged across the two
+  placements (`caplog`). Then the counter-case: with `os.fsync` raising `OSError(errno.EIO)` on a
+  directory, assert the placement is **refused** with a transient `OtsError`, the member stays
+  `pending`, and the existing proof is still intact at the canonical path.
 - [ ] 2.30 **Interrupted after placement, before the DB commit**: assert the canonical path holds the
   new proof, the old proof is in the archive, and the row's un-committed state leaves the file
   `pending` — the next pass re-enters placement, finds its own same-digest proof, and (per 2.9)

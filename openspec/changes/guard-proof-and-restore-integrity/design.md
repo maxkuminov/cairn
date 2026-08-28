@@ -147,6 +147,48 @@ only artifact left on disk — recoverable by an operator, but not by anything t
 already off the hot loop (the ordinary unoccupied-path stamp is unchanged apart from its own single
 directory sync).
 
+**Some writable stores cannot `fsync` a directory at all — and that is not a transient failure.** A
+CIFS/SMB share, a FUSE mount or a FAT-derived volume may accept `open`, `write`, `rename` and a
+*file* `fsync` while rejecting `fsync` on a **directory** descriptor with `EINVAL`, `ENOTSUP` or
+`EOPNOTSUPP`. That result is deterministic: it is the filesystem saying it cannot make directory
+entries durable, and it will say the same thing on every retry forever. Classifying it transient —
+the way every other preservation failure is classified — would wedge the collection's stamping
+permanently *and* make it worse each round: every retry preserves the pending proof into **another**
+suffixed archive slot, fails the same directory sync, and never places a proof. The archive family
+grows without bound while the notary silently stops notarizing. A durability nicety must never cost
+the notary its ability to stamp.
+
+So a directory `fsync` returning exactly `EINVAL`/`ENOTSUP`/`EOPNOTSUPP` is **deterministic
+unsupported**, never transient. There is no separate probe and no startup check: the condition is
+detected **in-band, lazily — on the first directory sync the process actually attempts for that proof
+store**. A probe would add a syscall (and a config-failure mode) to a path that may never need it,
+could disagree with the real call, and would have to run before the store's directories exist; the
+first real attempt answers the same question for free. On that first occurrence the store is recorded
+— in process memory, keyed by proof store, no schema and no setting — as **best-effort durability**,
+and one prominent `WARNING` is emitted naming the limitation:
+
+> the proof store's filesystem does not support flushing directory entries, so a power loss in the
+> instant between archiving a proof and placing the new one could lose the newest archive entry's
+> name; canonical proofs and all previously synced entries are unaffected.
+
+Thereafter every directory-sync step on that store is **skipped without error** and the operation
+proceeds normally: the file-content `fsync` still happens (bytes are still flushed; only
+*name* durability degrades), the ordering of the sequence is unchanged, the source is still unlinked
+last, and no warning is repeated. No retry loop, no archive-family growth, no permanent refusal.
+
+This is a recorded **accepted limitation**, not a fix: on such a store Cairn's crash guarantee weakens
+from "at least one named copy survives any interruption" to "at least one named copy survives any
+interruption the filesystem itself makes durable". Degraded durability on an exotic store is strictly
+preferable to a wedged notary — the failure this whole change exists to prevent is losing a proof, and
+refusing to stamp at all loses every *future* proof to protect against a power-cut window measured in
+milliseconds.
+
+**Every other errno stays transient, exactly as specified.** `EIO`, `ENOSPC`, `EACCES` and the rest are
+real failures of a filesystem that *does* support the operation: they refuse the placement, raise a
+transient `OtsError`, and — critically — the source is never unlinked. Only the three
+unsupported-operation errnos take the degrade path, and the list is exact so a genuine I/O error can
+never be laundered into "best effort".
+
 An interruption **inside** step 1 is harmless for the same reason the source is unlinked last: the
 proof being archived is still intact at the canonical path, and the worst residue is a truncated file
 occupying one slot of the digest's archive family, which the next attempt steps past via `EEXIST`

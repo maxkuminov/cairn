@@ -372,6 +372,35 @@ every occupied output path on such a store into a permanent retry loop classifie
 proof for that collection could ever be refreshed — a failure this requirement's own retry rule would
 then hide indefinitely.
 
+Writable filesystems that **cannot flush a directory at all** are ordinary — SMB/CIFS shares, FUSE
+mounts and FAT-derived volumes accept create, write, rename and a *file* flush while rejecting the
+flush of a directory as an unsupported operation. Such a result is **deterministic, not transient**:
+it states that the filesystem cannot make directory entries durable, and it SHALL be classified as
+unsupported rather than transient. A directory flush that fails specifically because the operation is
+unsupported (`EINVAL`, `ENOTSUP` or `EOPNOTSUPP`) SHALL NOT refuse the preservation, SHALL NOT be
+retried, and SHALL NOT leave the file queued on that account; treating it as transient would stop the
+collection notarizing forever while every retry preserved another copy under a further suffix, growing
+the preserved family without ever placing a proof.
+
+On the **first** such result for a proof store, the system SHALL emit one prominent warning naming the
+limitation — that the store's filesystem cannot flush directory entries, so a power loss in the
+instant between preserving a proof and placing the new one could lose the newest preserved entry's
+name, while canonical proofs and all previously flushed entries are unaffected — and SHALL record that
+store as **best-effort** for name durability. The condition SHALL be detected on the first directory
+flush actually attempted for that store, not by a separate probe or a startup check. Thereafter
+directory-flush steps for that store SHALL be skipped without error and SHALL NOT be warned about
+again, and preservation and placement SHALL otherwise proceed exactly as specified: the proof's
+**bytes** SHALL still be flushed, the source SHALL still be removed last, and the ordering SHALL be
+unchanged. This is an **accepted limitation** — on such a store the guarantee weakens to what the
+filesystem itself can make durable — and it is preferred to a notary that refuses to stamp, since
+refusing loses every future proof to close a crash window measured in milliseconds.
+
+A directory flush that fails for **any other** reason SHALL keep its transient classification exactly
+as specified above: it SHALL refuse the placement, SHALL leave the file queued for retry, and the
+source that was preserved SHALL NOT have been removed. The unsupported-operation cases SHALL be
+enumerated exactly, so that a genuine I/O failure on a filesystem that does support the operation can
+never be treated as best-effort.
+
 Preservation SHALL happen **before** the placement, never after, so no interruption between the two
 operations can leave the earlier proof destroyed. A failure to preserve SHALL **refuse the
 placement** and SHALL be classified **transient**, leaving the file queued for retry: preservation
@@ -425,6 +454,28 @@ Each preservation, and each discarded newly-produced proof, SHALL be logged nami
 - **WHEN** a proof must be preserved on a writable proof store whose filesystem rejects hard links
 - **THEN** the proof SHALL still be preserved byte-identically and the placement SHALL proceed, with
   no failure classified transient and no file left retrying that placement forever
+
+#### Scenario: A store that cannot flush directories warns once and keeps notarizing
+
+- **WHEN** a proof must be preserved and placed on a writable proof store whose filesystem rejects the
+  flushing of a directory as an unsupported operation, and a second proof is later preserved and
+  placed on that same store
+- **THEN** both placements SHALL succeed — each proof preserved byte-identically, each new proof
+  placed at its canonical path, the proofs' bytes still flushed and each source still removed only
+  after its preserved copy was written — with no failure classified transient and no file left
+  retrying
+- **AND** exactly one warning SHALL be emitted for that store, naming the durability limitation, with
+  none emitted on the second placement
+- **AND** no proof SHALL be preserved under a further suffix on account of a retry, so the preserved
+  family SHALL NOT grow beyond the two proofs actually preserved
+
+#### Scenario: A directory flush that fails for any other reason still refuses the placement
+
+- **WHEN** the flush of a directory during preservation fails with an I/O error rather than because
+  the operation is unsupported
+- **THEN** the placement SHALL be refused, the failure SHALL be classified transient with the file
+  left queued for retry, and the source that was being preserved SHALL still exist intact at the
+  canonical output path
 
 #### Scenario: The accept-restore-rescan cycle does not destroy the original proof
 
