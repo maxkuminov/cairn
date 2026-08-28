@@ -141,11 +141,11 @@ def _fingerprint(collection_id: int, scope: str) -> str:
     """The fingerprint the page would publish, computed through the production helper."""
 
     async def _go(s):
-        from src.control_panel.routes import _population_fingerprint
+        from src.control_panel.routes import _population_fingerprint, _read_population
         from src.models.db import Collection
 
         collection = await s.get(Collection, collection_id)
-        return await _population_fingerprint(s, collection, scope)
+        return _population_fingerprint(collection, await _read_population(s, collection, scope))
 
     return _aside(_go)
 
@@ -350,11 +350,17 @@ def test_zero_file_collection_never_reads_all_clear(cairn_env):
         dash = client.get("/").text
         detail = client.get("/collection/1").text
         frag = client.get("/collection/1/op-status").text
-        for name, body in (("dashboard", dash), ("detail", detail), ("op-status", frag)):
+        review = client.get("/collection/1/review").text
+        for name, body in (
+            ("dashboard", dash), ("detail", detail), ("op-status", frag), ("review", review)
+        ):
             assert "All clear" not in body, name
         assert "No files indexed yet" in dash
         assert "No files indexed yet" in detail
         assert "No files indexed" in frag
+        # The review page's zero-issue card: an empty collection has nothing to review, which is
+        # not the same claim as "nothing is missing or changed".
+        assert "No files indexed yet" in review
         assert "All files verified" not in dash
 
 
@@ -812,6 +818,177 @@ def test_an_aba_on_the_event_population_is_refused(cairn_env, url, scope):
         )
 
     assert _aside(unacked) == 1  # the modified alert was NOT swept up
+
+
+# --- D14 (post-audit): the equal-count event ABA ---------------------------------------------
+
+
+def test_an_equal_count_event_swap_is_refused(cairn_env):
+    """The ABA a *count* cannot see: one open alert replaced by a different one.
+
+    The first encoding hashed `open_events=<k>`. Acknowledge the one open `missing` event and open
+    another on the same file with the same kind, and `k` is 1 both times while the incident the
+    operator is being asked to clear is a different one — a stale form would validate and silently
+    close an alert that was never on the page. Bound by identity + generation, it is refused.
+    """
+    root = cairn_env / "eventaba"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [("gone", "missing", "complete")]))
+
+        async def first_event(s):
+            from src.models.db import FileEntry
+
+            fid = await s.scalar(select(FileEntry.id).where(FileEntry.relpath == "gone"))
+            await _mk_event(s, cid, fid, "missing")
+
+        await _with_session(first_event)
+
+    def open_count(s):
+        from src.models.db import Event
+
+        return s.scalar(
+            select(func.count()).select_from(Event).where(Event.acknowledged_at.is_(None))
+        )
+
+    with _make_client(cairn_env, seed) as client:
+        token = _csrf(client)
+        fp = _fingerprint(1, "review-accept")
+        assert _aside(open_count) == 1
+
+        async def swap(s):
+            """Ack E1, open E2 on the same file with the same kind. File rows never move."""
+            from src.models.db import Event, FileEntry
+
+            e1 = await s.scalar(select(Event).where(Event.acknowledged_at.is_(None)))
+            e1.acknowledged_at = NOW
+            await s.commit()
+            fid = await s.scalar(select(FileEntry.id).where(FileEntry.relpath == "gone"))
+            await _mk_event(s, 1, fid, "missing")
+
+        _aside(swap)
+        # The count the old encoding hashed is unchanged — this is a true equal-count ABA.
+        assert _aside(open_count) == 1
+        _assert_refused(_post(client, "/collection/1/review/accept", fp, token))
+
+    # Nothing was accepted and the second, unseen incident is still open.
+    assert _aside(lambda s: _statuses(s, 1)) == [("missing", "gone")]
+    assert _aside(open_count) == 1
+
+
+# --- D14 (post-audit): the render and the mint come from ONE fetch ---------------------------
+
+
+def _drift_after_the_population_read(monkeypatch, drift):
+    """Patch `_read_population` into a barrier: it does the real read, then lets `drift` commit.
+
+    This is the interleaving a two-SELECT page cannot survive — `SELECT` does not open a
+    transaction under Python's legacy sqlite3 transaction control, so a scanner committing here
+    would land in a *second* read but not the first. Returns the recorder: one entry per call,
+    each `(scope, fingerprint_of_the_snapshot_that_was_returned)`.
+    """
+    from src.control_panel import routes
+
+    seen: list[tuple[str, str]] = []
+    real = routes._read_population
+
+    async def spy(session, collection, scope):
+        pop = await real(session, collection, scope)
+        seen.append((scope, routes._population_fingerprint(collection, pop)))
+        if len(seen) == 1:
+            await _with_session(drift)
+        return pop
+
+    monkeypatch.setattr(routes, "_read_population", spy)
+    return seen
+
+
+def test_the_review_page_hashes_exactly_the_population_it_rendered(cairn_env, monkeypatch):
+    """One fetch feeds the rows, the counts and the fingerprint — with a scan landing right after.
+
+    The failure this pins: rows read in one statement and the fingerprint minted in another, with a
+    scan committing in between. The form would then carry the *new* population's fingerprint while
+    the page listed the old one, and an unchanged POST would validate and delete a `missing` row
+    the operator never saw.
+    """
+    root = cairn_env / "mint"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [("seen", "missing", "complete")]))
+
+        async def alarm(s):
+            from src.models.db import FileEntry
+
+            fid = await s.scalar(select(FileEntry.id).where(FileEntry.relpath == "seen"))
+            await _mk_event(s, cid, fid, "missing")
+
+        await _with_session(alarm)
+
+    async def scan_lands(s):
+        from src.models.db import FileEntry
+
+        await _mk_files(s, 1, [("unseen", "missing", "complete")])
+        fid = await s.scalar(select(FileEntry.id).where(FileEntry.relpath == "unseen"))
+        await _mk_event(s, 1, fid, "missing")
+
+    with _make_client(cairn_env, seed) as client:
+        seen = _drift_after_the_population_read(monkeypatch, scan_lands)
+        with _capture_context() as captured:
+            body = client.get("/collection/1/review").text
+
+        # Exactly one population read served the whole render.
+        assert [scope for scope, _ in seen] == ["review-accept"]
+        ctx = [c for name, c in captured if name == "collection_review.html"][0]
+        # ...and the published fingerprint is that snapshot's, not a re-read one.
+        assert ctx["population_fp"] == seen[0][1]
+        assert f'name="population_fp" value="{seen[0][1]}"' in body
+        # The row that landed after the single fetch is in neither half: not rendered, not hashed.
+        assert "seen" in body and "unseen" not in body
+        assert ctx["total_issues"] == 1 and ctx["shown"] == 1
+        # The open-event component is read in the same statement, so the alert that opened after
+        # it is outside the pill and outside the hash too.
+        assert ctx["review_open"] == 1
+
+        # And the drift is caught where it must be: at submit time, under the write lock.
+        _assert_refused(_post(client, "/collection/1/review/accept", ctx["population_fp"], _csrf(client)))
+
+    rows = _aside(lambda s: _statuses(s, 1))
+    assert ("missing", "seen") in rows and ("missing", "unseen") in rows
+
+
+def test_the_detail_baseline_form_hashes_the_population_that_gated_it(cairn_env, monkeypatch):
+    """Same contract on the detail page: the D7 gate and the D14 mint share one read."""
+    root = cairn_env / "mintdetail"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [("fresh", "new", "complete")]))
+
+    async def issue_lands(s):
+        await _mk_files(s, 1, [("gone", "missing", "complete")])
+
+    with _make_client(cairn_env, seed) as client:
+        seen = _drift_after_the_population_read(monkeypatch, issue_lands)
+        with _capture_context() as captured:
+            body = client.get("/collection/1").text
+
+        assert [scope for scope, _ in seen] == ["baseline-new"]
+        ctx = [c for name, c in captured if name == "collection_detail.html"][0]
+        assert ctx["show_baseline"] is True
+        assert ctx["population_fp"] == seen[0][1]
+        assert f'name="population_fp" value="{seen[0][1]}"' in body
+
+        # The issue that landed after that read is not in the hash, so the POST's own read (which
+        # sees it) refuses — the zero-issue assertion the form made no longer holds.
+        _assert_refused(_post(client, "/collection/1/accept", ctx["population_fp"], _csrf(client)))
+
+    rows = _aside(lambda s: _statuses(s, 1))
+    assert ("new", "fresh") in rows and ("missing", "gone") in rows
 
 
 # --- D14 / 3.19: lock contention is a refusal, not a 500 -------------------------------------

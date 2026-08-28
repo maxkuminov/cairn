@@ -45,14 +45,28 @@
 {% endif %}
 
 {% if total_issues == 0 %}
-  <div class="card">
-    <div class="empty-state">
-      <div style="display:flex;justify-content:center;margin-bottom:10px;color:var(--ok)">{{ m.icon("checkCircle", size=34, stroke=1.7) }}</div>
-      <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px">All clear</div>
-      <div>Nothing is missing or changed in this collection right now.</div>
-      <a class="btn btn--subtle btn--sm" href="/collection/{{ c.id }}" style="margin-top:16px;display:inline-flex">Back to {{ c.name }}</a>
+  {% if c.is_empty %}
+    {# A collection watching nothing has established nothing: "All clear" here would be the same
+       false green (#31) the dashboard card and the detail header were fixed for. Nothing has been
+       checked, so the card is muted and says exactly that. #}
+    <div class="card">
+      <div class="empty-state">
+        <div style="display:flex;justify-content:center;margin-bottom:10px;color:var(--text-3)">{{ m.icon("folder", size=34, stroke=1.7) }}</div>
+        <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px">No files indexed yet</div>
+        <div>Nothing has been checked in this collection, so there is nothing to review. Run a scan on the collection to index its files.</div>
+        <a class="btn btn--subtle btn--sm" href="/collection/{{ c.id }}" style="margin-top:16px;display:inline-flex">Back to {{ c.name }}</a>
+      </div>
     </div>
-  </div>
+  {% else %}
+    <div class="card">
+      <div class="empty-state">
+        <div style="display:flex;justify-content:center;margin-bottom:10px;color:var(--ok)">{{ m.icon("checkCircle", size=34, stroke=1.7) }}</div>
+        <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px">All clear</div>
+        <div>Nothing is missing or changed in this collection right now.</div>
+        <a class="btn btn--subtle btn--sm" href="/collection/{{ c.id }}" style="margin-top:16px;display:inline-flex">Back to {{ c.name }}</a>
+      </div>
+    </div>
+  {% endif %}
   {% if review_open and review_open > 0 %}
     {# Nothing is wrong any more, but alerts raised earlier are still open — a file that went
        missing and has since come back. Only the Mark-reviewed half is offered (design D9):

@@ -227,6 +227,13 @@ Derived, in `_collection_view`:
   header pill, the `partials/op_status.html` fragment and the sidebar dot change together. Fixing
   only the legend is how "All clear" survives a fix aimed at it. A root that is a typo or a failed
   bind mount is a configuration failure to surface, not a clean bill of health.
+- The **review page's zero-issue card** is the fourth surface, and it does not go through
+  `_STATUS_META`: it branches on `total_issues == 0` and prints a green "All clear — nothing is
+  missing or changed in this collection right now". For an empty collection that is the same false
+  green, one page further in — "nothing is missing or changed" is a claim about files that were
+  checked, and none were. `collection_review.html` therefore splits that branch on the view's
+  `is_empty` and renders the muted "No files indexed yet" card (same `folder` icon, `--text-3`)
+  instead, pointing at the collection page rather than congratulating the operator.
 
 **Global (dashboard) proof coverage is computed strictly over `ots_mode == 'perfile'` collections.**
 Tripwire (`none`) collections stamp nothing and their stamp route rejects them, so folding their
@@ -400,7 +407,7 @@ boundaries are chosen so the regions are far apart in the file:
 | Region | Owner |
 |---|---|
 | `verify_run` (and only it) | A |
-| `_STATUS_META`, `_collection_status`, `_ots_counts`, `_op_status_c`, `_collection_view`, `_base_context`, `_event_feed`, `dashboard`, `ack_event`, `collection_detail`, `collection_accept`, `collection_review`, `collection_review_accept`, new `_alert_badge_count`, new `_population_fingerprint` | B |
+| `_STATUS_META`, `_collection_status`, `_ots_counts`, `_op_status_c`, `_collection_view`, `_base_context`, `_event_feed`, `dashboard`, `ack_event`, `collection_detail`, `collection_accept`, `collection_review`, `collection_review_accept`, new `_alert_badge_count`, new `_read_population` + `_population_fingerprint` | B |
 | — (C owns no routes.py region; `review_open` and `total_issues` are already in the review context, and D14's `population_fp` / `stale` keys are published by B's `collection_review`) | C |
 | `settings_page` context only | D |
 
@@ -476,6 +483,20 @@ and the other reads on its own. This is #23's requirement taken one level deeper
 states it: the fix is not to spend one word on both states, it is to stop presenting them as one
 state.
 
+*The same two names on the verify card when there is no proof at all.* `verify_run` builds its
+verdict from a `VerifyResult`, and there is no result to build one from when the file has no stored
+`ots_path` — which is exactly the state a `pending` (queued, never submitted) or `none` (never
+stamped) row is in. Those fell through the ladder to the red **"Could not verify"** fallback, whose
+copy says the file's contents "may have changed since it was recorded". Nothing was recorded and
+nothing was checked, so that is a false accusation in the one direction this product must never get
+wrong. Two branches sit before the fallback, reading the state off the **file row** (the only honest
+source when there is no result): `ots_state == "pending"` → the same amber **"Queued to stamp"** as
+the result-carrying branch, and `ots_state == "none"` → a neutral **"Not notarized yet"** that says
+no proof has been made and the file is still watched for changes. The red fallback keeps only the
+case that deserves it: a row claiming `incomplete`/`complete` while nothing verifiable came back.
+The card's proof-download button is gated on a stored proof for the same reason — the export route
+409s without one, and a download button under "no proof yet" is a promise the page cannot keep.
+
 ## D14 — the accept-family population fingerprint (one guard, two routes)
 
 Two routes call the unscoped `accept_collection`: `collection_accept` (the detail page's
@@ -494,16 +515,18 @@ canonical description of the population that button claims to act on.
 
 | Form | Scope tag | Population hashed |
 |---|---|---|
-| detail-page **Baseline new files** | `baseline-new` | `open_events=<open event count>` (zero whenever this form is rendered at all) + `issues=<missing+modified count>` (likewise zero — both assertions travel *inside* the hash) then the collection's `new` files |
-| review-page **Accept all changes** | `review-accept` | `open_events=<open event count>` + the collection's `missing` + `modified` files |
+| detail-page **Baseline new files** | `baseline-new` | `open_events=<the open-event set, by identity>` (empty whenever this form is rendered at all) + `issues=<missing+modified count>` (zero — both assertions travel *inside* the hash) then the collection's `new` files |
+| review-page **Accept all changes** | `review-accept` | `open_events=<the open-event set, by identity>` + the collection's `missing` + `modified` files |
 
-*Canonical encoding.* Two ASCII control characters do the framing: **US** = `\x1f` between fields,
-**RS** = `\x1e` between records.
+*Canonical encoding.* Four ASCII control characters do the framing: **US** = `\x1f` between fields,
+**RS** = `\x1e` between records, and **GS** = `\x1d` / **FS** = `\x1c` one level down, inside the
+header's open-event component.
 
 - **Header** —
-  `f"{scope}\x1f{collection_id}\x1f{collection.created_at.isoformat()}\x1fopen_events={k}"`, where
-  `k` is the count of the collection's events with `acknowledged_at IS NULL`; and for `baseline-new`
-  only, a further `f"\x1fissues={n}"`.
+  `f"{scope}\x1f{collection_id}\x1f{collection.created_at.isoformat()}\x1fopen_events={events}"`,
+  where `events` is the GS-joined, id-ordered `f"{id}\x1c{kind}\x1c{detected_at.isoformat()}"` of
+  every event with `acknowledged_at IS NULL` (empty string when there are none); and for
+  `baseline-new` only, a further `f"\x1fissues={n}"`.
 - **One record per file** —
   `f"{id}\x1f{len(relpath.encode('utf-8'))}\x1f{relpath}\x1f{status}\x1f{sha256 or ''}\x1f{first_seen.isoformat() if first_seen else ''}"`.
 - **Order** — records sorted by `relpath`, which is unique within a collection
@@ -547,26 +570,70 @@ gets a different creation timestamp, so an old fingerprint cannot validate again
 (`first_seen` is a `datetime` that is never NULL on a stored row; it is encoded defensively as the
 empty string if it ever reads NULL, which contributes no generation pinning rather than raising.)
 
-*The event population is inside the guard too, by count.* `accept_collection` does not only touch
+*The event population is inside the guard too, by identity.* `accept_collection` does not only touch
 file rows — it acknowledges **every open event on the collection**, and that population is not
 derivable from the file rows. A file can go `modified`, then `missing`, then be restored between
 render and submit: its status returns to `ok` (so the protected `missing` + `modified` set can come
 back to exactly what the form was rendered for) while its `modified` event stays open by design —
 D9's restored-but-unreviewed state. Without an event term the fingerprint matches and the accept
-silently clears an alert that was never on the rendered page. So the header carries
-`open_events=<the collection's count of events with an unset acknowledgement>`, computed by the
-same helper on both sides: at **mint** while the page is rendered, and at **check** inside the
-write-locked transaction, in the same read snapshot as the file rows — so the whole preimage
-describes one consistent state and any change in that count between render and submit is a refusal.
-A count rather than per-event identity is the right granularity because the acknowledgement is
-all-or-nothing (`accept_collection` clears the whole open set): the count changes whenever the set
-does — an event opening, an event being acknowledged in another tab — and no ABA is reachable
-without a scan committing in between, which the write lock already serializes against.
+silently clears an alert that was never on the rendered page. So the header carries `open_events=`
+**the open set itself, by identity**, produced by the same encoder on both sides: at **mint** while the page is rendered, and at **check** inside the
+write-locked transaction — in both cases read in the same statement as the file rows (see *one read*
+below), so the whole preimage describes one consistent state and any change to which alerts are open
+between render and submit is a refusal.
 
-The review page's fingerprint is computed **over the whole protected population in SQL, not over the
-rendered rows**: the list is capped at `REVIEW_ROW_LIMIT` (500) while accept acts on all of it, so hashing
-the visible rows would leave every issue past the cap outside the guard — the exact collections
-(a whole deleted folder) where the guard matters most.
+A **count** is the wrong granularity, and this is the one place the first implementation was wrong.
+The count is stable under a real, reachable ABA: the single open `missing` event on the listed file
+is acknowledged — by the scanner's restore-ack, or by the operator in another tab, or by
+`review/ack-all` — and a fresh incident then opens another `missing` event on the same file. The
+file record can be back to exactly its rendered value (same id, path, status, digest, `first_seen`)
+and the count is 1 both times, so a count-based preimage matches and the accept silently closes an
+alert nobody has seen. That is not a theoretical replay; it is a file going missing twice.
+`id` + `kind` name the incident, and `detected_at` pins its **generation** for the same reason
+`first_seen` does for a file row: `events.id` is a rowid without `AUTOINCREMENT`, and an event *can*
+be deleted (`events.file_id` is `ON DELETE CASCADE`, and `_reconcile_moves` deletes `added` file
+rows), which frees the id for reuse. The set is ordered by `id` so the encoding is deterministic;
+`kind` and the ISO timestamp cannot contain GS or FS, and the CHECK constraint keeps `kind` inside a
+fixed vocabulary, so the component is unambiguous by construction rather than by escaping.
+
+The review page's fingerprint is computed **over the whole protected population, not over the
+rendered rows**: the list is capped at `REVIEW_ROW_LIMIT` (500) while accept acts on all of it, so
+hashing the visible rows would leave every issue past the cap outside the guard — the exact
+collections (a whole deleted folder) where the guard matters most.
+
+*One read feeds the render and the mint.* Not two queries with the same `WHERE` clause — **one**.
+Python's `sqlite3` runs in legacy transaction mode: a `SELECT` does not open a transaction, so two
+consecutive `SELECT`s on one connection are two independent snapshots and a scanner can commit
+between them. A review page that read its visible rows in one statement and minted the fingerprint
+in another could therefore publish a fingerprint for a population it never displayed; an unchanged
+POST would then validate and delete a `missing` row the operator never saw — the guard's own mint
+reintroducing the accident the guard exists to prevent. So `_read_population(session, collection,
+scope)` returns one `_Population` snapshot — the protected file rows (uncapped, with the columns the
+page renders), the open-event set, and for `baseline-new` the `missing + modified` count — read as a
+**single `UNION ALL` statement** across the two tables, which SQLite evaluates inside one implicit
+read transaction. Everything downstream is derived from that value in Python: the rendered rows are
+a *slice* of it (re-sorted missing-first), the recovery copy list is a slice, "N issues" is its
+length, the "need action" pill is the length of its event set, and `_population_fingerprint(collection,
+pop)` — now a pure function over a snapshot — hashes exactly those rows. The detail page's D7 gate is
+derived from the same snapshot as its mint, so the form can never be *shown* for one state and
+*signed* for another (`_collection_view`'s numbers are kept only as a cheap pre-filter that decides
+whether reading the `new` set is worth it at all, so an ordinary render of a large collection still
+does not materialize it). The POST side calls the same `_read_population` + `_population_fingerprint`
+pair under the write lock, so mint and recount cannot encode the same state differently — there is
+one encoder, not two.
+
+One read *that feeds a hashed claim*, that is. The per-row "Mark reviewed" lookup
+(`_latest_events_by_file`) stays a separate query: it decorates rendered rows with the event id
+behind each row's button and contributes nothing to the fingerprint, and `ack_event` is idempotent
+(it no-ops on an already-acknowledged event), so a stale row button cannot destroy anything. The
+rule is that everything the guard *hashes* — and everything the page *claims* about that population
+— comes from the one snapshot.
+
+The union is the price of atomicity across two tables: file rows, open events and the issue count are
+padded to one 10-column row shape and tagged in the first column. The alternative — forcing an
+explicit read transaction on every GET — was rejected for the same reason `BEGIN IMMEDIATE` was:
+it puts transaction machinery on ordinary page renders to fix a problem that one statement already
+solves.
 
 *The check is atomic with the act.* The POST does not "check, then call". It opens **one write
 transaction** and does both inside it:
@@ -621,8 +688,9 @@ button and invites them to click it again.
 
 *Coverage, stated plainly.* `accept_collection` mutates three populations, and the guard now binds
 each of them: the **file rows it deletes and rewrites**, by identity *and* generation
-(`id + relpath + status + sha256 + first_seen`); the **event population it acknowledges**, by count
-(`open_events=` in the header); and the **`new` set it promotes**, which is the one deliberate,
+(`id + relpath + status + sha256 + first_seen`); the **event population it acknowledges**, by
+identity and generation (`open_events=` in the header, `id + kind + detected_at` per event); and the
+**`new` set it promotes**, which is the one deliberate,
 disclosed exception below. There is no fourth thing the verb touches.
 
 *Accepted limitation.* The review form's fingerprint does not cover the `new` set — so new files that
@@ -639,6 +707,6 @@ written there as an explicit accepted limitation rather than left as a contradic
 
 The `open_events` term does **not** quietly re-close that exception: `streamline-event-acknowledgement`
 has the scanner write `added` (and `restored` / `moved`) events **already acknowledged**, so a file
-first seen between render and submit leaves the open-event count untouched. The count moves only for
+first seen between render and submit leaves the open-event set untouched. The set moves only for
 the kinds that actually alarm — a new `missing`, or a WORM `modified` — which is exactly the
 population the guard is meant to bind.

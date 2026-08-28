@@ -95,7 +95,10 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
   **"Pending confirmation"**. Today the badge calls them "Pending" and "Incomplete" while every tile
   *sums* them and calls the total "pending confirmation" — so a file that was never submitted is
   reported as awaiting confirmation and a stuck queue hides behind the wording for a healthy young
-  proof. No summary adds them together any more.
+  proof. No summary adds them together any more. The verify card reads those two names off the
+  **file row** when there is no proof to check at all (`pending` with nothing on disk, or never
+  stamped) instead of falling through to the red "Could not verify", whose copy accuses a file of
+  possibly having changed when nothing was ever recorded or checked.
 - **`verify_result.html` derives its closing "verified via" sentence from `verified_via`** rather
   than asserting "Verified by explorer lookup" regardless of the configured backend.
 - **`/verify` gets a real empty state** when nothing is anchored yet (today the empty state only
@@ -125,7 +128,8 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
 - **A zero-file collection reads "No files indexed yet" on every surface** — the card legend, the
   detail tiles *and* the shared status pill (`_collection_status` gains an `empty` state, so the
   dashboard card, the detail header and the `op_status` fragment stop rendering the green "All
-  clear" they share).
+  clear" they share), **including the review page's nothing-to-review card**, where "nothing is
+  missing or changed" is a claim about files that were checked and an empty collection has none.
 - **The collection-detail header stops offering Accept while there are issues.** When `issues > 0`,
   **Review issues** is the `btn--primary` and Accept is not in the header at all — the destructive
   path is reachable only from the page that explains it. When `issues == 0`, **no open events** and
@@ -144,8 +148,11 @@ read-only; the DB is an index, the guarantee is bytes + `.ots`).
   demoted to belt-and-braces for the long window. The fingerprint identifies each file by path,
   status, digest and `first_seen` — not by row id alone, which SQLite reuses after a delete, and not
   by content alone, so a same-path/same-bytes record re-created on a reused id is a different
-  generation the stale form cannot validate — and it binds the collection's **open-event count**,
-  the other population the verb mutates. Being unable to take the write lock is itself a refusal,
+  generation the stale form cannot validate — and it binds the collection's **open-event set by
+  identity** (each event's id, kind and detection time), the other population the verb mutates; a
+  count would not see one alert being acknowledged while another opens on the same file. The
+  rendered population and the hashed one come from a **single read**, so a page can never publish a
+  fingerprint for rows it did not display. Being unable to take the write lock is itself a refusal,
   never a 500. **One deliberate exception:** the review
   accept's fingerprint covers only the *protected* `missing` + `modified` population, so a
   not-yet-baselined file that appears between render and submit is still adopted rather than

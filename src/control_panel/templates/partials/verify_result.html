@@ -23,6 +23,10 @@
           <span class="mono">{{ filename }}</span>'s fingerprint has been submitted to Bitcoin but isn't confirmed yet. This usually settles within a few hours.
         {% elif verdict == "warn" and ots_state == "pending" %}
           <span class="mono">{{ filename }}</span>'s fingerprint is queued locally and has not been submitted to a timestamp server yet. Nothing has been asked of Bitcoin for it so far.
+        {% elif verdict == "unavailable" and ots_state == "none" %}
+          {# Never stamped: neutral, not a failure. Saying "we couldn't confirm it" about a file no
+             proof was ever made for blames the file for an absence of evidence nobody created. #}
+          No timestamp proof has been made for <span class="mono">{{ filename }}</span> yet, so there is nothing to check against the Bitcoin record. Cairn still watches the file for changes; use <strong>Stamp all</strong> on the collection to notarize it.
         {% else %}
           We couldn't confirm <span class="mono">{{ filename }}</span> against the public Bitcoin record. Its contents may have changed since it was recorded, or the proof isn't confirmed yet.
         {% endif %}
@@ -69,7 +73,9 @@ Existed by:  {{ existed_by }}{% endif %}{% if block_height %}
 Bitcoin block: #{{ "{:,}".format(block_height) }}{% endif %}
 Verified via: {{ verified_via }}</pre>
   <div class="flex gap-10" style="margin-top:16px">
-    <a class="btn" href="/verify/export/{{ file_id }}">{{ m.icon("download", size=15) }} Download .ots proof</a>
+    {# Only offered when a proof actually exists on the row: the export route 409s without one, and
+       a download button on a card that just said "no proof yet" is a promise the page can't keep. #}
+    {% if has_proof %}<a class="btn" href="/verify/export/{{ file_id }}">{{ m.icon("download", size=15) }} Download .ots proof</a>{% endif %}
     <button type="button" class="btn btn--ghost" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('verify-report').textContent)">{{ m.icon("copy", size=15) }} Copy verification report</button>
   </div>
   <div class="info-strip" style="margin-top:18px">

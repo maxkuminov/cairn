@@ -139,7 +139,7 @@ def _population_fp(collection_id: int, scope: str) -> str:
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
     from src.config import get_settings
-    from src.control_panel.routes import _population_fingerprint
+    from src.control_panel.routes import _population_fingerprint, _read_population
     from src.database import _configure_sqlite
     from src.models.db import Collection
 
@@ -148,8 +148,9 @@ def _population_fp(collection_id: int, scope: str) -> str:
         sa_event.listen(engine.sync_engine, "connect", _configure_sqlite)
         try:
             async with AsyncSession(engine, expire_on_commit=False) as s:
-                return await _population_fingerprint(
-                    s, await s.get(Collection, collection_id), scope
+                collection = await s.get(Collection, collection_id)
+                return _population_fingerprint(
+                    collection, await _read_population(s, collection, scope)
                 )
         finally:
             await engine.dispose()
@@ -1081,6 +1082,9 @@ def test_review_accept_clears_issues_and_stays_on_review(cairn_env):
 
     async def seed():
         cid = await _seed_collection(root)
+        # A healthy file alongside the missing one, so the accept leaves the collection with
+        # files: an empty collection reads "No files indexed yet", not "All clear" (#31).
+        await _seed_files(cid, n_ok=1, n_modified=0, n_missing=0)
         await _seed_missing_with_event(cid)
 
     with _make_client(cairn_env, seed) as client:

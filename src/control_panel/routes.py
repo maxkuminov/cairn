@@ -17,12 +17,12 @@ import os
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import case, func, select, text, update
+from sqlalchemy import func, literal, null, select, text, union_all, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -872,14 +872,19 @@ async def collection_detail(
         sort=collections_svc.DEFAULT_SORT,
         direction=collections_svc.DEFAULT_DIRECTION,
     )
-    # The D14 hidden field is minted only in the one state that renders the baseline form (D7), so
-    # an ordinary detail render of a large collection never materializes its `new` set.
-    show_baseline = (
-        cview["issues"] == 0 and cview["open_events"] == 0 and cview["counts"]["new"] > 0
-    )
-    population_fp = (
-        await _population_fingerprint(session, collection, "baseline-new") if show_baseline else ""
-    )
+    # The D14 hidden field is minted only in the one state that renders the baseline form (D7).
+    # `cview`'s three numbers are a cheap *pre*-filter — they only decide whether it is worth
+    # reading the population at all, so an ordinary detail render of a large collection never
+    # materializes its `new` set. The gate that actually decides to render the form, and the
+    # fingerprint that form carries, both come from the SAME single-statement read: publishing a
+    # form for one snapshot while hashing another is the whole failure mode D14 guards against.
+    show_baseline = False
+    population_fp = ""
+    if cview["issues"] == 0 and cview["open_events"] == 0 and cview["counts"]["new"] > 0:
+        pop = await _read_population(session, collection, "baseline-new")
+        show_baseline = bool(pop.files) and pop.issues == 0 and not pop.open_events
+        if show_baseline:
+            population_fp = _population_fingerprint(collection, pop)
     ctx = await _base_context(request, session, user, "collection")
     ctx.update(
         {
@@ -1084,6 +1089,11 @@ async def collection_scan(
 # removes that by construction rather than by escaping.
 _FP_US = "\x1f"
 _FP_RS = "\x1e"
+# GS/FS do the same framing one level down, inside the header's open-event component: GS between
+# event records, FS between an event's fields. Distinct characters (rather than reusing US/RS) keep
+# the component unambiguous no matter what an event `kind` or an ISO timestamp ever contains.
+_FP_GS = "\x1d"
+_FP_FS = "\x1c"
 
 # Which file statuses each form's fingerprint covers.
 _FP_SCOPES: dict[str, tuple[str, ...]] = {
@@ -1122,16 +1132,153 @@ def _is_lock_contention(exc: OperationalError) -> bool:
     return any(m in msg for m in _FP_LOCK_MESSAGES)
 
 
-async def _population_fingerprint(
+class _PopFile(NamedTuple):
+    """One file row of an accept-family population.
+
+    Carries BOTH the fields the guard hashes (``id``/``relpath``/``status``/``sha256``/
+    ``first_seen``) and the fields the review page renders, because they come from one fetch: see
+    :func:`_read_population`. Attribute names match :class:`~src.models.db.FileEntry`, so
+    :func:`_review_item` renders either.
+    """
+
+    id: int
+    relpath: str
+    status: str
+    sha256: str | None
+    first_seen: datetime | None
+    size: int | None
+    last_checked: datetime | None
+    last_changed: datetime | None
+    ots_state: str
+
+
+class _PopEvent(NamedTuple):
+    """One open event, by identity and generation — never by tally (see `_population_fingerprint`)."""
+
+    id: int
+    kind: str
+    detected_at: datetime | None
+
+
+class _Population(NamedTuple):
+    """Everything an accept-family form displays and hashes, read as ONE statement.
+
+    ``files`` is sorted by ``relpath`` (total order — unique within a collection), ``open_events``
+    by ``id``. ``issues`` is the ``missing`` + ``modified`` count and is read only for the
+    ``baseline-new`` scope (0 elsewhere, where it is neither hashed nor asserted).
+    """
+
+    scope: str
+    files: list[_PopFile]
+    open_events: list[_PopEvent]
+    issues: int
+
+
+async def _read_population(
     session: AsyncSession, collection: Collection, scope: str
-) -> str:
-    """Hex SHA-256 of D14's canonical encoding of the population ``scope`` names.
+) -> _Population:
+    """Read the whole population for ``scope`` in a SINGLE SQL statement.
+
+    The mint side and the recount side both go through here, so the two can never encode the same
+    state differently — and, on the mint side, the rows the page *renders* are sliced from the very
+    list that is hashed. That is not a tidiness point. Python's ``sqlite3`` runs in legacy
+    transaction mode: a ``SELECT`` does not open a transaction, so two consecutive ``SELECT``s on
+    one connection are two independent snapshots and a scanner can commit between them. A review
+    page that read its visible rows in one statement and minted the fingerprint in another could
+    therefore publish a fingerprint for a population it never displayed — an unchanged POST would
+    then validate and delete a ``missing`` row the operator never saw, which is precisely the
+    accident this guard exists to prevent. One statement is one snapshot, by construction.
+
+    The union is the price of that: the file rows, the open-event rows and (for ``baseline-new``)
+    the issue count live in different tables/shapes, so they are padded to one 10-column row shape
+    and tagged in the first column. SQLite evaluates the compound statement inside a single implicit
+    read transaction; SQLAlchemy takes result types from the first leg, so the events' ``detected_at``
+    is decoded by ``first_seen``'s ``DateTime`` processor (same column type, same storage format).
+    """
+    statuses = _FP_SCOPES[scope]
+    files_q = select(
+        literal("f").label("part"),
+        FileEntry.id.label("n1"),
+        FileEntry.relpath.label("t1"),
+        FileEntry.status.label("t2"),
+        FileEntry.sha256.label("t3"),
+        FileEntry.first_seen.label("d1"),
+        FileEntry.size.label("n2"),
+        FileEntry.last_checked.label("d2"),
+        FileEntry.last_changed.label("d3"),
+        FileEntry.ots_state.label("t4"),
+    ).where(
+        FileEntry.collection_id == collection.id,
+        FileEntry.status.in_(statuses),
+    )
+    events_q = select(
+        literal("e"),
+        Event.id,
+        Event.kind,
+        null(),
+        null(),
+        Event.detected_at,
+        null(),
+        null(),
+        null(),
+        null(),
+    ).where(Event.collection_id == collection.id, Event.acknowledged_at.is_(None))
+    legs = [files_q, events_q]
+    if scope == "baseline-new":
+        # The zero-issue assertion the detail form makes, hashed and re-asserted. Counted rather
+        # than materialized: on a collection that has both `new` files and a large issue set the
+        # form is not shown at all, and fetching those rows would be pure waste.
+        legs.append(
+            select(
+                literal("c"),
+                func.count(),
+                null(),
+                null(),
+                null(),
+                null(),
+                null(),
+                null(),
+                null(),
+                null(),
+            )
+            .select_from(FileEntry)
+            .where(
+                FileEntry.collection_id == collection.id,
+                FileEntry.status.in_(("missing", "modified")),
+            )
+        )
+
+    files: list[_PopFile] = []
+    events: list[_PopEvent] = []
+    issues = 0
+    for row in (await session.execute(union_all(*legs))).all():
+        part = row[0]
+        if part == "f":
+            files.append(_PopFile(*row[1:10]))
+        elif part == "e":
+            events.append(_PopEvent(row[1], row[2], row[5]))
+        else:
+            issues = int(row[1] or 0)
+
+    files.sort(key=lambda f: f.relpath)
+    events.sort(key=lambda e: e.id)
+    return _Population(scope=scope, files=files, open_events=events, issues=issues)
+
+
+def _population_fingerprint(collection: Collection, pop: _Population) -> str:
+    """Hex SHA-256 of D14's canonical encoding of one :func:`_read_population` snapshot.
+
+    Pure: it hashes the rows it is handed and reads nothing. That is what lets the mint side hash
+    exactly the rows it rendered, and the recount side re-derive the same encoding from its own
+    single read under the write lock — one code path, two callers.
 
     Preimage = header + RS + RS.join(records), UTF-8 encoded.
 
-    * header — ``{scope}US{collection_id}US{created_at}USopen_events={k}`` and, for
+    * header — ``{scope}US{collection_id}US{created_at}USopen_events={events}`` and, for
       ``baseline-new`` only, a further ``USissues={n}``. Both of that scope's zero assertions
       therefore travel *inside* the hash.
+    * ``events`` — GS-joined, id-ordered ``{id}FS{kind}FS{detected_at}`` for every event with
+      ``acknowledged_at IS NULL``; empty when there are none.
     * record — ``{id}US{len(relpath_bytes)}US{relpath}US{status}US{sha256 or ''}US{first_seen}``,
       one per file, sorted by ``relpath`` (unique within a collection, so the order is total).
       Deliberately **not** sorted by ``id``: ``id`` is the field this encoding distrusts.
@@ -1145,51 +1292,36 @@ async def _population_fingerprint(
     path with the same digest on the same reused id still encodes differently). The collection's own
     ``created_at`` does the same job one level up for a recreated collection reusing its id.
 
-    ``open_events`` is the third population the verb mutates and is not derivable from the file
-    rows: a file can go modified -> missing -> restored between render and submit, returning the
+    The open-event population is the third population the verb mutates and is not derivable from the
+    file rows: a file can go modified -> missing -> restored between render and submit, returning the
     protected set to exactly its rendered value while its ``modified`` event stays open by design.
-    It is read in the SAME transaction as the file rows, so the whole preimage describes one state.
+    It is bound by **identity**, not by cardinality: hashing only the count leaves a same-count ABA
+    open — the single open ``missing`` event on a file is acknowledged (by a restore, or in another
+    tab) and a fresh incident opens another one, the count returns to 1, and a stale form would
+    validate and silently close an alert nobody has seen. ``id`` + ``kind`` name the incident and
+    ``detected_at`` pins its generation, since ``events.id`` is a rowid too and an event *can* be
+    deleted (``events.file_id`` is ``ON DELETE CASCADE``, and ``_reconcile_moves`` deletes file
+    rows), which frees the id for reuse.
     (``added``/``restored``/``moved`` events are born acknowledged, so an ordinary new file does not
-    move this count — the documented ``new``-set exception survives.)
+    enter this component — the documented ``new``-set exception survives.)
     """
-    statuses = _FP_SCOPES[scope]
-    open_events = await _open_event_count(session, collection.id)
-    header = (
-        f"{scope}{_FP_US}{collection.id}{_FP_US}"
-        f"{collection.created_at.isoformat()}{_FP_US}open_events={open_events}"
+    events = _FP_GS.join(
+        f"{e.id}{_FP_FS}{e.kind}{_FP_FS}"
+        f"{e.detected_at.isoformat() if e.detected_at else ''}"
+        for e in pop.open_events
     )
-    if scope == "baseline-new":
-        issues = await session.scalar(
-            select(func.count())
-            .select_from(FileEntry)
-            .where(
-                FileEntry.collection_id == collection.id,
-                FileEntry.status.in_(("missing", "modified")),
-            )
-        )
-        header += f"{_FP_US}issues={int(issues or 0)}"
-
-    rows = (
-        await session.execute(
-            select(
-                FileEntry.id,
-                FileEntry.relpath,
-                FileEntry.status,
-                FileEntry.sha256,
-                FileEntry.first_seen,
-            )
-            .where(
-                FileEntry.collection_id == collection.id,
-                FileEntry.status.in_(statuses),
-            )
-            .order_by(FileEntry.relpath)
-        )
-    ).all()
+    header = (
+        f"{pop.scope}{_FP_US}{collection.id}{_FP_US}"
+        f"{collection.created_at.isoformat()}{_FP_US}open_events={events}"
+    )
+    if pop.scope == "baseline-new":
+        header += f"{_FP_US}issues={pop.issues}"
 
     records = [
-        f"{fid}{_FP_US}{len(relpath.encode('utf-8'))}{_FP_US}{relpath}{_FP_US}{status}"
-        f"{_FP_US}{sha256 or ''}{_FP_US}{first_seen.isoformat() if first_seen else ''}"
-        for fid, relpath, status, sha256, first_seen in rows
+        f"{f.id}{_FP_US}{len(f.relpath.encode('utf-8'))}{_FP_US}{f.relpath}{_FP_US}{f.status}"
+        f"{_FP_US}{f.sha256 or ''}{_FP_US}"
+        f"{f.first_seen.isoformat() if f.first_seen else ''}"
+        for f in pop.files
     ]
     preimage = header + _FP_RS + _FP_RS.join(records)
     return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
@@ -1236,15 +1368,14 @@ async def _guarded_accept(
         await session.rollback()
         return stale
 
-    # 2. Recompute inside this transaction, and re-assert the detail form's two zeroes explicitly
+    # 2. Recompute inside this transaction, through the SAME single-statement read and the SAME
+    #    encoder the form was minted with, and re-assert the detail form's two zeroes explicitly
     #    (they are hashed too, so this is belt-and-braces on an unambiguous failure mode).
-    if scope == "baseline-new":
-        counts = await _collection_counts(session, collection.id)
-        open_events = await _open_event_count(session, collection.id)
-        if counts["missing"] + counts["modified"] > 0 or open_events > 0:
-            await session.rollback()
-            return stale
-    current = await _population_fingerprint(session, collection, scope)
+    pop = await _read_population(session, collection, scope)
+    if scope == "baseline-new" and (pop.issues > 0 or pop.open_events):
+        await session.rollback()
+        return stale
+    current = _population_fingerprint(collection, pop)
 
     # 3. Compare.
     if not hmac.compare_digest(current, submitted):
@@ -1284,7 +1415,7 @@ REVIEW_ROW_LIMIT = 500
 REVIEW_COPY_LIMIT = 2000
 
 
-def _review_item(fe: FileEntry, root: str, event: Event | None) -> dict[str, Any]:
+def _review_item(fe: FileEntry | _PopFile, root: str, event: Event | None) -> dict[str, Any]:
     """One review row: the file, what happened to it, and the open event (if any) to acknowledge."""
     rel_dir = fe.relpath.rsplit("/", 1)[0] if "/" in fe.relpath else ""
     open_event = event if (event is not None and event.acknowledged_at is None) else None
@@ -1342,39 +1473,28 @@ async def collection_review(
     collection = await _get_owned_collection(session, collection_id, user)
     view = await _collection_view(session, collection)
 
-    files = list(
-        await session.scalars(
-            select(FileEntry)
-            .where(
-                FileEntry.collection_id == collection_id,
-                FileEntry.status.in_(("missing", "modified")),
-            )
-            # missing first, then modified; stable by path within each.
-            .order_by(case((FileEntry.status == "missing", 0), else_=1), FileEntry.relpath)
-            .limit(REVIEW_ROW_LIMIT)
-        )
-    )
-    events = await _latest_events_by_file(session, collection_id, [f.id for f in files])
-    items = [_review_item(f, collection.root, events.get(f.id)) for f in files]
+    # ONE read of the whole protected population (uncapped) + the open-event set. Everything below
+    # is derived from it: the rendered rows, the recovery copy list, the issue total, the "need
+    # action" pill and the fingerprint. Re-querying for any of those would reopen the window this
+    # guard exists to close — a scanner commit between two SELECTs would put a file in the hash
+    # that is not in the list, and the operator's unchanged POST would then delete it unseen.
+    pop = await _read_population(session, collection, "review-accept")
+    # `pop.files` is path-ordered; the page shows missing first, then modified, stable by path
+    # within each. A Python sort of the fetched rows, not a second query.
+    rendered = sorted(pop.files, key=lambda f: (0 if f.status == "missing" else 1, f.relpath))
+    rendered = rendered[:REVIEW_ROW_LIMIT]
+    events = await _latest_events_by_file(session, collection_id, [f.id for f in rendered])
+    items = [_review_item(f, collection.root, events.get(f.id)) for f in rendered]
 
-    copy_relpaths = list(
-        await session.scalars(
-            select(FileEntry.relpath)
-            .where(
-                FileEntry.collection_id == collection_id,
-                FileEntry.status.in_(("missing", "modified")),
-            )
-            .order_by(FileEntry.relpath)
-            .limit(REVIEW_COPY_LIMIT)
-        )
-    )
-    review_open = await session.scalar(
-        select(func.count())
-        .select_from(Event)
-        .where(Event.collection_id == collection_id, Event.acknowledged_at.is_(None))
-    )
+    copy_relpaths = [f.relpath for f in pop.files[:REVIEW_COPY_LIMIT]]
+    review_open = len(pop.open_events)
 
-    total_issues = view["issues"]
+    total_issues = len(pop.files)
+    # The legend sits directly above the list, so it counts the list: take its two numbers from the
+    # snapshot rather than from `_collection_view`'s earlier, separate count query.
+    view["counts"] = dict(view["counts"])
+    view["counts"]["missing"] = sum(1 for f in pop.files if f.status == "missing")
+    view["counts"]["modified"] = total_issues - view["counts"]["missing"]
     ctx = await _base_context(request, session, user, "collection")
     ctx.update(
         {
@@ -1387,11 +1507,12 @@ async def collection_review(
             "copy_relpaths": "\n".join(copy_relpaths),
             "copy_count": len(copy_relpaths),
             "copy_truncated": total_issues > len(copy_relpaths),
-            "review_open": int(review_open or 0),
-            # Hashed over the collection's ENTIRE missing+modified set in SQL, not the
-            # REVIEW_ROW_LIMIT-capped rows above: accept acts on all of it, so hashing the visible
-            # rows would leave every issue past the cap outside the guard.
-            "population_fp": await _population_fingerprint(session, collection, "review-accept"),
+            "review_open": review_open,
+            # Hashed over the collection's ENTIRE missing+modified set — the same `pop.files` the
+            # rows above were sliced from, not a second query: accept acts on all of it, so hashing
+            # only the visible rows would leave every issue past the cap outside the guard, and
+            # re-reading would let the two disagree.
+            "population_fp": _population_fingerprint(collection, pop),
             "stale": stale == "1",
         }
     )
@@ -1778,7 +1899,22 @@ async def verify_run(
         # Two states, two branches (design D13): queued-but-not-submitted is not awaiting Bitcoin.
         verdict = "warn"
         title = "Queued to stamp"
+    elif result is None and fe.ots_state == "pending":
+        # No proof to check because none has been made yet — the file is queued for stamping and
+        # `ots_path` is still empty. This reached the red "Could not verify" fallback, which reads
+        # as "something is wrong with this file"; nothing is. Same reading as the branch above (and
+        # as the `pending` badge everywhere else), just arrived at from the file row rather than
+        # from a `VerifyResult`, because there is no proof to build one from.
+        verdict = "warn"
+        title = "Queued to stamp"
+    elif result is None and fe.ots_state == "none":
+        # Never stamped at all: neutral information, not a failure. Red here would be crying wolf
+        # over a `none` collection or a file the backfill has not reached.
+        verdict = "unavailable"
+        title = "Not notarized yet"
     else:
+        # Genuinely could not be checked: a proof state that claims a proof exists (`incomplete` /
+        # `complete`) while nothing verifiable was produced. That IS worth a red card.
         verdict = "danger"
         title = "Could not verify"
 
@@ -1796,7 +1932,11 @@ async def verify_run(
         "verdict": verdict,
         "title": title,
         "verified": bool(result and result.verified),
-        "ots_state": result.state if result else None,
+        # Whether there is a proof to offer for download at all (the export route 409s without one).
+        "has_proof": bool(fe.ots_path),
+        # With no `VerifyResult` there is no proof to describe, so the state comes from the file
+        # row — that is what the two "no proof yet" verdicts above are reasoning about.
+        "ots_state": result.state if result else fe.ots_state,
         # Reason flags travel on every branch, not only the one that won: a transport failure under
         # a verdict that outranks it is still disclosed as a diagnostic line (design D2).
         "digest_mismatch": bool(result and result.digest_mismatch),
@@ -1812,7 +1952,7 @@ async def verify_run(
         "message": (
             live_unavailable
             if live_unavailable is not None
-            else (result.message if result else "no proof stored for this file")
+            else (result.message if result else "no proof stored for this file yet")
         ),
         "csrf_token": generate_csrf_token(request),
     }

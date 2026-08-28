@@ -267,6 +267,10 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   FileEntry.relpath, FileEntry.status, FileEntry.sha256, FileEntry.first_seen)` plus the one
   `count()` over `Event` — every column is already on the entity `query_files` /
   `collection_review` select, so this adds no join.
+  **Superseded in part by §7 (post-audit):** `_population_fingerprint` is now a *pure* function over
+  a `_Population` snapshot read by `_read_population`, the two reads are one `UNION ALL` statement,
+  and `open_events=` carries the open-event **set by identity** (`id`/`kind`/`detected_at`), not a
+  count. Everything else in this task stands.
   `collection_detail.html` renders it as a hidden `population_fp` input in
   the baseline form. The POST then, **in one write transaction**: (1) takes the write lock first with
   a no-op write on the collection's own row (`UPDATE collections SET name = name WHERE id = :id`) —
@@ -289,7 +293,9 @@ Files owned: `routes.py` (`_STATUS_META`, `_collection_status`, `_ots_counts`, `
   a `stale` context flag from a whitelisted `?stale=1` query parameter (only `1` recognized,
   anything else ignored, exactly as `view`/`filter` are handled). `collection_review_accept` runs the
   identical write-lock → recompute → compare → act sequence and refuses to
-  `/collection/{id}/review?stale=1`. Slice C renders both keys in `collection_review.html` (D12);
+  `/collection/{id}/review?stale=1`. **Superseded in part by §7 (post-audit):** the rendered rows,
+  the copy list, the counts and the fingerprint are all derived from the single `_read_population`
+  snapshot rather than from four separate `SELECT`s. Slice C renders both keys in `collection_review.html` (D12);
   the route must fail closed if the field is absent. "It lists exactly what it will adopt" is a
   statement about the *render*: a scan that records another missing file after it makes the claim
   false, and the operator deletes a record they never saw from the page whose whole purpose is that
@@ -511,3 +517,61 @@ mobile section), new `tests/test_ux_docs.py`.
   is as expensive here as a false clean bill.
 - [ ] 6.9 Deploy, then a `user-representative` pass over the panel (self-hosted tool, technical
   operator, not a consumer app), including at 390px width for #33.
+
+## 7. Post-audit hardening (adversarial Codex round 1 + verifier findings)
+
+The audit found the guard's *mint* side reopening the very window the POST side closes, and the
+event term's granularity too coarse to see a real replay. Both are false-negative paths in a change
+whose whole subject is not destroying records the operator never saw.
+
+- [x] 7.1 **One read feeds the render and the mint** (BLOCKER 1, design D14 *One read…*).
+  `routes.py`: new `_PopFile` / `_PopEvent` / `_Population` row shapes and
+  `async def _read_population(session, collection, scope) -> _Population`, which reads the scope's
+  file rows (uncapped, including the columns the review page renders), the open-event set and — for
+  `baseline-new` — the `missing + modified` count as a **single `UNION ALL` statement**, so SQLite
+  evaluates them in one implicit read transaction. `_population_fingerprint(collection, pop)`
+  becomes a **pure** function over that snapshot. Rationale: Python's `sqlite3` legacy transaction
+  control does not open a transaction for a `SELECT`, so consecutive `SELECT`s are separate
+  snapshots and a scan can commit between the rows a page renders and the rows it hashes.
+- [x] 7.2 `collection_review`: derive the rendered rows (sliced + re-sorted missing-first from
+  `pop.files`), the recovery copy list, `total_issues`, `review_open` and `population_fp` from that
+  one snapshot — no second query for any of them.
+- [x] 7.3 `collection_detail`: the D7 render gate for the baseline form and the D14 mint both come
+  from one `_read_population("baseline-new")`; `_collection_view`'s numbers stay only as a cheap
+  pre-filter deciding whether to read the `new` set at all.
+- [x] 7.4 `_guarded_accept`: recount through the **same** `_read_population` + `_population_fingerprint`
+  pair under the write lock (one encoder for mint and check), with the `baseline-new` zero
+  assertions re-asserted from the snapshot.
+- [x] 7.5 **The open-event term is bound by identity, not count** (BLOCKER 2, design D14). Header
+  component `open_events=` is now the GS-joined, id-ordered `{id}\x1c{kind}\x1c{detected_at}` of the
+  open set (FS/GS framing, so no dependence on the `kind` vocabulary or timestamp punctuation).
+  A count cannot see the reachable ABA: one open `missing` event acknowledged and another opened on
+  the same file leaves the count at 1 while the incident is a different one. `detected_at` pins the
+  event generation because `events.id` is a reusable rowid (`events.file_id` is `ON DELETE CASCADE`
+  and `_reconcile_moves` deletes file rows).
+- [x] 7.6 Regressions (MINOR 3): `test_an_equal_count_event_swap_is_refused` (a true equal-count
+  event ABA — verified to FAIL against a count-based header);
+  `test_the_review_page_hashes_exactly_the_population_it_rendered` and
+  `test_the_detail_baseline_form_hashes_the_population_that_gated_it`, which patch `_read_population`
+  into a **barrier** — the real read runs, a scan then commits, and both the rendered page and the
+  published fingerprint must still describe the pre-drift snapshot (and the POST must then refuse).
+  Both assert exactly **one** population read per accept-form GET.
+- [x] 7.7 (verifier) `collection_review.html`: the zero-issue card branches on the collection view's
+  `is_empty` — an empty collection reads the muted "No files indexed yet", never the green
+  "All clear" (design D5's rule, fourth surface). `test_zero_file_collection_never_reads_all_clear`
+  sweeps `/collection/{id}/review` too, plus
+  `test_a_zero_file_collections_review_page_never_reads_all_clear`.
+- [x] 7.8 (verifier) `verify_run`: a readable file with **no proof yet** is not a red failure
+  (design D13). Before the generic fallback, `ots_state == "pending"` → "Queued to stamp" and
+  `ots_state == "none"` → the neutral "Not notarized yet"; the red "Could not verify" is left to a
+  row claiming `incomplete`/`complete` with nothing verifiable. The proof-download button is gated
+  on a stored proof (`has_proof`) so the card cannot offer a 409. Tests:
+  `test_a_queued_file_with_no_proof_yet_reads_queued_not_a_red_failure`,
+  `test_a_never_stamped_file_reads_not_notarized_not_a_red_failure`,
+  `test_a_stamped_file_still_offers_its_proof_download`.
+- [x] 7.9 Gates re-run after the rework: full `PYTHONPATH=. pytest -q` green, `ruff check src tests`
+  clean, `openspec validate fix-ux-audit-sprint1 --strict` passes.
+- [ ] 7.10 Re-run the adversarial Codex pass (§6.8) against the reworked guard: say which findings
+  were addressed and how, and ask it to attack the new mint path specifically — the union snapshot's
+  atomicity, the event component's injectivity, and any remaining read that feeds a rendered claim
+  but not the hash.

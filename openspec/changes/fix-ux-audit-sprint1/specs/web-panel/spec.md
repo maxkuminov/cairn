@@ -69,6 +69,15 @@ submitted and awaiting Bitcoin confirmation, and a proof queued for stamping tha
 submitted at all. The verdict for the queued state SHALL NOT contain awaiting-confirmation wording,
 because there is nothing yet to await.
 
+A file whose bytes are readable but for which **no proof exists yet** SHALL NOT be rendered as a
+verification failure. Where the file's recorded proof state is "queued for stamping" it SHALL read
+as queued, in the same words as a queued result; where no proof has ever been made for it, the panel
+SHALL say so neutrally, and SHALL NOT say that the file could not be verified or that its contents
+may have changed. There is no proof, so nothing was checked and nothing failed; a red verdict there
+blames the file for an absence of evidence nobody has created, and teaches the operator to discount
+the red card that means a real mismatch. The panel SHALL NOT offer a proof download for a file that
+has no stored proof.
+
 Every list of already-anchored files SHALL render each row's **actual** notarization state. A row
 SHALL NOT be given a fixed "Anchored" badge: the badge is what an operator reads to decide whether a
 proof is usable as evidence, and the list is ordered newest-first, so a hardcoded badge shows the
@@ -113,6 +122,14 @@ asserting a fixed backend.
   calendar, with no mismatch, transport failure or inconclusive outcome on the result
 - **THEN** the verdict SHALL say the proof is queued to stamp, and SHALL NOT use the
   awaiting-confirmation wording reserved for a submitted proof
+
+#### Scenario: A file with no proof yet is not a verification failure
+
+- **WHEN** the user verifies a readable file whose proof is queued for stamping, or that has never
+  been stamped, so that no proof exists to check
+- **THEN** the panel SHALL render the queued reading for the queued file and a neutral
+  never-notarized reading for the unstamped one, SHALL NOT render a failure verdict or copy
+  suggesting the file may have changed, and SHALL NOT offer a proof download
 
 #### Scenario: A proof mismatch does not blame the file
 
@@ -311,15 +328,31 @@ any truncated list the page displayed: for the review view's accept, the collect
 with the assertion that the collection has no missing or modified files. An absent or empty
 fingerprint SHALL be treated as a mismatch, so the check fails closed.
 
+The population a form's fingerprint is computed over and the population the page **renders** SHALL
+be derived from a **single, consistent read** — one snapshot covering the file records, the open-event
+set and any count the form asserts — rather than from separate reads that a concurrent writer can
+interleave. A page that reads its visible rows in one query and computes the fingerprint in another
+can publish a fingerprint for a population it never displayed, and an unchanged submission of that
+form would then validate and destroy a record the operator was never shown — the exact accident the
+guard exists to prevent, reintroduced inside the guard's own mint. The same single-read derivation
+SHALL be used when the endpoint recomputes the fingerprint, so the two sides cannot encode the same
+state differently.
+
 Because the same verb also marks every open event on the collection reviewed, the fingerprint SHALL
-additionally cover the collection's **count of open (unreviewed) events**, recomputed inside the
-same guarded transaction as the file records, and a change in that count between render and submit
-SHALL be a refusal. Without it a form can be validated by a population that has returned to its
-rendered value while an alert the operator never saw is silently cleared: a file may be recorded
+additionally cover the collection's **set of open (unreviewed) events by identity** — each event's
+identifier, its kind and the time it was detected — recomputed inside the same guarded transaction
+as the file records, so that any change to *which* alerts are open between render and submit is a
+refusal. Without an event term at all, a form can be validated by a population that has returned to
+its rendered value while an alert the operator never saw is silently cleared: a file may be recorded
 modified, then missing, then restored between render and submit, leaving the protected file set
-exactly as rendered while its alert stays open by design. For the collection-detail baseline action
-that count SHALL be zero, and the fingerprint SHALL carry that zero assertion, so the action cannot
-clear an alert behind a confirmation that promises only a new-file promotion.
+exactly as rendered while its alert stays open by design. Covering that set by **count** is not
+sufficient: an open alert may be acknowledged and a different one opened on the same file with the
+same kind, returning the count to what it was while the incident the operator is being asked to
+clear is a different one. Event identifiers may themselves be reused after a record is deleted, so
+identity alone is not sufficient either — hence the detection time, which separates one generation of
+an alert from the next. For the collection-detail baseline action that set SHALL be empty, and the
+fingerprint SHALL carry that emptiness assertion, so the action cannot clear an alert behind a
+confirmation that promises only a new-file promotion.
 
 The review view's accept also promotes files that are merely **not yet baselined**, and that set is
 deliberately **outside** the fingerprint: a new file appearing between render and submit SHALL NOT
@@ -426,6 +459,22 @@ one.
   submits the already-rendered accept form
 - **THEN** the endpoint SHALL refuse, SHALL NOT acknowledge the newly opened event, SHALL NOT remove
   any file record, and SHALL redirect to the review view with the staleness marker
+
+#### Scenario: Replacing one open alert with another does not validate a stale form
+
+- **WHEN** the review view is rendered for a collection with one missing file and one open alert on
+  it, that alert is then acknowledged and a **new** alert of the same kind is opened on the same
+  file — so the count of open alerts returns to exactly what it was while the file records never
+  move — and the operator submits the already-rendered accept form
+- **THEN** the endpoint SHALL refuse, SHALL NOT acknowledge the newly opened alert and SHALL NOT
+  remove the file's record
+
+#### Scenario: A record that appears after the page's read is in neither the list nor the fingerprint
+
+- **WHEN** an accept-family page is rendered and a scan commits a further missing file, and its
+  alert, immediately after the page has read the population it renders
+- **THEN** the page SHALL neither display that record nor include it in the fingerprint it
+  publishes, and submitting that form SHALL be refused because the endpoint's own read now sees it
 
 #### Scenario: A re-created record does not validate a form minted for its predecessor
 
@@ -574,8 +623,8 @@ SHALL report the failure rather than silently appearing to succeed.
 
 #### Scenario: Nothing to review and nothing open
 
-- **WHEN** the user opens the review view for a collection with no missing or modified files and no
-  open events
+- **WHEN** the user opens the review view for a collection that has indexed files, none of them
+  missing or modified, and no open events
 - **THEN** the view SHALL render an "all clear" empty state and SHALL offer no review/accept actions
 
 #### Scenario: The truncation link lands filtered
@@ -625,10 +674,12 @@ A collection with no indexed files SHALL say so, and SHALL NOT report "all clear
 verified" or "all confirmed". A root that is a typo or a failed mount scans clean forever; a
 zero-file collection is a configuration failure to surface, not a healthy state to celebrate. This
 SHALL hold on **every** surface that renders the collection's status, including the shared status
-indicator used by the dashboard card, the collection detail header and the live-operation fragment:
-a zero-file collection SHALL render a distinct, non-green "no files indexed" state there rather than
-the healthy label. Fixing only the tiles leaves the reassurance where the operator actually looks
-first.
+indicator used by the dashboard card, the collection detail header, the live-operation fragment and
+the review view's nothing-to-review state: a zero-file collection SHALL render a distinct, non-green
+"no files indexed" state there rather than the healthy label. Fixing only the tiles leaves the
+reassurance where the operator actually looks first. On the review view in particular, "nothing is
+missing or changed" is a claim about files that were checked, and a collection with no indexed files
+has checked none.
 
 #### Scenario: Unstamped files defeat the completeness claim
 
@@ -670,9 +721,9 @@ first.
 #### Scenario: A collection with no files
 
 - **WHEN** a collection has no indexed files
-- **THEN** the card, the collection view and the shared status indicator SHALL report that no files
-  are indexed yet, in a non-green state, and no surface SHALL report "all clear", that all files are
-  verified, or that all proofs are confirmed
+- **THEN** the card, the collection view, the review view and the shared status indicator SHALL
+  report that no files are indexed yet, in a non-green state, and no surface SHALL report "all
+  clear", that all files are verified, or that all proofs are confirmed
 
 ### Requirement: The collection file browser honours view and filter deep links
 

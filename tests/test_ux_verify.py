@@ -209,6 +209,71 @@ def test_pending_reads_queued_to_stamp_with_no_awaiting_wording(verify_client, m
     assert "has not been submitted" in html
 
 
+# --- D13 (post-audit): a file with no proof YET is not a verification failure ----------------
+
+
+async def _seed_one_unstamped_file(root, *, ots_state: str) -> int:
+    """One collection, one on-disk file that has no `.ots` proof (so `verify` never runs)."""
+    from src.database import get_sessionmaker
+    from src.models.db import FileEntry
+
+    cid = await seed_collection(root)
+    now = datetime.now(timezone.utc)
+    async with get_sessionmaker()() as s:
+        s.add(FileEntry(
+            collection_id=cid, relpath="doc.txt", size=5, sha256="d" * 64,
+            status="ok", ots_state=ots_state, ots_path=None,
+            first_seen=now, last_checked=now,
+        ))
+        await s.commit()
+    return cid
+
+
+def _verify_unstamped(cairn_env, name, ots_state):
+    root = cairn_env / name
+    root.mkdir()
+    (root / "doc.txt").write_text("hello")
+    with _make_client(lambda: _seed_one_unstamped_file(root, ots_state=ots_state)) as client:
+        token = _csrf_token(client)
+        r = client.post("/verify", data={"csrf_token": token, "file_id": 1})
+        assert r.status_code == 200, r.text
+        return r.text
+
+
+def test_a_queued_file_with_no_proof_yet_reads_queued_not_a_red_failure(cairn_env):
+    """`ots_state='pending'` and nothing on disk: `verify` is never called, so there is no
+    `VerifyResult` — which used to land on the red "Could not verify" fallback. Nothing is wrong
+    with the file; the stamp simply has not been made yet."""
+    html = _verify_unstamped(cairn_env, "queued", "pending")
+    assert "Queued to stamp" in html
+    assert "Could not verify" not in html
+    assert "verdict--danger" not in html
+    assert "verdict--warn" in html
+    assert "has not been submitted" in html
+    # Nothing to download, so no button that would 409.
+    assert "/verify/export/1" not in html
+
+
+def test_a_never_stamped_file_reads_not_notarized_not_a_red_failure(cairn_env):
+    html = _verify_unstamped(cairn_env, "unstamped", "none")
+    assert "Not notarized yet" in html
+    assert "Could not verify" not in html
+    assert "verdict--danger" not in html
+    assert "verdict--unavailable" in html
+    assert "No timestamp proof has been made" in html
+    assert "/verify/export/1" not in html
+
+
+def test_a_stamped_file_still_offers_its_proof_download(verify_client, monkeypatch):
+    """The download button is gated on a stored proof, not removed."""
+    html = _post_verify(
+        verify_client,
+        _result(verified=True, block_height=1, existed_by="2024-02-14 18:35 UTC"),
+        monkeypatch,
+    )
+    assert "/verify/export/1" in html
+
+
 # --- #19: the anchored list renders the real per-row state ----------------------------------
 
 

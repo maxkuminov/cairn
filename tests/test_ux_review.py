@@ -63,6 +63,20 @@ async def _seed_missing_file_with_event(cid: int, relpath: str = "2019/IMG_4421.
         await s.commit()
 
 
+async def _seed_ok_file(cid: int) -> None:
+    """One indexed, healthy file: the collection is genuinely "all clear", not merely empty."""
+    from src.database import get_sessionmaker
+    from src.models.db import FileEntry
+
+    now = datetime.now(timezone.utc)
+    async with get_sessionmaker()() as s:
+        s.add(FileEntry(
+            collection_id=cid, relpath="kept/steady.txt", size=10, sha256="b" * 64,
+            status="ok", ots_state="complete", first_seen=now, last_checked=now,
+        ))
+        await s.commit()
+
+
 async def _seed_ok_file_and_open_event(cid: int) -> None:
     """The restored-but-unreviewed state: nothing is missing or changed, one alert still open."""
     from src.database import get_sessionmaker
@@ -218,15 +232,34 @@ def test_restored_only_review_offers_mark_all_reviewed_and_no_accept(cairn_env):
 
 
 def test_all_clear_with_nothing_open_offers_no_controls(cairn_env):
+    """A collection with files, all healthy. (A collection with NO files is a different card —
+    see `test_a_zero_file_collections_review_page_never_reads_all_clear`.)"""
     root = cairn_env / "photos"
     root.mkdir()
 
-    with _make_client(cairn_env, lambda: seed_collection(root)) as client:
+    async def seed():
+        cid = await seed_collection(root)
+        await _seed_ok_file(cid)
+
+    with _make_client(cairn_env, seed) as client:
         body = client.get("/collection/1/review").text
 
     assert "All clear" in body
     assert "Mark all" not in body
     assert "from files that have since been restored" not in body
+
+
+def test_a_zero_file_collections_review_page_never_reads_all_clear(cairn_env):
+    """#31 on the review surface: watching nothing establishes nothing, so no green "All clear"."""
+    root = cairn_env / "empty"
+    root.mkdir()
+
+    with _make_client(cairn_env, lambda: seed_collection(root)) as client:
+        body = client.get("/collection/1/review").text
+
+    assert "All clear" not in body
+    assert "No files indexed yet" in body
+    assert "Nothing has been checked in this collection" in body
 
 
 # --- #32: the truncation deep-link and the recovery copy -------------------------------------
