@@ -127,8 +127,11 @@ whole relocation.
    vacate slots (the sweep MAY iterate within one pass); no branch may ever create or break a
    second row's pointer. A **cyclic** dependency (two or more rows each blocking another's
    destination, e.g. two files whose paths were swapped) cannot converge by deferral alone: when
-   a full pass over the stale set makes no progress and stale rows remain, the sweep SHALL break
-   the cycle by relocating ONE member's proof to a durable, unreferenced **holding location**
+   a full pass over the stale set makes no progress, the sweep SHALL break the cycle by
+   selecting ONE row from those deferred **solely by this reference rule** — a row whose source
+   passed corroboration and which no other rule (a permanent destination refusal included)
+   refuses to move; a row any other rule refuses SHALL never be selected — and relocating that
+   row's proof to a durable, unreferenced **holding location**
    inside the proof store (outside every canonical slot), committing that truthful pointer, and
    continuing — the vacated canonical slot lets the rest of the cycle converge, and the held
    proof relocates to its own canonical slot on a later iteration or sweep. The holding location
@@ -204,10 +207,19 @@ there archives it under the never-destroy rules.
 
 - **WHEN** two files' paths are swapped in one scan, so each row's destination is the other
   row's recorded `ots_path` and plain deferral can never free either slot
-- **THEN** the sweep SHALL relocate one member's proof to the durable holding location with a
-  truthful committed pointer, converge the other member into its vacated canonical slot, and
-  bring the held proof to its own canonical slot on a later iteration or sweep — no proof
-  displaced, both pointers truthful throughout
+- **THEN** the sweep SHALL relocate one member's proof — chosen only from rows deferred solely
+  by the reference rule, corroborated, and refused by no other rule — to the durable holding
+  location with a truthful committed pointer, converge the other member into its vacated
+  canonical slot, and bring the held proof to its own canonical slot on a later iteration or
+  sweep — no proof displaced, both pointers truthful throughout
+
+#### Scenario: A cycle member another rule refuses is never the one moved
+
+- **WHEN** a path-swap cycle's members include a row whose canonical destination is permanently
+  refused by the filesystem (an over-limit component) or whose source fails corroboration
+- **THEN** cycle breaking SHALL NOT select that row: its proof, pointer, and provenance stay
+  intact per the refusing rule, and the sweep either selects an eligible member or leaves the
+  cycle deferred with warnings
 
 #### Scenario: A modified-then-moved legacy row is called ambiguous, not swapped
 
