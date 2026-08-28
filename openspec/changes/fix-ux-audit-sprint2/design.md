@@ -99,7 +99,8 @@ Three properties close the holes the first spec round left open:
 - **State-neutral search copy on both render paths.** The searchable-count line, search heading,
   and no-match copy in `verify.html` + `partials/verify_results.html` describe *tracked files*,
   not anchored files/proofs — an operator whose files are all unstamped must not read "0 files
-  with proofs" over a working search. Anchored wording survives only on the recent list.
+  with proofs" over a working search. Proof-oriented wording ("recent proofs") is permitted only
+  on the default recent-proofs listing; anchored wording nowhere an unconfirmed proof can appear.
 
 *Alternative considered*: a second "include unstamped" toggle — rejected; the operator doesn't
 know the distinction exists (that's the bug), so a toggle re-hides the same files behind a
