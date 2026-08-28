@@ -107,3 +107,11 @@ constraint makes unique.
 - **WHEN** `/healthz` is polled in multi-user mode with corpora belonging to more than one owner
 - **THEN** every corpus SHALL appear in the freshness list and any stale corpus SHALL set
   `status:"degraded"`, regardless of which user owns it
+
+#### Scenario: A failed first scan inside grace is stale, not pending
+
+- **WHEN** a collection created within the startup grace window has at least one `kind='scan'` run
+  and none of them completed with result `ok` or `partial` (its only runs are `error` or
+  `interrupted`), and no scan is currently running with a live heartbeat
+- **THEN** the collection SHALL be classified `stale`, not `pending` — grace covers only
+  collections with no scan run of any kind
