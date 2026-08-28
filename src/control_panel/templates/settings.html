@@ -257,20 +257,48 @@
     <div class="form-stack">
       <div class="card" style="padding:22px">
         <div class="section-label">Block source</div>
-        <div class="text-2" style="font-size:13px;margin:10px 0 16px;line-height:1.5">How Cairn checks proofs against the Bitcoin blockchain when verifying.</div>
-        <div style="display:flex;flex-direction:column;gap:10px">
-          <div class="radio-card {% if verify_backend == 'explorer' %}is-selected{% endif %}">
-            <span class="radio-card__check">{{ m.icon("checkCircle" if verify_backend == "explorer" else "minusCircle", size=18) }}</span>
-            <div>
-              <div class="channel-title-row"><span class="radio-card__title">Block explorer</span><span class="pill pill--soft pill--accent pill--sm">Default</span></div>
-              <div class="radio-card__desc">{{ explorer_host }} — works out of the box. You trust the explorer's lookup.</div>
+        {# Read-only on purpose (#34): the backend is env-only, so nothing on this tab may look
+           clickable. Persisting it from the panel without also overlaying it in the CLI would let
+           the two disagree about how an integrity claim was verified. #}
+        <div class="text-2" style="font-size:13px;margin:10px 0 16px;line-height:1.5">
+          How Cairn checks proofs against the Bitcoin blockchain when verifying. This is set in the
+          environment, not from this page: point <span class="mono">CAIRN_VERIFY_BACKEND</span> at
+          <span class="mono">explorer</span> or <span class="mono">node</span> and restart Cairn for
+          the change to take effect. It is kept out of the panel deliberately, so the panel and the
+          <span class="mono">cairn verify</span> command can never disagree about how a claim was
+          checked.
+        </div>
+        <div style="display:flex;flex-direction:column;gap:16px">
+          <div>
+            <div class="channel-title-row">
+              <span class="channel-title">Block explorer</span>
+              {% if verify_backend == "explorer" %}
+                <span class="pill pill--soft pill--ok pill--sm">{{ m.icon("checkCircle", size=11.5, stroke=2) }}In use</span>
+              {% else %}
+                <span class="pill pill--soft pill--muted pill--sm">Not in use</span>
+              {% endif %}
+              <span class="pill pill--soft pill--accent pill--sm">Default</span>
+            </div>
+            <div class="channel-sub">
+              <span class="mono">CAIRN_VERIFY_BACKEND=explorer</span> — looks each anchored block up at
+              <span class="mono">{{ explorer_host }}</span>. Works out of the box; you trust the
+              explorer's copy of the chain.
             </div>
           </div>
-          <div class="radio-card {% if verify_backend == 'node' %}is-selected{% endif %}">
-            <span class="radio-card__check">{{ m.icon("checkCircle" if verify_backend == "node" else "minusCircle", size=18) }}</span>
-            <div>
-              <div class="radio-card__title">Your own Bitcoin node</div>
-              <div class="radio-card__desc">Point at a node's RPC for fully trustless verification — nothing to trust but your own chain.</div>
+          <div>
+            <div class="channel-title-row">
+              <span class="channel-title">Your own Bitcoin node</span>
+              {% if verify_backend == "node" %}
+                <span class="pill pill--soft pill--ok pill--sm">{{ m.icon("checkCircle", size=11.5, stroke=2) }}In use</span>
+              {% else %}
+                <span class="pill pill--soft pill--muted pill--sm">Not in use</span>
+              {% endif %}
+            </div>
+            <div class="channel-sub">
+              <span class="mono">CAIRN_VERIFY_BACKEND=node</span> — fully trustless verification against
+              a chain you hold yourself; nothing to trust but your own node. Its RPC address comes from
+              <span class="mono">CAIRN_NODE_RPC_URL</span>, currently
+              {% if node_rpc_url %}<span class="mono">{{ node_rpc_url }}</span>{% else %}<strong>not set</strong>{% endif %}.
             </div>
           </div>
         </div>

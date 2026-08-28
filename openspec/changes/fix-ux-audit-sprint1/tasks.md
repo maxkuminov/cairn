@@ -443,33 +443,33 @@ Files owned: `templates/learn.html`, `templates/settings.html`, `routes.py::sett
 `src/control_panel/static/css/panel.css` (the `@media (max-width: 768px)` blocks + an appended
 mobile section), new `tests/test_ux_docs.py`.
 
-- [ ] 5.1 `learn.html:152-160`: lead the "Verify a proof yourself" list with the
+- [x] 5.1 `learn.html:152-160`: lead the "Verify a proof yourself" list with the
   **opentimestamps.org drag-and-drop**, and state explicitly that an auditor needs **both the file
   and its `.ots`** — the panel's export route serves only the proof, so the file must be supplied
   separately.
-- [ ] 5.2 Say plainly that the CLI path (`ots verify`) requires a reachable **Bitcoin Core node**,
+- [x] 5.2 Say plainly that the CLI path (`ots verify`) requires a reachable **Bitcoin Core node**,
   which is why Cairn itself defaults to an explorer lookup. **Do not** substitute
   `ots --no-bitcoin verify` — it exits 1 having verified nothing, which is worse than the current
   visible error (#12's rejected fix 4).
-- [ ] 5.3 `learn.html:105-110`: name **all three** proof states as the badge now words them —
+- [x] 5.3 `learn.html:105-110`: name **all three** proof states as the badge now words them —
   *Queued to stamp* (queued locally, not yet submitted to a calendar), *Pending confirmation*
   (submitted, waiting on Bitcoin) and *Anchored* — and say what distinguishes the first two, so
   `/learn`, the badge, the tiles and the verdict use one vocabulary (#23, design D13). The queued
   state is never called "pending confirmation" anywhere.
-- [ ] 5.4 `settings.html:256-277`: strip `.radio-card` from the Verification tab and render the two
+- [x] 5.4 `settings.html:256-277`: strip `.radio-card` from the Verification tab and render the two
   backends as **descriptive text**, naming `CAIRN_VERIFY_BACKEND` and `CAIRN_NODE_RPC_URL` and
   noting that a change requires a restart. Mark which one is active. Nothing on this tab may look
   clickable.
-- [ ] 5.5 `routes.py::settings_page`: add `node_rpc_url` to the context so the node line can show the
+- [x] 5.5 `routes.py::settings_page`: add `node_rpc_url` to the context so the node line can show the
   configured RPC URL (or say it is unset). **Do not** add DB-backed persistence for the verify
   backend — the panel and the CLI must never disagree about how an integrity claim was verified
   (#34).
-- [ ] 5.6 `panel.css` `@media (max-width: 768px)`: hide `.op-bar` (345 − 92 = 253px, which fits a
+- [x] 5.6 `panel.css` `@media (max-width: 768px)`: hide `.op-bar` (345 − 92 = 253px, which fits a
   320px row), and stop the detail page's status meta-cell clipping — let `.meta-cell--wide` take a
   full row and drop the `nowrap`/ellipsis on its value under the breakpoint. Note there is **no
   `140px` literal** in the file (design: line-reference drift); the clip comes from
   `.meta-cell__value`'s ellipsis inside a `flex: 0 0 auto` cell.
-- [ ] 5.7 `tests/test_ux_docs.py` (new): `/learn` mentions opentimestamps.org, says both the file and
+- [x] 5.7 `tests/test_ux_docs.py` (new): `/learn` mentions opentimestamps.org, says both the file and
   the `.ots` are needed, mentions a Bitcoin node for the CLI path, names the queued and
   pending-confirmation states distinctly, and **does not contain `--no-bitcoin`**; `/settings?tab=verify` contains no `radio-card` class and does name
   `CAIRN_VERIFY_BACKEND`.

@@ -104,10 +104,15 @@
     </p>
     <div class="info-strip">
       {{ m.icon("clock", size=15, cls="text-3") }}
-      <span><strong>“Pending” vs. “Anchored.”</strong> A new fingerprint is bundled with many others and
-      waits for the next confirmed Bitcoin block. Until that lands it reads <em>pending</em>; once it's in a
-      block it reads <em>anchored</em> and carries a confirmed date. This usually takes a few hours, and it's
-      free: there's no per-file fee.</span>
+      <span><strong>Three states, in this order.</strong>
+      <strong>Queued to stamp</strong> — Cairn has the fingerprint but has not handed it to a timestamp
+      calendar yet. Nothing is waiting on Bitcoin at this point, so a file that sits here means the
+      queue is backed up, not that a confirmation is slow.
+      <strong>Pending confirmation</strong> — the fingerprint has been submitted, bundled with many
+      others, and is waiting for the next confirmed Bitcoin block. This is the one that usually
+      settles within a few hours.
+      <strong>Anchored</strong> — it is in a block and carries a confirmed date.
+      Every step is free: there is no per-file fee.</span>
     </div>
   </div>
 
@@ -148,14 +153,26 @@
   <div class="card" style="margin-bottom:18px">
     <h2 style="margin:0 0 10px;font-size:17px">Verify a proof yourself</h2>
     <p class="text-2" style="font-size:14px;line-height:1.6;margin:0 0 10px">
-      You don't have to use Cairn to check a proof. On any verified file's page, click
-      <strong>Download .ots proof</strong>, then confirm it independently:
+      You don't have to use Cairn — or trust it — to check a proof. Checking always needs
+      <strong>both halves</strong>: the file itself <em>and</em> its <span class="mono">.ots</span> proof.
+      <strong>Download .ots proof</strong> on a file's page hands you the proof only, so supply the file
+      alongside it from wherever you keep it. The proof commits to that exact copy's fingerprint: if the
+      two don't match, the check fails, which is the whole point.
     </p>
     <ul class="text-2" style="font-size:14px;line-height:1.65;margin:0;padding-left:20px">
-      <li>Drag the file and its <span class="mono">.ots</span> proof onto the public verifier at
-        <a href="https://opentimestamps.org" target="_blank" rel="noopener">opentimestamps.org</a>, or</li>
-      <li>Run the open-source command-line tool:
-        <span class="mono" style="font-size:12px">ots verify yourfile.pdf.ots</span></li>
+      <li><strong>Easiest — the public verifier.</strong> Drag <em>both</em> the file and its
+        <span class="mono">.ots</span> proof onto
+        <a href="https://opentimestamps.org" target="_blank" rel="noopener">opentimestamps.org</a>.
+        It fingerprints the file in your browser, follows the proof to its Bitcoin block and reports the
+        date the file is proven to predate. No account, nothing to install, and no help from Cairn.</li>
+      <li><strong>Command line — needs a Bitcoin node.</strong> With the file sitting beside its proof
+        under the same name, the open-source client runs
+        <span class="mono" style="font-size:12px">ots verify yourfile.pdf.ots</span>. This is the fully
+        trustless route, because it checks the proof against a chain you hold yourself — which is also
+        why it requires a reachable <strong>Bitcoin Core node</strong> and reports an error without one.
+        That is exactly why Cairn's own verification defaults to a block-explorer lookup instead —
+        Settings → Verification shows which backend is in use and the environment variable that
+        chooses it.</li>
     </ul>
     <div class="info-strip" style="margin-top:12px">
       {{ m.icon("info", size=15, cls="text-3") }}

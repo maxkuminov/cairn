@@ -1495,8 +1495,13 @@ async def settings_page(
             "smtp_saved": saved == "1",
             "smtp_test": test if test in ("ok", "err") else None,
             "smtp_test_msg": msg or "",
+            # Verification backend is deliberately env-only and read from `settings`, never from
+            # the DB overlay: the panel and `cairn verify` must never disagree about how an
+            # integrity claim was verified, so the tab describes the environment rather than
+            # offering an override (#34).
             "verify_backend": settings.verify_backend,
             "explorer_host": explorer_host,
+            "node_rpc_url": settings.node_rpc_url or "",
             "calendars": [
                 c.replace("https://", "").replace("http://", "").rstrip("/")
                 for c in settings.ots_calendars

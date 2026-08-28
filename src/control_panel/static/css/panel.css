@@ -723,6 +723,14 @@
   .meta-cell,
   .meta-cell--wide { flex: 1 1 45%; border-right: none; border-bottom: 1px solid var(--border); }
 
+  /* The wide cell is the collection's Status: it holds either a resting pill or the live operation
+     badge (label + "processed / total (pct)" + elapsed). Two-up it measured ~140px, and
+     `.meta-cell__value`'s ellipsis then clipped the badge to a few characters — the operator could
+     not read the state of a running scan on a phone (#33). Give it the full row and let it wrap;
+     there is no `140px` literal to widen, the clip is the ellipsis. */
+  .meta-cell--wide { flex: 1 1 100%; }
+  .meta-cell--wide .meta-cell__value { white-space: normal; overflow: visible; text-overflow: clip; }
+
   /* File rows reflow from the fixed 5-column grid into a stacked card: the filename gets the full
      first line (it was being crushed to ~0 width by the fixed metadata columns — invisible in the
      folder tree, which has no horizontal scroll), with size/status/date wrapping onto a compact
@@ -892,3 +900,12 @@
 .mini-stat--link { display: block; text-decoration: none; color: inherit; transition: border-color 0.14s, box-shadow 0.14s; }
 .mini-stat--link:hover { border-color: var(--danger); box-shadow: var(--shadow-lg); }
 .mini-stat__cta { color: var(--danger); font-weight: 600; white-space: nowrap; }
+
+/* --- ux-audit sprint 1: mobile (slice D) --------------------------------------------------- */
+@media (max-width: 768px) {
+  /* The running-operation badge is ~345px wide with its progress bar; on a 320px row that left the
+     collection name beside it with literally zero width (#33). The bar is pure decoration — the
+     "processed / total (pct)" count next to it already carries the same information — so drop the
+     bar rather than the text: 345 − 92 = 253px, which fits. */
+  .op-bar { display: none; }
+}
