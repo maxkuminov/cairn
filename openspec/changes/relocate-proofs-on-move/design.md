@@ -52,6 +52,12 @@ recorded as `ots_path` by a **different** row in the collection — one bounded 
 batch's output paths. A deferred member stays `pending` with a warning naming the blocking row;
 it is retried on later passes and proceeds once the sweep (D2) has relocated the blocker away.
 
+**Aliases count** (audit round 5): the guard compares entries, not spellings — candidates
+found by case-insensitive match on `ots_path`, deferral confirmed by lstat identity of the
+member's output path against the candidate's recorded entry. A case-insensitive store can't be
+stamped through a respelled path; a case-sensitive store (genuinely distinct slots) is never
+falsely deferred.
+
 **Position is load-bearing** (audit round 2a): the guard is the FIRST canonical-slot decision —
 evaluated under the proof-store lock after the claim is re-confirmed, and BEFORE the adoption
 pass (`_adopt_or_verdict` would otherwise adopt a byte-identical blocker's proof onto the

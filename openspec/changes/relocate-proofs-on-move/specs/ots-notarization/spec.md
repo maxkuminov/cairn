@@ -18,6 +18,15 @@ check SHALL be evaluated under the collection's proof-store lock after the opera
 been re-confirmed (against current rows, not a stale snapshot), and SHALL compute canonical
 paths through the single proof-path helper.
 
+The guard SHALL detect aliased slots, not just equal spellings: a member whose output path
+differs from a recorded `ots_path` only in a way the store's filesystem may treat as the same
+entry (a case-insensitive store) SHALL be deferred when filesystem identity confirms the alias —
+candidate rows MAY be found by case-insensitive comparison, but the deferral SHALL be confirmed
+by comparing the on-disk identity of the member's output path against the recorded pointer's
+entry, so a case-sensitive store (where the two spellings are genuinely distinct slots) is never
+falsely deferred, and a case-insensitive store can never stamp over a referenced proof through a
+respelled path.
+
 The window between the guard and placement is closed by the existing lease fencing, and the
 delta SHALL be implemented so that linkage holds: a move reconciliation that would newly
 reference one of the batch's output slots can only commit under the collection's operation
@@ -58,6 +67,14 @@ point (scheduler, panel, CLI) and in the same scan that reconciled the move.
 - **THEN** the guard SHALL defer the newcomer before adoption is attempted: the newcomer SHALL
   remain `pending` with no `ots_path`, no staging entry SHALL be created for it, no calendar
   traffic SHALL occur for it, and only the moved row SHALL record the slot
+
+#### Scenario: A respelled path cannot evade the guard on a case-insensitive store
+
+- **WHEN** the proof store's filesystem is case-insensitive, a moved row records `A.ots` as its
+  `ots_path`, and a newcomer's canonical output path is `a.ots`
+- **THEN** the guard SHALL defer the newcomer (the alias confirmed by filesystem identity), and
+  on a case-sensitive store the same spellings SHALL be treated as distinct slots and not
+  deferred
 
 #### Scenario: A reclaimed claim mid-batch places nothing
 

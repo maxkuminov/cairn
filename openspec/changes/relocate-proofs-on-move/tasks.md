@@ -7,7 +7,9 @@
   proof-store lock after claim re-confirmation, BEFORE the adoption pass, writability
   classification, staging-symlink creation, and calendar submission. One bounded query for
   `files` rows in the collection (other than the member's own row) whose `ots_path` equals the
-  member's canonical output path (computed via `proof_path`). On hit: exclude the member from
+  member's canonical output path (computed via `proof_path`), plus case-insensitive
+  candidates confirmed as the same on-disk entry by lstat identity (alias coverage for
+  case-insensitive stores; never a false defer on case-sensitive ones). On hit: exclude the member from
   the batch (stays `pending`, no staging entry, no calendar traffic), warn naming the blocking
   row, never fail the batch/operation.
 - [ ] 1.2 No placement-time re-query: rely on (and test) the existing lease fence for the
@@ -20,8 +22,9 @@
   can adopt the blocker's proof (newcomer keeps `ots_path` NULL); the warning names the actual
   blocking row; the rest of the batch stamps normally; the deferred member proceeds on the
   pass after the blocking pointer is gone; the guard never matches a member against its own
-  row (re-stamp of the same file unaffected); the reclaimed-claim race (pause after guard,
-  reclaim, commit a reconciliation, resume) places nothing.
+  row (re-stamp of the same file unaffected); a case-respelled output path defers on a
+  case-insensitive store and does not on a case-sensitive one; the reclaimed-claim race
+  (pause after guard, reclaim, commit a reconciliation, resume) places nothing.
 
 ## 2. The relocation primitive (`src/services/ots.py`)
 
