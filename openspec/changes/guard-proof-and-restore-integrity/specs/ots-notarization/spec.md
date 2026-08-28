@@ -346,9 +346,26 @@ be derived only from how many proofs are already preserved at that location, so 
 component of a watched file's name.
 
 Preservation SHALL claim each name by an **exclusive create** — create-the-name-or-fail-if-it-exists,
-then write the proof's bytes, flush them to durable storage, close, and only then remove the source
-that was preserved — and a name that already exists SHALL cause the next suffix to be tried rather
-than anything being replaced. Preservation SHALL **NOT** require the proof store's filesystem to
+then write the proof's bytes, flush them to durable storage, close, **flush the preserved copy's name
+to durable storage**, and only then remove the source that was preserved — and a name that already
+exists SHALL cause the next suffix to be tried rather than anything being replaced.
+
+Flushing the preserved proof's **bytes** is not sufficient: the directory entry that *names* those
+bytes SHALL also be made durable **before** the source is removed. Otherwise an interruption may
+persist the removal of the source while the preserved copy's name never lands, and the only copy of
+the proof is destroyed — the precise loss this requirement exists to prevent. Preservation SHALL
+therefore flush the directory holding the preserved proof, and every directory it created above it,
+up to and including the first directory that already existed (which holds the name of the shallowest
+directory created), and SHALL do so **deepest-first — each directory only after the entry it holds
+exists** — before removing the source. Directories above that first pre-existing one SHALL NOT need
+flushing.
+
+The placement that follows SHALL likewise flush the directory holding the canonical name — and any
+directory the placement created, in the same order — **before** the placement is reported to its
+caller and before any proof path, proof state, provenance or stamp time is recorded for the file. A
+name established by a rename is not durable until the directory holding it is, so recording a proof
+path first would let the system commit to a path whose entry did not survive, while the preserved
+copy sits under a name nothing in the product resolves. Preservation SHALL **NOT** require the proof store's filesystem to
 support hard links. The proof store's only stated requirement is that it be writable, and writable
 filesystems that reject hard links are ordinary; a preservation method that needed them would turn
 every occupied output path on such a store into a permanent retry loop classified as transient, so no
@@ -420,6 +437,20 @@ Each preservation, and each discarded newly-produced proof, SHALL be logged nami
 
 - **WHEN** a proof is placed over a path holding an `.ots` that cannot be parsed
 - **THEN** that file SHALL be preserved and the new proof placed
+
+#### Scenario: An interruption during preservation cannot leave the proof with no name
+
+- **WHEN** the system is interrupted — by power loss, kill or crash — at any point while an existing
+  proof is being preserved, including after the preserved copy's bytes were flushed and after the
+  source at the canonical output path was removed
+- **THEN** at least one intact, named copy of that proof SHALL exist afterwards: it SHALL NOT be
+  possible for the removal of the source to persist while the preserved copy's name does not, because
+  the directory holding the preserved copy — and every directory created above it, each flushed only
+  after the entry it holds exists, up to the first pre-existing directory — SHALL have been flushed
+  to durable storage before the source was removed
+- **AND** where the interruption instead falls after the placement, the directory holding the
+  canonical name SHALL have been flushed before the file's proof path was recorded, so no recorded
+  proof path can name an entry that did not survive
 
 #### Scenario: A failure to preserve refuses the placement
 

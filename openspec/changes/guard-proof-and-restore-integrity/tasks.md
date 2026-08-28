@@ -85,8 +85,9 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   name the builder yields `<digest>.1.ots`, `<digest>.2.ots`, … — the first free index (design D1,
   "Archive collision").
 - [ ] 2.3 `_place_proof`: when the canonical output path is **unoccupied**, behave exactly as today
-  (`mkdir` + `os.replace`, same ENAMETOOLONG-permanent / everything-else-transient classification).
-  This is the only path an ordinary new-file stamp takes; do not add cost to it beyond one `stat`.
+  (`mkdir` + `os.replace`, same ENAMETOOLONG-permanent / everything-else-transient classification),
+  plus task 2.6a's single canonical-directory `fsync` after the `os.replace`. This is the only path
+  an ordinary new-file stamp takes; do not add cost to it beyond one `stat` and that one `fsync`.
 - [ ] 2.4 `_place_proof`: when the canonical path **is** occupied, apply the placement rule (design
   D1 table): same digest + complete + **anchor confirmed by the caller** → **keep existing, discard
   staged**; same digest + complete + **anchor disproven by the caller** → archive then place; same
@@ -110,12 +111,30 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   strength comparison is a judgement the archive must not make; the earlier-archived proof is not
   reliably the stronger one). Write it as an **exclusive create that does not require hard-link
   support**: `os.open(candidate, O_CREAT | O_EXCL | O_WRONLY)` — `EEXIST` ⇒ try the next index — then
-  copy the source's bytes in, `flush` + `os.fsync`, `close`, and **only then** `os.unlink` the source.
+  copy the source's bytes in, `flush` + `os.fsync` **the file**, `close`, then **fsync the archive's
+  directory chain** (`fd = os.open(dir, os.O_RDONLY)` → `os.fsync(fd)` → `os.close(fd)`), and
+  **only then** `os.unlink` the source. Fsyncing the file alone is not enough: a `fsync`ed file whose
+  *directory entry* is not durable can lose its name across a power cut while the source's `unlink`
+  persists — both names gone, the only proof destroyed. Order of the chain is **deepest-first,
+  parent-after-child** (a directory's `fsync` is what makes durable the entry it holds, so it is
+  synced only after that entry exists): the archived file's own directory first (this is what makes
+  the new `.ots` name durable), then each ancestor **this call created**, ending with the first
+  **pre-existing** ancestor (it holds the shallowest new directory's name); stop there — ancestors
+  above it already existed durably.
   Do **not** use `os.replace` (silently overwrites) and do **not** use `os.link` (needs hard links,
   which the proof store's writable-filesystem contract does not promise — on a CIFS/FAT/FUSE store it
   would turn every occupied-path placement into a permanent retry loop reported as transient). No
   preflight probe. Index selection is safe because the whole sequence runs under the collection claim
   (task 2.8a) and the archive path is already scoped by `<collection_id>`.
+- [ ] 2.6a `_place_proof`: after the placement `os.replace(staged, canonical)` (the occupied-path
+  branch's step 2, and the `mkdir` + `os.replace` of task 2.3), fsync the **canonical** parent
+  directory the same way — plus any canonical ancestor this call had to `mkdir`, in the same
+  deepest-first / parent-after-child order — **before** returning the outcome, and therefore before
+  the caller records `ots_path`/`ots_state`/`ots_digest`. A rename is not durable until the directory
+  holding it is; without this the datastore can record a proof path whose name did not survive a
+  crash while the preserved copy sits under a name no row points at. One extra `fsync` per placement,
+  on a path already off the hot loop.
+
 - [ ] 2.7 `_place_proof`: log at `WARNING` naming **both** paths whenever a proof is superseded or a
   staged proof is discarded — the archive has no panel surface, so the log is its discoverability.
 - [ ] 2.8 `_place_proof` returns an outcome (`kind: 'placed' | 'kept' | 'deferred'`, `digest`,
@@ -254,6 +273,16 @@ Files owned: `src/services/ots.py`, `src/services/proofs.py`, `routes.py::verify
   before the placement. Assert the old proof is intact in the archive, the canonical path is absent,
   the row is still `pending` with `ots_state`/`ots_digest` unwritten, and a re-run completes the
   placement.
+- [ ] 2.29a **Durability ordering of the preservation sequence** (the crash window a file-only
+  `fsync` leaves open): patch `os.fsync`, `os.unlink` and `os.replace` to record an ordered call log,
+  archive a superseded proof onto a *newly created* archive directory chain, and assert the order —
+  the archived file's descriptor is `fsync`ed, then its own directory, then each newly created
+  ancestor up to the first pre-existing one (parent-after-child), and **only then** is the canonical
+  source `unlink`ed; and that the canonical parent directory is `fsync`ed after the placement
+  `os.replace` and before the outcome is returned. Assert no `unlink` of the source precedes the
+  directory syncs. **A true power-loss test is out of scope** — nothing in this suite can cut power
+  or model a filesystem's write reordering; this asserts the *call ordering* the durability argument
+  rests on, which is the part the implementation can get wrong.
 - [ ] 2.30 **Interrupted after placement, before the DB commit**: assert the canonical path holds the
   new proof, the old proof is in the archive, and the row's un-committed state leaves the file
   `pending` — the next pass re-enters placement, finds its own same-digest proof, and (per 2.9)

@@ -125,11 +125,16 @@ the DB is an index — the guarantee is bytes + `.ots`).
   proof", `cairn verify`, `cairn export` and `upgrade` are unchanged — they read `files.ots_path`
   and find exactly what they find today.
 - **Archive-then-place ordering, and preservation failure is transient.** Archiving is an exclusive
-  create (`O_CREAT|O_EXCL`) followed by a copy, an fsync and only then the removal of the source — it
-  requires nothing of the filesystem beyond being writable — hard-link support is explicitly not
-  required — and the placement is an `os.replace`. Archiving runs first, so no interruption can destroy a proof before it is
-  preserved, and a failure to preserve **refuses the placement** (a transient `OtsError` → the file
-  stays `pending` for retry) rather than proceeding over an unpreserved proof.
+  create (`O_CREAT|O_EXCL`) followed by a copy, an fsync of the file, an fsync of the archive's
+  **directory chain** — its own directory and every ancestor this call created, deepest-first — and
+  only then the removal of the source; the placement is an `os.replace` followed by an fsync of the
+  canonical parent directory. It requires nothing of the filesystem beyond being writable —
+  hard-link support is explicitly not required. Syncing the directories is not belt-and-braces: a
+  file-only `fsync` leaves a window where a crash persists the *unlink* of the canonical proof but
+  not the archive's new *name*, losing the only copy. Archiving runs first, so no interruption can
+  destroy a proof before it is preserved, and a failure to preserve **refuses the placement** (a
+  transient `OtsError` → the file stays `pending` for retry) rather than proceeding over an
+  unpreserved proof.
 - **`stamp_pending` stops paying a calendar round-trip for a proof it already has** — but only for a
   proof it may stand behind. A pending file's existing canonical proof is *adopted* (state and
   provenance recorded from it, no submission) only when it parses, commits to the row's recorded

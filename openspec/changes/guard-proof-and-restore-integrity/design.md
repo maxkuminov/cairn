@@ -102,19 +102,50 @@ while adopting wrongly records provenance for a proof nothing vouched for.
 
 ### Crash-safety of the shuffle
 
-The archive step (exclusive-create → copy → fsync → close → unlink the source) and the placement
-(`os.replace` staged → canonical) are two operations; neither the pair nor the archive step as a
-whole is atomic. Ordering is therefore load-bearing:
+The archive step (exclusive-create → copy → fsync the file → close → fsync the archive's directory
+chain → unlink the source) and the placement (`os.replace` staged → canonical → fsync the canonical
+parent directory) are two operations; neither the pair nor the archive step as a whole is atomic.
+Ordering is therefore load-bearing:
 
-1. archive the existing proof (copy it into its archive slot, then unlink it from the canonical
-   path),
-2. `os.replace` staged → canonical.
+1. archive the existing proof (copy it into its archive slot, make **both the bytes and the new
+   name** durable, then unlink it from the canonical path),
+2. `os.replace` staged → canonical, then make **that** name durable.
 
 An interruption **between** them leaves the canonical path **absent** and the old proof **safe in the
 archive**. That is recoverable: the DB write that would set `ots_state='incomplete'` has not
 happened either (the caller updates the row only after the stamp call returns), so the file is still
 `pending` and the next pass re-stamps it. The reverse order would destroy the proof before
 preserving it — the exact bug — so it is forbidden, not merely discouraged.
+
+**A file `fsync` does not make the file's *name* durable.** On POSIX, `fsync(fd)` commits the copied
+bytes but says nothing about the directory entry that names them; the entry and the source's `unlink`
+are independent metadata operations that a filesystem may persist in either order. So the sequence
+"create → copy → fsync file → close → unlink source" has a real crash window: a power loss can persist
+the **unlink of the canonical proof** while the **archive's new name never lands**, and the proof —
+the only copy — is gone. This is the one failure this whole design exists to prevent, so the archive
+step syncs directories too, and syncs them **before** the source is removed:
+
+- `fsync` the archived file's own directory — that is what makes the new `<digest>[.N].ots` name
+  durable;
+- then `fsync` each directory **this call created** above it, and finally the first **pre-existing**
+  ancestor, which holds the shallowest new directory's name. Stop there: everything above it already
+  existed durably.
+- The order is **deepest-first — equivalently, parent-after-child**: a directory's `fsync` makes
+  durable the entries *it* holds, so it is synced only once the child entry exists. Syncing a parent
+  before creating the child in it accomplishes nothing.
+- Only after that chain is synced may `os.unlink` remove the source. Then the two possible crash
+  outcomes are "canonical proof still there, archive slot maybe half-written" (harmless, see below)
+  and "canonical gone, archive durable" — never "both names gone".
+
+The placement in step 2 gets the same treatment: after `os.replace(staged, canonical)`, `fsync` the
+canonical parent directory (and any ancestor the placement had to create, same order) **before**
+`_place_proof` returns and therefore before the caller records `ots_path`/`ots_state`/`ots_digest`.
+A rename is not durable until the directory holding it is synced; without this the datastore can
+commit a proof path naming an entry that did not survive the crash, while the archived copy is the
+only artifact left on disk — recoverable by an operator, but not by anything that follows
+`files.ots_path`. The cost is one or two extra `fsync`s per *occupied-path* placement, on a path
+already off the hot loop (the ordinary unoccupied-path stamp is unchanged apart from its own single
+directory sync).
 
 An interruption **inside** step 1 is harmless for the same reason the source is unlinked last: the
 proof being archived is still intact at the canonical path, and the worst residue is a truncated file
@@ -147,8 +178,9 @@ the fixed-length-name property (no watched filename can influence the archive pa
 The archive write is therefore an **exclusive create**: it must fail rather than replace an existing
 name, so `os.replace` is not usable for it (it silently overwrites). The method is
 `os.open(candidate, O_CREAT | O_EXCL | O_WRONLY)` — `EEXIST` means "try the next index" — then copy
-the source's bytes into the new descriptor, `flush` + `os.fsync`, `close`, and **only then**
-`os.unlink` the source.
+the source's bytes into the new descriptor, `flush` + `os.fsync` the file, `close`, `fsync` the
+archive's directory chain deepest-first as described above, and **only then** `os.unlink` the
+source.
 
 `os.link` was the earlier choice and is rejected: it needs hard-link support, which the proof store's
 contract does not require. The store's stated requirement is that it be *writable*, and homelab
