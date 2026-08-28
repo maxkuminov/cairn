@@ -585,9 +585,11 @@ The panel SHALL render a `restored_changed` event — a file that was recorded m
 with bytes that do not match the digest recorded for it — with its own label and with the visual
 weight of the alarming kinds, never with the muted styling used for the informational kinds
 (`added`, `restored`, `moved`). It SHALL show that event's recorded detail, which carries both
-digests, in the same place the panel already shows a moved file's old → new path. The event is the
-one surface that distinguishes "your file came back" from "something else came back in its place";
-rendering it as an arrival would restore the false reassurance the underlying fix removes.
+digests, **in full and at any viewport width** — the detail line is the only surviving record of
+the digest the file had before it came back, so it SHALL NOT be truncated, clipped or ellipsized.
+The event is the one surface that distinguishes "your file came back" from "something else came
+back in its place"; rendering it as an arrival would restore the false reassurance the underlying
+fix removes.
 
 The affected file SHALL appear in the collection's review view and count toward its issue count and
 status like any other `modified` file, so the collection SHALL NOT read as all clear while it is
@@ -597,7 +599,8 @@ unresolved.
 
 - **WHEN** a scan writes a `restored_changed` event and the operator views the event feed
 - **THEN** the row SHALL carry a label distinct from `restored`, SHALL be styled as an alarming
-  kind, and SHALL show the recorded detail carrying both digests
+  kind, and SHALL show the recorded detail carrying both digests, with both digests fully visible
+  (the detail line wraps rather than truncating)
 
 #### Scenario: A collection with an unresolved changed reappearance does not read as all clear
 

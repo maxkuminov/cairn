@@ -332,3 +332,50 @@ def test_the_keyboard_activated_issue_count_answers_space_as_well_as_enter(cairn
 
     assert 'role="link"' in body
     assert "event.key===' '" in body
+
+
+# --- live-pass fixes: C1 (digest line) and W6 (dead log-out control) ---------------------------
+
+
+def _rule_body(selector: str) -> str:
+    """Body of the last top-level `selector { ... }` rule in panel.css."""
+    css = CSS_PATH.read_text()
+    marker = f"{selector} {{"
+    idx = css.rfind(marker)
+    assert idx != -1, f"panel.css declares no `{selector}` rule"
+    start = idx + len(marker)
+    end = css.index("}", start)
+    return css[start:end]
+
+
+def test_the_changed_restore_digest_line_wraps_instead_of_ellipsizing():
+    """C1: "recorded <64hex> → found <64hex>" is 146 characters and the only surviving record of
+    the pre-restore digest. On `.event-row__relpath` (nowrap + ellipsis) the second digest never
+    reached the screen, so it gets a line that wraps at any width."""
+    body = _rule_body(".event-row__detail")
+    assert "white-space: normal" in body
+    assert "overflow-wrap: anywhere" in body
+    assert "nowrap" not in body, "the digest line must never clip"
+    assert "text-overflow" not in body, "the digest line must never ellipsize"
+    # It is still a hash line: monospace, muted, and small enough not to shout over the path.
+    assert "var(--font-mono)" in body
+    assert "var(--text-2)" in body
+
+
+def test_single_mode_chrome_offers_no_log_out(cairn_env):
+    """W6: single mode has no login wall, so a "Log out" anchor is a control that cannot work.
+    The theme toggle stays, and carries an aria-label matching its title."""
+    root = cairn_env / "chrome-collection"
+    root.mkdir()
+
+    async def seed():
+        await seed_collection(root)
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/").text
+
+    assert "Log out" not in body, "a dead control teaches the operator that buttons are decorative"
+    assert 'href="/mode/toggle"' in body, "the theme toggle is not part of the auth chrome"
+    assert 'aria-label="Switch to light mode"' in body or (
+        'aria-label="Switch to dark mode"' in body
+    ), "the icon-only theme toggle needs a label a screen reader can announce"

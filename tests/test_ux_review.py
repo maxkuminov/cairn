@@ -556,9 +556,20 @@ def test_event_feed_draws_a_changed_restore_as_an_alarm_with_both_digests(cairn_
     )
     assert "Restored" not in row, "it is never dressed up as the benign reappearance"
 
-    assert f"recorded {captured['recorded']} → found {captured['found']}" in row, (
+    detail = f"recorded {captured['recorded']} → found {captured['found']}"
+    assert detail in row, (
         "both digests in full: truncating either costs the operator the ability to identify what "
         "actually came back"
+    )
+    # ...and in the markup they can actually be *read* in. `.event-row__relpath` is nowrap +
+    # ellipsis, so the digest pair rendered there showed ~42 of its 146 characters at 1280px and
+    # the "found" digest never reached the screen — the one record of the pre-restore digest,
+    # clipped. The detail gets its own wrapping line (live-pass C1).
+    assert f'<div class="event-row__detail mono">{detail}</div>' in row, (
+        "the digest pair belongs on the wrapping detail line, not the truncating path line"
+    )
+    assert 'class="event-row__relpath mono">recorded ' not in row, (
+        "the digests must never be rendered inside the nowrap/ellipsis relpath line"
     )
     assert "deed.pdf" in row, "an alarm is useless without the file it names"
     # It alarms, so it is not born acknowledged: the row still offers the reading-log control.

@@ -101,12 +101,21 @@
             <span class="health-pill__url mono">/healthz</span>
           </div>
 
-          <a class="icon-btn" href="/mode/toggle" title="Switch to {{ 'light' if mode == 'dark' else 'dark' }} mode">
+          <a class="icon-btn" href="/mode/toggle"
+             title="Switch to {{ 'light' if mode == 'dark' else 'dark' }} mode"
+             aria-label="Switch to {{ 'light' if mode == 'dark' else 'dark' }} mode">
             {{ m.icon("sun" if mode == "dark" else "moon", size=18) }}
           </a>
-          <a class="icon-btn" href="#" title="Log out (single-user — no session)" aria-label="Log out">
+          {# Single mode has no login wall and therefore no session to end: this was an `href="#"`
+             that did nothing, and a dead control in the chrome teaches the operator that Cairn's
+             buttons are decorative. It renders only where a session can exist.
+             TODO(phase-2 auth): point `href` at the real logout route when `src/auth/` ships one —
+             multi mode has no session routes yet, so `#` is still the honest target today. #}
+          {% if auth_mode == "multi" %}
+          <a class="icon-btn" href="#" title="Log out" aria-label="Log out">
             {{ m.icon("logout", size=18) }}
           </a>
+          {% endif %}
         </header>
 
         <main class="content">

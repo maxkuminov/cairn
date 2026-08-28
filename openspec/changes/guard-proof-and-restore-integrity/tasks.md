@@ -690,6 +690,22 @@ about a **claim** the surfaces made that the check behind it did not establish. 
   operation the keepalive only describes), every failure is logged (first of a run with its
   traceback), the scripted success in the middle **resets** the count, and after the third failure
   in a row there are no further attempts at all.
+- [x] 5.3r **The `restored_changed` digest pair was rendered on a line that clipped it (live-pass
+  finding C1).** `partials/_event_row.html` put the event's detail —
+  `recorded <64hex> → found <64hex>`, 146 characters, and the **only** surviving record of the
+  digest the file carried before it came back — inside `.event-row__relpath`, which is
+  `white-space: nowrap` + `text-overflow: ellipsis`. At 1280px roughly 42 of those characters
+  survived: the "recorded" digest was cut mid-hash and the "found" digest never reached the screen
+  at all, so the row that exists to say *what* came back could not answer it. The detail now has
+  its own `.event-row__detail` line (appended in a marked panel.css section: mono, muted, 11.5px,
+  `white-space: normal` + `overflow-wrap: anywhere`, because a hex run offers no break
+  opportunities of its own), so both digests are fully visible at any width. The relpath line is
+  untouched — the alarm still names its file on the line above — and the `moved` kind's
+  `old → new` detail keeps that line, where it reads as the path it is. Pinned by
+  `tests/test_ux_review.py::test_event_feed_draws_a_changed_restore_as_an_alarm_with_both_digests`
+  (the detail is inside the new class and never inside the relpath span) and
+  `tests/test_ux_docs.py::test_the_changed_restore_digest_line_wraps_instead_of_ellipsizing`
+  (the CSS rule wraps and declares neither `nowrap` nor `text-overflow`).
 
 ## 5. Gates
 

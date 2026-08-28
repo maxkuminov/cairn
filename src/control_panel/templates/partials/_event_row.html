@@ -22,10 +22,12 @@
       <span class="event-row__time">{{ e.at }}</span>
     </div>
     <div class="event-row__relpath mono">{% if e.kind == "moved" and e.detail %}{{ e.detail }}{% else %}{{ e.relpath }}{% endif %}</div>
-    {# `restored_changed` carries both digests (recorded → found) in `detail`, rendered in the same
-       slot a moved file's old → new path uses. The path stays on the line above it: an alarm the
+    {# `restored_changed` carries both digests (recorded → found) in `detail`, and that line is the
+       ONLY surviving record of the pre-restore digest — so it gets its own wrapping class instead
+       of the nowrap/ellipsis relpath line, which showed ~42 of its 146 characters at 1280px and
+       clipped the "found" digest away entirely. The path stays on the line above it: an alarm the
        operator has to act on is useless without the file it names. #}
-    {% if e.kind == "restored_changed" and e.detail %}<div class="event-row__relpath mono" style="color:var(--text-2)">{{ e.detail }}</div>{% endif %}
+    {% if e.kind == "restored_changed" and e.detail %}<div class="event-row__detail mono">{{ e.detail }}</div>{% endif %}
     <div class="event-row__collection">{{ e.collection_name }}</div>
     {% if not e.acked %}
       {# Un-inverted per design D8: a reading-log write is never the loud button. The hint says

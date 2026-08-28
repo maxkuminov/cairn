@@ -964,3 +964,21 @@
    swaps the colour to `--danger` and holds it longer when the copy failed, because a copy that
    silently did nothing leaves the operator pasting a stale clipboard. */
 .copy-note { font-size: 12px; font-weight: 600; color: var(--ok); margin-top: 5px; }
+
+/* --- live-pass fix C1: the changed-restore digest line ------------------------------------- */
+/* `restored_changed` renders "recorded <64hex> → found <64hex>" — 146 characters, and the ONLY
+   surviving record of the digest the file had before it came back. It used to share
+   `.event-row__relpath`, which is `white-space: nowrap` + ellipsis, so at 1280px roughly 42 of
+   those characters survived and the "found" digest was invisible: an integrity alarm the operator
+   cannot act on. Its own class, wrapping anywhere (a hex run has no break opportunities of its
+   own), so both digests are fully visible at any width. */
+.event-row__detail {
+  font-family: var(--font-mono);
+  font-feature-settings: "ss01";
+  font-size: 11.5px;
+  color: var(--text-2);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  margin-top: 2px;
+}
