@@ -17,13 +17,13 @@ Standing guardrails for every slice:
   `ots --no-bitcoin verify`.
 
 ## 1. Shared prep (once, before fan-out)
-- [ ] 1.1 Confirm the working tree is on the intended base: `src/services/ots.py` contains
+- [x] 1.1 Confirm the working tree is on the intended base: `src/services/ots.py` contains
   `_verify_via_explorer` and `src/control_panel/templates/collection_review.html` contains the
   `resolve__opt--accept` card. If either is missing, the branch is stale — stop.
-- [ ] 1.2 Add `tests/conftest.py` with the shared `cairn_env` fixture and a `seed_collection`
+- [x] 1.2 Add `tests/conftest.py` with the shared `cairn_env` fixture and a `seed_collection`
   helper, lifted verbatim from `tests/test_panel.py` (which keeps its own copies — do not edit that
   file). Every new test module in sections 2–5 uses these.
-- [ ] 1.3 Baseline the gates so slice failures are attributable: `PYTHONPATH=. pytest -q` and
+- [x] 1.3 Baseline the gates so slice failures are attributable: `PYTHONPATH=. pytest -q` and
   `ruff check .` both green before fan-out.
 
 ## 2. Slice A — the verify path (#13, #19, #23-badge, #32-verify, #34-verify_result)
