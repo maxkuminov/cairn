@@ -84,10 +84,11 @@
   archive copy present) repairs on the next sweep; absent with no corroborated copy warns
   every sweep and never writes.
 - [ ] 3.5 Independent admission + typed-run totals (MODIFIED requirement): stale-pointer
-  existence alone claims the collection and creates the `kind='upgrade'` run (tripwire
-  included); `total` = one work item per operation (one per incomplete + one per stale row; a
-  both-stale-and-incomplete row contributes two), `processed` advances exactly one per
-  completed item; sweep runs before the proof upgrades within the pass; neither-work → no run.
+  existence OR an absent recorded proof entry alone claims the collection and creates the
+  `kind='upgrade'` run (tripwire included); `total` = one work item per operation (one per
+  incomplete + one per stale row + one per absent-entry row; a row receiving several
+  operations contributes one item each), `processed` advances exactly one per completed item;
+  no work of any of the three kinds → no run; sweep runs before the proof upgrades within the pass; neither-work → no run.
   Wire both entry points: the scheduler's daily pass and `cairn upgrade`. Lease discipline:
   claim heartbeat, per-collection proof flock around each relocation, claim re-confirmed
   after lock acquisition, lock held across all phases.

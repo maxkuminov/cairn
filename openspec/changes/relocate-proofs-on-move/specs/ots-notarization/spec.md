@@ -97,9 +97,10 @@ and of the `cairn upgrade` command, to the canonical proof-store location for it
 **current** relpath. Rows are stale when `ots_path` is set and does not equal the canonical
 location computed by the single proof-path helper; a SQL pre-filter MAY select candidates, but
 the staleness decision for each row SHALL be confirmed through the helper itself. **Stale-pointer
-existence SHALL be an independent admission reason** for the upgrade operation: a collection with
-no incomplete proofs — including a tripwire-mode collection carrying historical proofs — still
-claims its run slot, sweeps, and counts the sweep's work in the run's progress.
+existence SHALL be an independent admission reason** for the upgrade operation — and so SHALL
+the restore leg's shape, a row whose recorded `ots_path` entry is absent on disk: a collection
+with no incomplete proofs — including a tripwire-mode collection carrying historical proofs —
+still claims its run slot, sweeps, and counts the sweep's work in the run's progress.
 
 The sweep SHALL run under the collection's single-operation claim with the standard lease
 discipline, SHALL take the per-collection proof-store lock for each relocation, SHALL re-confirm
@@ -314,8 +315,9 @@ The on-demand stamp backfill and the OTS upgrade pass SHALL each be recorded as 
 `kind = 'upgrade'` for the upgrade pass. Each such run SHALL set `total` to the number of items it
 will process, known at the start — for a stamp run, the count of files queued for stamping; for an
 upgrade run, one work item per operation the pass will perform: one per incomplete proof to
-upgrade plus one per row the healing sweep confirmed stale — a row that is both stale and
-incomplete contributes two work items, since it receives two operations — and
+upgrade, plus one per row the healing sweep confirmed stale, plus one per row selected by the
+restore leg (recorded `ots_path` entry absent on disk) — a row receiving several of these
+operations contributes one item per operation — and
 SHALL update `processed` by exactly one per completed work item (a swept row's item counts
 whether it was relocated, deferred, or refused), so a concurrent reader can observe exact
 progress and `processed` can equal `total` without double- or under-counting. The run's result SHALL
@@ -325,8 +327,9 @@ relocated proof is upgraded at its new canonical location in the same pass.
 
 These `stamp` and `upgrade` runs SHALL NOT affect scan-freshness reporting (the dead-man's switch),
 which is derived from `kind = 'scan'` runs only. The upgrade pass SHALL record a run only for a
-corpus that actually has work — incomplete proofs to upgrade, or stale pointers to sweep — and
-SHALL NOT create an empty run when there is neither. Recording these runs SHALL NOT change the
+corpus that actually has work — incomplete proofs to upgrade, stale pointers to sweep, or rows
+whose recorded proof entry is absent on disk (the restore leg) — and
+SHALL NOT create an empty run when there is none of the three. Recording these runs SHALL NOT change the
 batched stamping or upgrade mechanics or their per-file outcomes.
 
 #### Scenario: Stamp backfill records a stamp run with exact progress
@@ -350,8 +353,15 @@ batched stamping or upgrade mechanics or their per-file outcomes.
 - **THEN** a `kind = 'upgrade'` run SHALL be created whose `total` counts the stale rows, and the
   sweep's outcomes SHALL advance `processed`
 
-#### Scenario: Upgrade pass with neither incompletes nor stale pointers records nothing
+#### Scenario: An absent recorded entry alone admits the collection
 
-- **WHEN** the upgrade pass processes a corpus that has no incomplete proofs and no stale
-  pointers
+- **WHEN** a corpus has no incomplete proofs and no stale pointers, but one row whose recorded
+  `ots_path` names an entry absent on disk (the phase-5 crash shape)
+- **THEN** the upgrade pass SHALL claim the corpus, create a `kind = 'upgrade'` run counting
+  that row's restore work, and run the restore leg
+
+#### Scenario: Upgrade pass with no work of any kind records nothing
+
+- **WHEN** the upgrade pass processes a corpus that has no incomplete proofs, no stale
+  pointers, and no absent recorded proof entries
 - **THEN** no `kind = 'upgrade'` run SHALL be created for that corpus
