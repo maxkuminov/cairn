@@ -228,6 +228,13 @@ names with `%`/`_`/quotes).
 
 ## Risks / Trade-offs
 
+- [A proof store that cannot be OPENED at all (unmounted, read-only root) makes the
+  reclamation probe raise, and the fail-safe branch then refuses every stale-claim
+  reclamation — broader than the "filesystem cannot lock" degrade, which proceeds
+  warned] → deliberate: with the store gone, admitting a second proof writer is the wrong
+  side to fail toward; the state is loud (a warning per stale run per reaper tick, and the
+  stale `running` claim reads stale on `/healthz`) and clears when the store mounts again.
+
 - [A deferred stamp (D1) could stay pending indefinitely if the sweep never converges the
   blocking row (e.g. a permanently refused destination)] → the member re-warns on every stamp
   pass and the row's state is visible in the panel as queued; the pairing warning names the
