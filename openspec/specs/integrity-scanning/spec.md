@@ -423,14 +423,21 @@ match **exactly one** file newly classified `added` in the same scan — where t
 shared by no other `missing` or `added` file in the run — SHALL be treated as a single moved file
 rather than an independent deletion plus addition. Reconciliation SHALL preserve the original file's
 identity: one surviving `files` row SHALL carry the new `relpath` with status `ok` while retaining
-its `first_seen`, `sha256`, and OpenTimestamps proof (`ots_path`, `ots_state`, `ots_stamped_at`). A
+its `first_seen`, `sha256`, and OpenTimestamps proof (`ots_path`, `ots_state`, `ots_stamped_at`,
+and the recorded proof provenance `ots_digest`, all unchanged). A
 reconciled move SHALL emit a single informational `moved` event recording the old and new paths,
 SHALL NOT raise a `missing` or `added` event, SHALL NOT be counted as missing or added on the run,
 and SHALL increment the run's `moved` count. Reconciliation SHALL be conservative: empty
 (zero-byte) files, and any content key matching more than one candidate on either side, SHALL NOT be
 reconciled and SHALL retain the existing `missing` + `added` behavior (logged for visibility).
-Reconciliation SHALL rewrite only the index — never the corpus bytes — and SHALL NOT re-queue the
-moved file for OTS stamping.
+Reconciliation SHALL rewrite only the index — never the corpus bytes, and never the proof store —
+and SHALL NOT re-queue the moved file for OTS stamping.
+
+After reconciliation the retained `ots_path` names the old relpath's canonical proof location —
+still the true location of the proof. The notarization capability owns what follows: its
+referenced-slot stamp guard SHALL prevent any stamp from displacing that proof while the pointer
+names it, and its healing sweep SHALL later relocate the proof to the new relpath's canonical
+location. The scan itself SHALL NOT move proof files.
 
 #### Scenario: A 1:1 move is reconciled to a single event
 
@@ -442,8 +449,9 @@ moved file for OTS stamping.
 #### Scenario: Moved file keeps its proof and is not re-stamped
 
 - **WHEN** an already-stamped file in a `perfile` corpus is reconciled as a move
-- **THEN** the surviving row SHALL retain its `ots_path`/`ots_state`/`ots_stamped_at`, and the scan
-  SHALL NOT mark it `pending` or stamp a new proof for it
+- **THEN** the surviving row SHALL retain its `ots_path`, `ots_state`, `ots_stamped_at`, and
+  `ots_digest` unchanged, and the scan SHALL NOT mark it `pending`, stamp a new proof for it, or
+  touch the proof store
 
 #### Scenario: Ambiguous content does not reconcile
 

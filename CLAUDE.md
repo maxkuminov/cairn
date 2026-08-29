@@ -469,6 +469,39 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > `src/control_panel/routes.py` — the ONE context builder serves both render paths, so full-page
 > and htmx views cannot disagree about the population on screen.
 
+> Proofs follow moved files (relocate-proofs-on-move, #39): a move-reconciled row's `ots_path`
+> used to keep naming the OLD relpath's canonical proof slot, so a later stamp of a different file
+> at that path displaced the proof (pointer → stranger's proof). Two mechanisms, and the scanner
+> still never touches the proof store: (1) **the referenced-slot stamp guard** — every stamp path
+> (batched, per-file fallback, backfill) defers any member whose canonical output slot is another
+> row's recorded `ots_path` (case-aliases surfaced by a `casefold` SQL function registered on
+> every connection in `database.py`, confirmed by on-disk identity); the guard is the FIRST
+> canonical-slot decision (before adoption/staging/submission), evaluated inside the collection
+> proof flock, which `stamp_pending` now holds across its WHOLE pass; `reclaim_stale_claim` and
+> the reaper probe that flock non-blocking and refuse while held (a live-but-DB-blind holder is
+> unreclaimable; a crashed one reclaims — flock dies with the process); lease fences guard every
+> post-guard state commit incl. adoption-only batches and post-calendar commits (the only guard
+> on flock-unsupported stores). (2) **the healing sweep** in the daily upgrade pass + `cairn
+> upgrade` — the ONE code path that relocates proofs (`proofs.heal_pointers` +
+> `ots.publish_relocation`/`finish_relocation`/`republish_proof`): corroborate the source before
+> belief (`ots_digest`, or `sha256` for legacy rows — legacy disagreement warned as AMBIGUOUS,
+> never "misfiled"); ordered destination rules (defer-if-referenced FIRST, adopt only
+> byte-identical, archive anything else); publish durably (hard link or O_EXCL create) → fenced
+> compare-and-set pointer commit (`relpath`+`ots_path`+`ots_digest`+run-live; zero rows =
+> claim-lost stop) → loss-proof removal (archive copy, post-removal re-verify, restore; failures
+> loud); cycle breaking via a `.relocating/` holding slot (eligible rows only); a **restore leg**
+> (recorded `ots_path` absent on disk → republish the corroborated archive copy via
+> stage-then-publish, else warn every sweep). Upgrade-run admission = incompletes OR stale
+> pointers OR absent entries; totals are one work item per operation; authoritative survey runs
+> UNDER the claim (empty → the provisional run row is discarded); early stops finalize `partial`
+> from the real counter. Converges every pre-fix moved row within one daily pass (or `cairn
+> upgrade`) — **no schema change, no migration**. Gates: 9-round Codex spec review (round 1's 9
+> BLOCKERs forced the guard+sweep redesign away from relocate-in-scanner), 2-scope + 3
+> convergence rounds of adversarial implementation review to PASS, verifier pass + re-pass
+> (0 blocking), +53 tests in `tests/test_proof_relocation.py` (747 passing). Accepted
+> limitations recorded in the archived spec: hard-link over-deferral, link-less-store cleanup
+> window (loud), lexists-only restore admission, no GC of leftover copies.
+
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
   Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).
