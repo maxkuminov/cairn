@@ -1,0 +1,266 @@
+# Build -> Trivy gate -> push the image to GHCR (ghcr.io/maxkuminov/cairn).
+#
+# The homelab k3s runs this image pinned BY DIGEST in the GitOps repo
+# maxkuminov/infra (apps/homelab/cairn); a push here changes nothing anywhere
+# until that pin moves (by an infra PR today; by Flux image automation once
+# cairn is switched to deploy-on-merge, see infra
+# docs/homelab-image-automation.md). The local `make` path (build, Trivy gate,
+# push to the homelab registry, compose up) is independent of this workflow and
+# unchanged by it.
+#
+# The image carries no secret and no instance data: the Dockerfile copies only
+# requirements.txt, alembic.ini, alembic/, src/, pyproject.toml and README.md,
+# and .dockerignore keeps .env*, data/, proofs/ and the rest of the tree out of
+# the build context. Every secret (CAIRN_SECRET_KEY, SMTP password) is supplied
+# at run time.
+#
+# This repository has no CI test workflow, so the image is built directly from
+# the pushed commit (the shape of the other GHCR image workflows).
+#
+#   push              main, image inputs only (paths below) -> build, scan,
+#                     push. Docs/OpenSpec-only merges do not rebuild, so they
+#                     never restart the running monitor.
+#   workflow_dispatch manual (re)build + push of main only.
+#   pull_request      only when the image inputs change: build + scan, never
+#                     push, so a Dockerfile/requirements/workflow change is
+#                     exercised (and CVE-gated) before merge.
+#
+# Two jobs, so a pull_request run never holds a writable GHCR token: a
+# same-repository PR gets whatever permissions its job declares, and a step
+# that only skips the push does not remove the credential. `build-scan` is
+# read-only and runs for pull_request only; `publish` holds packages: write
+# and runs only on push to main and main-only workflow_dispatch.
+name: image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/image.yml
+      - Dockerfile
+      - .dockerignore
+      - .trivyignore
+      - requirements.txt
+      - pyproject.toml
+      - README.md
+      - alembic.ini
+      - alembic/**
+      - src/**
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/image.yml
+      - Dockerfile
+      - .dockerignore
+      - .trivyignore
+      - requirements.txt
+      - pyproject.toml
+
+permissions: {}
+
+concurrency:
+  # Pushes to main are serialized (never cancelled mid-push); PR runs of
+  # this workflow supersede each other.
+  group: image-${{ github.event_name == 'pull_request' && github.ref || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/maxkuminov/cairn
+  # Trivy runs from its container image pinned by digest (not trivy-action):
+  # 0.69.3, the same pin as the other GHCR image workflows and the homelab
+  # gate (docker-build-scan.sh).
+  TRIVY_IMAGE: aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
+
+jobs:
+  build-scan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          docker build \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t cairn:ci .
+
+      # Same flags as the homelab gate (docker-build-scan.sh) and the publish
+      # job below: HIGH,CRITICAL with an available fix fails the job.
+      - name: Trivy scan (HIGH/CRITICAL, ignore-unfixed)
+        run: |
+          set -euo pipefail
+          ignore=()
+          if [ -f .trivyignore ]; then ignore=(--ignorefile /src/.trivyignore); fi
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -v "$PWD:/src:ro" \
+            "$TRIVY_IMAGE" image \
+              --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed \
+              --pkg-types os,library \
+              --no-progress --scanners vuln \
+              "${ignore[@]}" \
+              cairn:ci
+
+      # The image must run unprivileged as uid 1000 with a read-only root
+      # filesystem (the k3s pod: PSA restricted). Smoke: the interpreter, the
+      # app package and the `ots` CLI load under exactly those constraints.
+      - name: Smoke (uid 1000, read-only root, no capabilities)
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect -f '{{.Config.User}}' cairn:ci)" = "1000:1000"
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp --network none --entrypoint sh cairn:ci -c \
+            'id -u | grep -qx 1000 && python -c "import src.main" && ots --version'
+
+      - name: Summary (not pushed)
+        run: |
+          {
+            echo "### cairn image"
+            echo
+            echo "Built and scanned \`${GITHUB_SHA}\` — **not pushed** (pull_request)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    if: >-
+      (
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main'
+      ) || (
+        github.event_name == 'workflow_dispatch' &&
+        github.ref == 'refs/heads/main'
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Resolve commit
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::this workflow pushes main only (got $REF)"; exit 1
+          fi
+          sha="$GITHUB_SHA"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad sha '$sha'"; exit 1; }
+          {
+            echo "BUILD_SHA=$sha"
+            echo "SHORT_SHA=${sha::7}"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ env.BUILD_SHA }}
+          persist-credentials: false
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          docker build \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${BUILD_SHA}" \
+            -t cairn:ci .
+
+      # HIGH,CRITICAL with an available fix fails the job, OS + library
+      # packages, vuln scanner only. A .trivyignore is honoured when present.
+      - name: Trivy scan (HIGH/CRITICAL, ignore-unfixed)
+        run: |
+          set -euo pipefail
+          ignore=()
+          if [ -f .trivyignore ]; then ignore=(--ignorefile /src/.trivyignore); fi
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -v "$PWD:/src:ro" \
+            "$TRIVY_IMAGE" image \
+              --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed \
+              --pkg-types os,library \
+              --no-progress --scanners vuln \
+              "${ignore[@]}" \
+              cairn:ci
+
+      - name: Smoke (uid 1000, read-only root, no capabilities)
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect -f '{{.Config.User}}' cairn:ci)" = "1000:1000"
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --tmpfs /tmp --network none --entrypoint sh cairn:ci -c \
+            'id -u | grep -qx 1000 && python -c "import src.main" && ots --version'
+
+      - name: Push to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          for tag in "sha-${SHORT_SHA}" main; do
+            docker tag cairn:ci "${IMAGE}:${tag}"
+            docker push "${IMAGE}:${tag}"
+          done
+          digest=$(docker inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "${IMAGE}:sha-${SHORT_SHA}" \
+                   | grep -m1 "^${IMAGE}@sha256:" | cut -d@ -f2)
+          test -n "$digest"
+          echo "sha-${SHORT_SHA}: digest: ${digest}"
+          {
+            echo "### cairn image"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| commit | \`${BUILD_SHA}\` |"
+            echo "| tags | \`sha-${SHORT_SHA}\`, \`main\` |"
+            echo "| digest | \`${digest}\` |"
+            echo
+            echo "Pin: \`${IMAGE}:sha-${SHORT_SHA}@${digest}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          docker logout ghcr.io
+
+      # Flux image automation (maxkuminov/infra docs/homelab-image-automation.md,
+      # D1): an immutable, sortable main-<shortsha>-<run_number> tag next to the
+      # tags above. github.run_number is unchanged by a re-run, so a re-run of
+      # an old commit can never outrank a newer one. Published only while the
+      # built commit is still the main tip (a slower run for an older push must
+      # not publish after a newer one), and only once: a re-run that finds the
+      # tag present does not re-push it.
+      # Unlike the workflows without a paths filter, this step also runs on
+      # workflow_dispatch: a docs-only merge that lands while a build runs moves
+      # the tip (so that build publishes no D1 tag) and triggers no build of its
+      # own; dispatching the workflow on main is then the way to publish the
+      # newest code under a D1 tag. The tip check applies the same way.
+      - name: Push Flux tag (main-<shortsha>-<run_number>)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          BRANCH: main
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::bad run number '$RUN_NUMBER'"; exit 1; }
+          tag="${BRANCH}-${SHORT_SHA}-${RUN_NUMBER}"
+          tip=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${BRANCH}" --jq .sha)
+          if [ "$tip" != "$BUILD_SHA" ]; then
+            echo "::notice::${BRANCH} is now ${tip}, not ${BUILD_SHA}: ${tag} not published"
+            echo "Flux tag \`${tag}\` **not published**: ${BRANCH} moved on to \`${tip}\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          if out=$(docker manifest inspect "${IMAGE}:${tag}" 2>&1); then
+            echo "::notice::${IMAGE}:${tag} already exists (re-run): not re-pushed"
+            echo "Flux tag \`${tag}\` already present (re-run): not re-pushed." >> "$GITHUB_STEP_SUMMARY"
+          elif grep -qiE 'manifest unknown|no such manifest' <<<"$out"; then
+            docker tag cairn:ci "${IMAGE}:${tag}"
+            docker push "${IMAGE}:${tag}"
+            echo "Flux tag \`${tag}\` published." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error::cannot tell whether ${IMAGE}:${tag} exists: ${out}"; exit 1
+          fi
+          docker logout ghcr.io
