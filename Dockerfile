@@ -51,7 +51,8 @@ RUN python -m pip uninstall -y pip \
     && rm -rf /usr/local/lib/python3.12/site-packages/pip \
               /usr/local/lib/python3.12/site-packages/pip-*.dist-info
 
-USER appuser
+# Numeric, so a Kubernetes runAsNonRoot check can verify it from the image metadata alone.
+USER 1000:1000
 
 EXPOSE 8000
 

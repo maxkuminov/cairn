@@ -1,0 +1,35 @@
+# The image is published (GHCR, public repository): nothing secret or instance-specific may enter the
+# build context. The Dockerfile COPYs only requirements.txt, alembic.ini, alembic/, src/, pyproject.toml
+# and README.md; this file keeps everything else out of the context as a second line of defence.
+.git
+.github
+.claude
+.env
+.env.*
+!.env.example
+*.local.yaml
+config.yaml
+Makefile.local
+docker-compose.yml
+secrets/
+*.pem
+*.key
+data/
+proofs/
+*.db
+*.sqlite
+*.sqlite3
+*-wal
+*-shm
+cairn.zip
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+tests/
+openspec/
+docs/
