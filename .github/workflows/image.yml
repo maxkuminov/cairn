@@ -227,15 +227,19 @@ jobs:
       # Flux image automation (maxkuminov/infra docs/homelab-image-automation.md,
       # D1): an immutable, sortable main-<shortsha>-<run_number> tag next to the
       # tags above. github.run_number is unchanged by a re-run, so a re-run of
-      # an old commit can never outrank a newer one. Published only while the
-      # built commit is still the main tip (a slower run for an older push must
-      # not publish after a newer one), and only once: a re-run that finds the
-      # tag present does not re-push it.
-      # Unlike the workflows without a paths filter, this step also runs on
-      # workflow_dispatch: a docs-only merge that lands while a build runs moves
-      # the tip (so that build publishes no D1 tag) and triggers no build of its
-      # own; dispatching the workflow on main is then the way to publish the
-      # newest code under a D1 tag. The tip check applies the same way.
+      # an old commit can never outrank a newer one. Published only once: a
+      # re-run that finds the tag present does not re-push it, and any other
+      # answer from the registry fails the job. There is deliberately NO
+      # "still the main tip" check: ordering is by run_number, which GitHub
+      # assigns at trigger time (a later push or dispatch always gets a higher
+      # one) and a re-run keeps, so an older commit's tag - even one published
+      # late - can never outrank a newer commit's. A tip check only added a
+      # failure mode, and the paths filter above made it a common one: a
+      # docs-only merge that landed while a build ran moved the tip and started
+      # no build of its own, so the passing build exited 0 unpublished (and so
+      # did its re-run), and the cluster silently stayed on the previous build.
+      # This step also runs on workflow_dispatch (main only, see the job's
+      # if:), which builds and publishes the tip of main at dispatch time.
       - name: Push Flux tag (main-<shortsha>-<run_number>)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -246,12 +250,6 @@ jobs:
           set -euo pipefail
           [[ "$RUN_NUMBER" =~ ^[0-9]+$ ]] || { echo "::error::bad run number '$RUN_NUMBER'"; exit 1; }
           tag="${BRANCH}-${SHORT_SHA}-${RUN_NUMBER}"
-          tip=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${BRANCH}" --jq .sha)
-          if [ "$tip" != "$BUILD_SHA" ]; then
-            echo "::notice::${BRANCH} is now ${tip}, not ${BUILD_SHA}: ${tag} not published"
-            echo "Flux tag \`${tag}\` **not published**: ${BRANCH} moved on to \`${tip}\`." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
           echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
           if out=$(docker manifest inspect "${IMAGE}:${tag}" 2>&1); then
             echo "::notice::${IMAGE}:${tag} already exists (re-run): not re-pushed"
