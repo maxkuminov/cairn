@@ -3,7 +3,7 @@
 # to Oct 2028) is deliberate — the notary stack (opentimestamps-client 0.7.2, opentimestamps
 # 0.4.5, python-bitcoinlib) is effectively unmaintained, so moving the interpreter under it needs
 # its own `ots stamp/upgrade/verify` smoke test, not a drive-by bump.
-FROM python:3.12.13-slim
+FROM python:3.14.8-slim
 
 WORKDIR /app
 
