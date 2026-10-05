@@ -14,16 +14,19 @@
 # the build context. Every secret (CAIRN_SECRET_KEY, SMTP password) is supplied
 # at run time.
 #
-# This repository has no CI test workflow, so the image is built directly from
-# the pushed commit (the shape of the other GHCR image workflows).
+# The `test` job runs the pytest suite (requirements-dev.txt) on the same
+# commit first; both image jobs `needs: test`, so nothing is built, scanned or
+# pushed - and Flux image automation never sees a tag - unless it passes. The
+# live OTS calendar tests stay skipped (CAIRN_OTS_LIVE is not set).
 #
-#   push              main, image inputs only (paths below) -> build, scan,
-#                     push. Docs/OpenSpec-only merges do not rebuild, so they
+#   push              main, image inputs only (paths below) -> test, build,
+#                     scan, push. Docs/OpenSpec-only merges do not rebuild, so they
 #                     never restart the running monitor.
 #   workflow_dispatch manual (re)build + push of main only.
-#   pull_request      only when the image inputs change: build + scan, never
-#                     push, so a Dockerfile/requirements/workflow change is
-#                     exercised (and CVE-gated) before merge.
+#   pull_request      when the image inputs, the app or its tests change:
+#                     test, build + scan, never push, so a code, test,
+#                     Dockerfile, requirements or workflow change is tested
+#                     (and CVE-gated) before merge.
 #
 # Two jobs, so a pull_request run never holds a writable GHCR token: a
 # same-repository PR gets whatever permissions its job declares, and a step
@@ -56,6 +59,11 @@ on:
       - .trivyignore
       - requirements.txt
       - pyproject.toml
+      - requirements-dev.txt
+      - alembic.ini
+      - alembic/**
+      - src/**
+      - tests/**
 
 permissions: {}
 
@@ -73,7 +81,36 @@ env:
   TRIVY_IMAGE: aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
 
 jobs:
+  # The pytest suite. Read-only token, no secrets (the tests build their own
+  # throwaway config/DB under tmp_path); gates both image jobs below.
+  test:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Python 3.12 = the Dockerfile's base (python:3.12.x-slim); the notary
+      # stack is deliberately held on 3.12.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Test (pytest)
+        run: python -m pytest -q -p no:cacheprovider
+
   build-scan:
+    needs: test
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -129,6 +166,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
+    needs: test
     if: >-
       (
         github.event_name == 'push' &&
