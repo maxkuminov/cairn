@@ -440,6 +440,12 @@ async def test_moved_file_reuses_proof_and_is_not_restamped(cairn_env, monkeypat
     async with sm() as s:
         assert (await scan_collection(s, await s.get(Collection, cid))).added == 1
         row = await s.scalar(select(FileEntry).where(FileEntry.collection_id == cid))
+        # Capture the STORED values, not this session's in-memory ones: the scan assigned
+        # `ots_stamped_at` an aware datetime, but SQLite keeps no offset, so a DB load reads it
+        # back naive (UTC wall clock). Whether `row` is that in-memory instance or a fresh load
+        # depends on when the GC freed the scan's copy from the weak identity map (Python 3.14's
+        # incremental GC keeps it alive), so refresh to compare like with like below.
+        await s.refresh(row)
         orig_ots_path, orig_state = row.ots_path, row.ots_state
         orig_stamped_at, orig_sha = row.ots_stamped_at, row.sha256
         assert orig_ots_path is not None and orig_state == "incomplete"
