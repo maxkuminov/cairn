@@ -35,7 +35,7 @@ capability. Settings prefixed `CAIRN_OIDC_` SHALL be ignored outside `oidc` mode
 In `oidc` mode startup SHALL fail with an error naming the offending setting when any of the
 following holds: `CAIRN_OIDC_ISSUER`, `CAIRN_OIDC_CLIENT_ID` or `CAIRN_OIDC_CLIENT_SECRET` is
 missing; the issuer is not an `https` URL or carries userinfo, a query or a fragment;
-`CAIRN_PUBLIC_URL` from the environment or YAML overlay is unset or invalid;
+`CAIRN_PUBLIC_URL` from the environment or YAML overlay is unset, invalid, or not an `https` URL;
 `CAIRN_SECRET_KEY` is missing or shorter than 32 characters; `CAIRN_OIDC_EXTRA_SCOPES` contains
 `offline_access`; `CAIRN_OIDC_TOKEN_AUTH_METHOD` is not `client_secret_basic` or
 `client_secret_post`; or `CAIRN_OIDC_SESSION_MAX_AGE` is not a positive integer. In `oidc` mode
@@ -52,6 +52,14 @@ SHALL NOT contact the provider.
 - **WHEN** `CAIRN_AUTH_MODE=oidc`, `CAIRN_PUBLIC_URL` is unset in env and YAML, and a public URL
   is stored only through the panel
 - **THEN** startup SHALL fail with an error naming `CAIRN_PUBLIC_URL`
+
+#### Scenario: HTTP public URL refused in oidc mode only
+
+- **WHEN** `CAIRN_AUTH_MODE=oidc` and `CAIRN_PUBLIC_URL=http://cairn.example.com` with otherwise
+  complete configuration
+- **THEN** startup SHALL fail with an error naming `CAIRN_PUBLIC_URL` and the `https` requirement
+- **AND** the same `http` value in `single` mode SHALL still be accepted as the outbound-link base,
+  exactly as before this change
 
 #### Scenario: Provider down at startup
 

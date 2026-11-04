@@ -16,7 +16,9 @@ user is*, not how scoping works.
 1. A panel that refuses every request without a session minted from a verified ID token.
 2. Integrity-critical actions bound to that verified identity.
 3. `single` mode byte-for-byte unchanged; the CLI unaffected.
-4. Works with any standards-compliant OIDC provider, with no provider-specific code path.
+4. Works with any standards-compliant OIDC provider that signs ID tokens asymmetrically, with no
+   provider-specific code path (the audience profile in D3 accepts multi-audience tokens only when
+   `azp` names this client).
 
 ## Decisions
 
@@ -78,8 +80,11 @@ What it does **not** change, stated plainly:
   regardless of what the provider advertises. An empty intersection refuses login with a
   configuration reason.
 - **JWKS:** fetched with discovery; on an unknown `kid` refetched at most once per 60 s.
-- **ID token claims:** `iss` equals the issuer; `aud` equals the client ID or is a one-element
-  array holding it; `azp`, if present, equals the client ID; `exp` and `iat` integers, `exp` in
+- **ID token claims:** `iss` equals the issuer; `aud` is either the client ID as a string, or a
+  non-empty array of strings that contains the client ID, where an array with more than one
+  element is accepted **only** when `azp` is present and equals the client ID (OIDC Core 3.1.3.7:
+  the authorized party identifies the client when several audiences are present); `azp`, whenever
+  present, equals the client ID; `exp` and `iat` integers, `exp` in
   the future and `iat` not in the future, with a fixed 30 s leeway (the reference used zero; a
   small leeway avoids refusing logins on ordinary clock drift); `nonce` equals the transaction's;
   `sub` a non-empty string of at most 255 characters.
@@ -111,9 +116,58 @@ the forwarded-header trust in D8 allows; they are a nuisance limit, not a contro
 ### D5. Identity linking: `(issuer, subject)` on `users`, CLI only
 
 Migration `0013` adds to `users`: `oidc_issuer` (nullable, ≤ 512), `oidc_subject` (nullable,
-≤ 255), `oidc_linked_at` (nullable), `session_epoch` (integer, not null, default 0). UNIQUE
-(`oidc_issuer`, `oidc_subject`); CHECK that issuer, subject and linked-at are all null or all
-non-null. SQLite batch mode, reversible. No new table, no foreign key.
+≤ 255), `oidc_linked_at` (nullable), `session_epoch` (integer, not null, default 0). A UNIQUE
+**index** `uq_users_oidc_identity` on (`oidc_issuer`, `oidc_subject`); named CHECK constraints
+for the two lengths (`ck_users_oidc_issuer_len`, `ck_users_oidc_subject_len`, both written as
+`col IS NULL OR length(col) <= N`, because SQLite ignores `VARCHAR(N)`) and for all-or-none
+(`ck_users_oidc_all_or_none`). Reversible. No new table, no foreign key.
+
+**The migration never rebuilds `users`, in either direction.** This is the decision that matters
+most in this change. Alembic's batch mode on SQLite copies a table into a new one, drops the old
+one and renames; `alembic/env.py` turns `PRAGMA foreign_keys=ON` on for every migration
+connection, and `collections.user_id` is `ON DELETE CASCADE` (and `files`, `runs`, `events`
+cascade from `collections`). Dropping the old `users` table under enforced foreign keys can
+delete every collection and its whole integrity history. So:
+
+- **Upgrade** issues four plain `ALTER TABLE users ADD COLUMN …` statements (via `op.execute`,
+  never `batch_alter_table`): each OIDC column carries its CHECK in its own column definition
+  (`CONSTRAINT <name> CHECK (…)`), the all-or-none CHECK rides on `oidc_linked_at` (the last OIDC
+  column added, so every column it names already exists), `session_epoch` is
+  `INTEGER NOT NULL DEFAULT 0`; then `CREATE UNIQUE INDEX`. SQLite permits a column-level CHECK
+  that names other columns and a NOT NULL column with a constant default in `ADD COLUMN`; no row
+  is copied.
+- **Downgrade** drops the index first, then `oidc_linked_at` (whose definition carries the
+  cross-column CHECK), then `oidc_subject`, `oidc_issuer`, `session_epoch`, each with a plain
+  `ALTER TABLE users DROP COLUMN`. SQLite allows dropping a column whose own definition carries a
+  CHECK; it refuses a column that is still indexed or named by another column's CHECK, which is
+  why the order is fixed. Both directions were exercised against the stdlib SQLite (3.45) while
+  writing this design, including a cascade-protected child row that survived.
+- `ALTER TABLE … DROP COLUMN` needs SQLite ≥ 3.35. The migration checks
+  `sqlite_version()` first and **refuses** (raises with the version in the message) below that,
+  rather than falling back to a rebuild. The image's interpreter ships a far newer SQLite.
+- The `User` model declares the same three CHECKs and the unique index, so a schema made by
+  `create_all` in tests enforces exactly what a migrated one does.
+
+Rejected: *a batch rebuild with `PRAGMA foreign_keys=OFF` outside the transaction, then
+`foreign_key_check`.* It works when done exactly right, but it depends on a pragma that is a
+silent no-op inside a transaction and on Alembic's connection lifecycle in `env.py`; a mistake
+loses data instead of failing. Rejected: *dropping the CHECKs and validating only in the
+service.* It would avoid nothing (the CHECKs do not force a rebuild) and would let a direct
+write break the invariants.
+
+Required regardless of the mechanism: a test on a populated fixture database at `0012` (two
+users, collections owned by each, files, runs, events including acknowledged ones) that records
+the row count and the full ID set of `users`, `collections`, `files`, `runs` and `events` plus
+every `collections.user_id` and `events.acknowledged_by`, upgrades to `0013`, asserts all of it
+unchanged and `PRAGMA foreign_key_check` empty, downgrades to `0012` and asserts the same again.
+A SQL trace (`sqlite3` trace callback) asserts that neither direction issues `CREATE TABLE`,
+`DROP TABLE` or `ALTER TABLE … RENAME` for `users`.
+
+The identity service validates the same bounds before writing (issuer: `https`, no userinfo,
+query or fragment, ≤ 512 characters; subject: non-empty, ≤ 255 characters, no control
+characters), so the CLI fails with a one-line message instead of a constraint error; the CHECKs
+are the backstop for any other writer. Boundary tests cover 512/513 and 255/256 at both the
+schema and the CLI layer.
 
 The pair is the only thing ever matched. Email, username, `preferred_username` and every other
 claim are never used for admission (they are mutable at most providers).
@@ -122,7 +176,7 @@ CLI (`cairn users …`), the only management surface in v1 and the break-glass p
 
 - `list` — username, admin, active, linked issuer, subject, linked-at.
 - `link --subject SUB [--issuer URL] [--user NAME] [--replace]` — issuer defaults to the
-  configured `CAIRN_OIDC_ISSUER`; user defaults to the implicit owner and is required when more
+  configured `CAIRN_OIDC_ISSUER` and is validated as above whether given or defaulted; user defaults to the implicit owner and is required when more
   than one user exists; relinking an already-linked user needs `--replace`; bumps
   `session_epoch`. Refuses a subject that is empty, longer than 255 characters, or contains
   control characters, and a pair already bound to another user.
@@ -140,14 +194,16 @@ plain email addresses.
 
 - **Default deny.** A middleware (not a per-route dependency) refuses every request in `oidc`
   mode unless the path is on the public allowlist: `/healthz`, `/static/*`, `/login`,
-  `/auth/oidc/start`, `/auth/oidc/callback`, `/auth/logout`, `/mode/toggle`. A test enumerates
+  `/auth/oidc/start`, `/auth/oidc/callback`, `/auth/refused`, `/auth/logout`, `/mode/toggle`.
+  A test enumerates
   `app.routes` and asserts that every other route refuses without a session, so a new route is
   protected by default.
 - **Refusal shape:** a browser GET gets `303 → /login?next=<safe local path>`; an htmx request
   gets `401` with `HX-Redirect: /login`; `/api*` paths get a JSON `401`. `next` is accepted only
   as a local absolute path (starts with a single `/`, no scheme, no `//`, no backslash).
 - **Session content:** `uid`, `epoch`, `auth="oidc"`, `login_at`, and the CSRF nonce. No subject,
-  no token, no claims. On every request the wall loads the user and requires: user exists, is
+  no token, no claims (the only exception is the one-shot refusal value of an anonymous session,
+  D11). On every request the wall loads the user and requires: user exists, is
   active, is still linked, `session_epoch` equals the session's `epoch`, and `now - login_at` is
   under `CAIRN_OIDC_SESSION_MAX_AGE` (default 43200 s). Any failure clears the session and
   refuses. `current_user` returns the session's user in `oidc` mode and keeps today's behaviour
@@ -161,11 +217,18 @@ plain email addresses.
   is left alone (no RP-initiated logout in v1).
 - **Login start is a POST** from the login page with a CSRF token, so a third-party page cannot
   start a flow in the victim's browser.
+- **`/mode/toggle` is public, so it must not be an open redirect.** Today it redirects to the raw
+  `Referer`, which makes `GET /mode/toggle` with `Referer: https://evil.example/` a redirect off
+  site. In `oidc` mode the handler takes only the path and query of the `Referer`, applies the
+  same local-path rule as `next`, and falls back to `/`; a cross-origin `Referer` therefore lands
+  on a local path, never on another origin. In `single` mode the handler is unchanged (slice 0
+  golden); fixing it there too is a separate decision, recorded under Future decisions.
 
 ### D7. Refusals reveal nothing about local users
 
-Every refusal after a valid token (no linked user, inactive user, group missing) renders the
-same page and status (403): "This identity is not authorized for this Cairn instance." The page
+Every refusal after a valid token (no linked user, inactive user, group missing) ends on the
+same page and status (403, `GET /auth/refused`, see D11 for why it is a redirect): "This identity
+is not authorized for this Cairn instance." The page
 also shows the signed-in person their own issuer and subject, so they can send them to the
 operator. It never shows a local username, whether one exists, or which check failed. Protocol
 failures (bad state, bad signature, provider error) render a generic "Sign-in failed, try again"
@@ -181,7 +244,8 @@ env/YAML value. It is never derived from the request (`Host`, `X-Forwarded-*`) a
 the panel-editable `app_settings` override: the latter is a convenience for alert links, and the
 redirect URI must match what is registered at the provider.
 
-`cairn serve` starts uvicorn with `proxy_headers=True, forwarded_allow_ips="*"`, so any peer that
+Both entrypoints, `cairn serve` and the image's `uvicorn` CMD, start uvicorn with
+`proxy_headers=True, forwarded_allow_ips="*"`, so any peer that
 can reach the container port can set `X-Forwarded-For`/`-Proto`. This change does not alter
 that, and does not depend on it for anything security-relevant except the per-address rate-limit
 key (D4). SECURITY.md and DEPLOYMENT.md will state that the container port must be reachable only
@@ -196,7 +260,10 @@ New settings (env `CAIRN_…`, YAML overlay as usual): `OIDC_ISSUER`, `OIDC_CLIE
 
 In `oidc` mode startup fails with a message naming the setting when: issuer, client ID or client
 secret is missing; the issuer is not `https` or carries userinfo, query or fragment;
-`CAIRN_PUBLIC_URL` (env/YAML) is unset or invalid; `CAIRN_SECRET_KEY` is missing or shorter than
+`CAIRN_PUBLIC_URL` (env/YAML) is unset, invalid or not `https` (an `http` URL is valid for
+alert links in every mode, but in `oidc` mode the transaction cookie is `Secure` and the
+callback would carry the code in cleartext, so the rule is `oidc`-only and the existing
+outbound-link grammar is unchanged); `CAIRN_SECRET_KEY` is missing or shorter than
 32 characters; `offline_access` is requested; the session lifetime is not positive. This departs
 from the `public_url` fail-soft rule on purpose and follows the existing `multi` + secret-key
 precedent: the operator chose a mode whose whole point is the wall, and a wall that silently
@@ -214,6 +281,47 @@ When `CAIRN_OIDC_REQUIRED_GROUP` is set, the ID token's groups claim must be an 
 case-sensitive equality. A missing, scalar or malformed claim refuses (D7). Unset = no group
 check.
 
+### D11. Callback secrets never reach a log or a lingering URL
+
+The authorization response arrives as `GET /auth/oidc/callback?code=…&state=…&iss=…`. Route-level
+redaction (D7) cannot stop uvicorn's own access logger, which writes the request line, query
+included, before and independently of the route. The image runs `uvicorn` directly and
+`cairn serve` calls `uvicorn.run`, so the fix has to live in the application, not in one launcher:
+
+- In `oidc` mode, application startup (`src/main.py`, importing `src/auth/access_log.py`)
+  attaches a logging filter to the `uvicorn.access` logger that rewrites the request target of
+  any `/auth/oidc/callback` record to the bare path. A record whose arguments are not the shape
+  the filter understands is **dropped**, not passed through. The filter is not installed in
+  `single` mode.
+- The callback never renders a page at its own URL. Success is `303` to the stored `next`;
+  a protocol failure is `303 /login?error=failed`; a D7 refusal is `303 /auth/refused`. The
+  refusal page needs the person's issuer and subject: the callback puts them in the session as a
+  one-shot `refused` value (anonymous session only, 5-minute expiry, removed when read and by any
+  login), which is the only time a subject is written to a cookie; an authenticated session still
+  never holds one (D6).
+- Every callback response and the refusal page carry `Referrer-Policy: no-referrer` and
+  `Cache-Control: no-store`.
+- Test with a real server, not the in-process client: start uvicorn in a subprocess through
+  each entrypoint (`cairn serve`, and the image's CMD argv), call the callback with recognisable
+  `code`, `state` and `iss` values (success, failure and refusal paths), and assert that neither
+  those values nor the raw query string appear anywhere in the captured stdout/stderr.
+- Proxy access logs are the operator's: DEPLOYMENT.md, SECURITY.md and `Caddyfile.example` show
+  how to drop the callback query there.
+
+### D12. Public-repository hygiene
+
+The repository is public. Everything this change adds uses placeholders only
+(`https://idp.example.com/realms/example`, `https://cairn.example.com`, client ID `cairn`), and
+the release gate scans the **whole tracked tree**, not the diff: current docs, archived
+OpenSpec changes, tests, code comments and the design mock data. Categories: personal names (other
+than the copyright and author lines), real host paths, real collection sizes and file names,
+monitor or ticket identifiers from a private deployment, private hostnames and repositories,
+private addresses, and non-`example` email addresses. The list of personal names and hostnames to
+search for is supplied by the operator at gate time and is **never committed** (a committed deny
+list would itself publish the data); only the generic category patterns may live in the repo.
+Existing hits are redacted in a dedicated commit within this change (task D.9), separate from the
+feature commits so it can be reviewed on its own.
+
 ## Threat model (summary)
 
 | Threat | Control |
@@ -226,6 +334,9 @@ check.
 | Valid IdP user who is not the operator | no JIT; `(iss, sub)` link required; optional group (D5, D10) |
 | Stolen session after access is removed | per-request re-validation, `session_epoch`, absolute lifetime (D6) |
 | Open redirect via `next` | local-path-only rule (D6) |
+| Open redirect via `/mode/toggle` `Referer` | local-path-only rule in `oidc` mode (D6) |
+| Authorization code or state in access logs / history | access-log filter, clean redirects, no-referrer (D11) |
+| Cascade deletion during the migration | in-place `ADD`/`DROP COLUMN`, no rebuild, preservation test (D5) |
 | Login CSRF / session fixation | POST start with CSRF, fresh session on login (D6) |
 | Credential leakage in logs | closed reason codes, redaction (D7) |
 | Host-header poisoning of the redirect URI | redirect from configuration only (D8) |
@@ -263,7 +374,21 @@ additive and its columns are ignored outside `oidc`; downgrading it is not requi
 
 ## Future decisions (not in this change)
 
+- Whether to apply the `/mode/toggle` local-path rule in `single` mode as well (it is an open
+  redirect there today; left untouched here because `single` must stay byte-identical).
 - Whether `/verify` (proof verification for a single file) should be reachable without login.
 - Additional users and how they relate to `multi` and per-user mounts.
 - Step-up re-authentication (`max_age`/`prompt=login`) for Accept.
 - RP-initiated logout.
+
+## Review history
+
+- **Codex spec review r1: FAIL** — 1 BLOCKER, 6 MAJOR, 2 MINOR, all folded:
+  migration without a `users` rebuild plus a populated-fixture preservation test (D5);
+  `/mode/toggle` local-path rule in `oidc` mode (D6); `https`-only `CAIRN_PUBLIC_URL` in `oidc`
+  mode (D9); uvicorn access-log filter, clean callback redirects, no-referrer and a real-server
+  log test (D11); slice order B after A and C, `_base_context` wiring assigned to B (tasks);
+  CLI help golden limited to pre-existing commands with the `users` entry asserted additively
+  (tasks 0.2, A.4); whole-tree public-repo scan and a redaction commit (D12, tasks D.8–D.9);
+  length CHECKs and issuer validation with boundary tests (D5); multi-audience tokens accepted
+  only with `azp` equal to the client (D3).

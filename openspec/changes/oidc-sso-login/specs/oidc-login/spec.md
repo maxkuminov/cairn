@@ -6,13 +6,16 @@
 
 When `CAIRN_AUTH_MODE=oidc`, the application SHALL refuse every HTTP request that does not carry
 a valid session, except requests to an explicit public allowlist: `/healthz`, `/static/*`,
-`/login`, `/auth/oidc/start`, `/auth/oidc/callback`, `/auth/logout` and `/mode/toggle`. The check
+`/login`, `/auth/oidc/start`, `/auth/oidc/callback`, `/auth/refused`, `/auth/logout` and
+`/mode/toggle`. The check
 SHALL be applied to all routes centrally, so a route added later is protected without being
 listed. An unauthenticated browser GET SHALL be redirected (303) to `/login` with a `next`
 parameter; an htmx request SHALL receive 401 with an `HX-Redirect: /login` header; a request
 under `/api` SHALL receive a JSON 401. A `next` value SHALL be honoured only when it is a local
 absolute path (a single leading `/`, no scheme, no `//`, no backslash); anything else SHALL be
-replaced by `/`.
+replaced by `/`. In `oidc` mode `/mode/toggle` SHALL redirect only to the path and query of its
+`Referer` when that passes the same local-path rule, and to `/` otherwise; it SHALL NOT redirect
+to another origin. In `single` mode `/mode/toggle` SHALL behave exactly as before this change.
 
 #### Scenario: Anonymous request to the dashboard
 
@@ -30,6 +33,17 @@ replaced by `/`.
 
 - **WHEN** the test suite enumerates every registered route and requests each without a session
 - **THEN** every route not on the public allowlist SHALL refuse
+
+#### Scenario: Theme toggle is not an open redirect
+
+- **WHEN** a request in `oidc` mode asks for `/mode/toggle` with `Referer: https://evil.example/phish`
+- **THEN** the response SHALL redirect to the local path `/phish` and never to `evil.example`
+- **AND** with `Referer: //evil.example/x` or a value containing a backslash it SHALL redirect to `/`
+
+#### Scenario: Theme toggle returns to the panel page
+
+- **WHEN** a signed-in user in `oidc` mode toggles the theme from `/collections`
+- **THEN** the response SHALL redirect back to `/collections`
 
 #### Scenario: Open redirect refused
 
@@ -74,17 +88,31 @@ to equal the configured issuer. It SHALL exchange the code with the PKCE verifie
 `client_secret_basic` or `client_secret_post` as configured. It SHALL accept an ID token only if
 its signature verifies against the issuer's JWKS with an algorithm in {RS256, PS256, ES256}
 intersected with the provider's advertised ID-token algorithms, and SHALL always refuse `none`
-and `HS*`. The token SHALL have `iss` equal to the issuer, `aud` equal to the client ID or a
-one-element array holding it, `azp` (if present) equal to the client ID, integer `exp` in the
+and `HS*`. The token SHALL have `iss` equal to the issuer; `aud` equal to the client ID as a
+string, or an array of strings containing the client ID, where an array of more than one element
+SHALL be accepted only when `azp` is present and equals the client ID; `azp` (whenever present)
+equal to the client ID; integer `exp` in the
 future and integer `iat` not in the future (30 s leeway), `nonce` equal to the transaction's, and
 a non-empty string `sub` of at most 255 characters. Discovery SHALL require the document's
 `issuer` to equal the configured issuer exactly and its endpoints to be `https` without userinfo
 or fragment. All provider HTTP calls SHALL disable redirects and environment proxies, time out
 after 10 s, and cap response bodies at 128 KiB.
 
-#### Scenario: Wrong audience
+#### Scenario: Multiple audiences without an authorized party
 
-- **WHEN** a correctly signed ID token carries `aud: ["cairn", "other"]`
+- **WHEN** a correctly signed ID token carries `aud: ["cairn", "other"]` and no `azp`
+- **THEN** login SHALL be refused
+
+#### Scenario: Multiple audiences with this client as authorized party
+
+- **WHEN** a correctly signed ID token carries `aud: ["cairn", "other"]` and `azp: "cairn"`, with
+  every other claim valid
+- **THEN** the token SHALL pass the audience check
+
+#### Scenario: Foreign authorized party or missing client
+
+- **WHEN** a correctly signed ID token carries `aud: ["cairn", "other"]` with `azp: "other"`, or
+  `aud: ["other"]`, or `aud: "other"`
 - **THEN** login SHALL be refused
 
 #### Scenario: Unsigned or symmetric token
@@ -198,6 +226,33 @@ SHALL NOT affect scanning, scheduling or `/healthz`.
 - **WHEN** a callback succeeds or fails
 - **THEN** no log line SHALL contain the callback query string, a token, the subject or the
   client secret
+
+### Requirement: The callback request SHALL leave no secret in server logs or in the browser URL
+
+In `oidc` mode the application SHALL ensure that the uvicorn access log never records the query
+of a `/auth/oidc/callback` request, for every supported entrypoint (`cairn serve` and the image's
+`uvicorn` command), and SHALL drop rather than pass through an access-log record it cannot
+sanitise. The callback SHALL NOT render a page at its own URL: success SHALL redirect (303) to
+the stored local `next`, a protocol failure SHALL redirect to `/login?error=failed`, and an
+identity refusal SHALL redirect to `/auth/refused`, which renders the 403 refusal page from a
+one-shot value held in the anonymous session for at most 5 minutes and removed when read.
+Callback responses and the refusal page SHALL carry `Referrer-Policy: no-referrer` and
+`Cache-Control: no-store`.
+
+#### Scenario: Real server access log stays clean
+
+- **WHEN** a uvicorn server started through each supported entrypoint receives
+  `/auth/oidc/callback?code=<recognisable value>&state=<recognisable value>` on the success,
+  failure and refusal paths
+- **THEN** none of those values, nor the raw query string, SHALL appear in the server's captured
+  output
+
+#### Scenario: Refusal arrives at a clean URL
+
+- **WHEN** a valid ID token's identity is not linked
+- **THEN** the callback SHALL respond 303 to `/auth/refused` with `Referrer-Policy: no-referrer`
+- **AND** `/auth/refused` SHALL respond 403 with the generic refusal page showing that person's
+  issuer and subject once, and a second request SHALL show the page without them
 
 ### Requirement: The CLI SHALL manage identity links and work without authentication
 

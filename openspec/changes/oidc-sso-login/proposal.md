@@ -29,8 +29,8 @@ password store, and gives the operator one place to revoke access.
 ## What Changes
 
 - **New auth mode `CAIRN_AUTH_MODE=oidc`.** Every panel route requires a session. `/healthz`
-  stays unauthenticated; `/static/*`, the login page and the two OIDC endpoints are the only
-  other public routes, by an explicit allowlist (default deny, so a future route is protected
+  stays unauthenticated; `/static/*`, the login page, the OIDC start, callback and refusal
+  endpoints, logout and the theme toggle are the only other public routes, by an explicit allowlist (default deny, so a future route is protected
   without anyone remembering to protect it). The CLI keeps working without auth, as it does today.
   `single` mode is unchanged byte for byte; `multi` is left reserved for the future password /
   per-user-mount model (design D1).
@@ -45,8 +45,9 @@ password store, and gives the operator one place to revoke access.
   reveals nothing about local users (it shows the person their own issuer and subject, so they
   can hand them to the operator).
 - **Linking lives in the database (Alembic migration `0013`)**: nullable `oidc_issuer`,
-  `oidc_subject`, `oidc_linked_at` plus a `session_epoch` counter on `users`, with a UNIQUE pair
-  and an all-or-none CHECK. It is managed only by a pod-local CLI — `cairn users list`,
+  `oidc_subject`, `oidc_linked_at` plus a `session_epoch` counter on `users`, with a unique pair,
+  length CHECKs and an all-or-none CHECK, added in place with no table rebuild (a rebuild of
+  `users` under enforced foreign keys could cascade-delete every collection; design D5). It is managed only by a pod-local CLI — `cairn users list`,
   `cairn users link --subject …`, `cairn users unlink`, `cairn users revoke-sessions` — which is
   also the break-glass path. v1 binds the operator to the existing implicit user, so ownership of
   every collection is unchanged. Additional users are future work; alert recipients stay email
