@@ -13,9 +13,7 @@ listed. An unauthenticated browser GET SHALL be redirected (303) to `/login` wit
 parameter; an htmx request SHALL receive 401 with an `HX-Redirect: /login` header; a request
 under `/api` SHALL receive a JSON 401. A `next` value SHALL be honoured only when it is a local
 absolute path (a single leading `/`, no scheme, no `//`, no backslash); anything else SHALL be
-replaced by `/`. In `oidc` mode `/mode/toggle` SHALL redirect only to the path and query of its
-`Referer` when that passes the same local-path rule, and to `/` otherwise; it SHALL NOT redirect
-to another origin. In `single` mode `/mode/toggle` SHALL behave exactly as before this change.
+replaced by `/`. `/mode/toggle` is public and SHALL follow the theme-toggle requirement below.
 
 #### Scenario: Anonymous request to the dashboard
 
@@ -34,21 +32,39 @@ to another origin. In `single` mode `/mode/toggle` SHALL behave exactly as befor
 - **WHEN** the test suite enumerates every registered route and requests each without a session
 - **THEN** every route not on the public allowlist SHALL refuse
 
-#### Scenario: Theme toggle is not an open redirect
-
-- **WHEN** a request in `oidc` mode asks for `/mode/toggle` with `Referer: https://evil.example/phish`
-- **THEN** the response SHALL redirect to the local path `/phish` and never to `evil.example`
-- **AND** with `Referer: //evil.example/x` or a value containing a backslash it SHALL redirect to `/`
-
-#### Scenario: Theme toggle returns to the panel page
-
-- **WHEN** a signed-in user in `oidc` mode toggles the theme from `/collections`
-- **THEN** the response SHALL redirect back to `/collections`
-
 #### Scenario: Open redirect refused
 
 - **WHEN** the login flow completes with `next=//evil.example.com/` or `next=https://evil.example.com/`
 - **THEN** the user SHALL be redirected to `/`
+
+### Requirement: The theme toggle SHALL NOT redirect to another origin in any auth mode
+
+In every auth mode (`single`, `multi` and `oidc`) `/mode/toggle` SHALL redirect only to the path
+and query of its `Referer` when that path passes the local-path rule used for `next` (a single
+leading `/`, no scheme, no `//`, no backslash), and to `/` otherwise, so it SHALL NOT redirect to
+another origin. The local-path rule SHALL be one function shared by `next`, the callback redirect
+and `/mode/toggle`. Apart from the `Location` value for a `Referer` that fails the rule or names
+another origin, the toggle's response (status 303, the `cairn_mode` cookie and its attributes)
+SHALL be unchanged in `single` mode.
+
+#### Scenario: Cross-origin Referer
+
+- **WHEN** a request in `single` or `oidc` mode asks for `/mode/toggle` with
+  `Referer: https://evil.example/phish`
+- **THEN** the response SHALL redirect to the local path `/phish` and never to `evil.example`
+
+#### Scenario: Protocol-relative or backslash Referer
+
+- **WHEN** a request in `single` or `oidc` mode asks for `/mode/toggle` with
+  `Referer: //evil.example/x` or a value containing a backslash
+- **THEN** the response SHALL redirect to `/`
+
+#### Scenario: Theme toggle returns to the panel page
+
+- **WHEN** a user in `single` mode, or a signed-in user in `oidc` mode, toggles the theme from
+  `/collections`
+- **THEN** the response SHALL redirect back to `/collections` with the same status and cookie as
+  before this change
 
 ### Requirement: Login SHALL use the OIDC authorization code flow with PKCE, state and nonce
 
@@ -171,6 +187,13 @@ still linked, has a `session_epoch` equal to the session's, and the login is you
 `Secure` and `SameSite=Lax` with a max age equal to that lifetime. Logout SHALL be a
 CSRF-protected POST that clears the local session.
 
+#### Scenario: Sign-out on an authenticated error page
+
+- **WHEN** a signed-in user in `oidc` mode requests a nonexistent panel URL
+- **THEN** the 404 page SHALL show that user's username and a sign-out control carrying a valid
+  CSRF token
+- **AND** submitting that control SHALL end the session
+
 #### Scenario: Unlink ends an active session
 
 - **WHEN** a signed-in user is unlinked with `cairn users unlink`
@@ -258,19 +281,32 @@ Callback responses and the refusal page SHALL carry `Referrer-Policy: no-referre
 
 The `cairn` CLI SHALL provide `users list`, `users link --subject SUB [--issuer URL] [--user
 NAME] [--replace]`, `users unlink [--user NAME]` and `users revoke-sessions [--user NAME]`, and
-every CLI command SHALL keep working without any login in every auth mode. `link` SHALL default
-the issuer to `CAIRN_OIDC_ISSUER` and the user to the only user, SHALL require `--user` when more
-than one user exists, SHALL require `--replace` to relink an already-linked user, and SHALL
+in the supported `single` and `oidc` modes every CLI command SHALL keep working without any login
+and without a server running. `multi` mode remains unimplemented: this change makes no promise
+that commands needing an owner work on a fresh `multi` database, and a `users` command that finds
+no user there SHALL exit non-zero with a one-line message. In `oidc` mode `link` SHALL default the
+issuer to `CAIRN_OIDC_ISSUER`; outside `oidc` mode `CAIRN_OIDC_*` settings are ignored by the CLI
+as by the server, so `link` SHALL require `--issuer` and SHALL exit non-zero, changing nothing,
+when it is omitted. `link` SHALL default the user to the only user, SHALL require `--user` when
+more than one user exists, SHALL require `--replace` to relink an already-linked user, and SHALL
 refuse an empty subject, one longer than 255 characters, one containing control characters, and
 a pair already linked to another user. `link`, `unlink` and `revoke-sessions` SHALL increment the
 user's `session_epoch`.
 
 #### Scenario: Link the operator
 
-- **WHEN** an operator runs `cairn users link --subject 1234-abcd` with `CAIRN_OIDC_ISSUER` set
-  and one user in the database
+- **WHEN** an operator runs `cairn users link --subject 1234-abcd` in `oidc` mode with
+  `CAIRN_OIDC_ISSUER` set and one user in the database
 - **THEN** that user SHALL be linked to `(CAIRN_OIDC_ISSUER, "1234-abcd")` with `oidc_linked_at`
   set, and its collections SHALL keep their owner
+
+#### Scenario: Link outside oidc mode needs an explicit issuer
+
+- **WHEN** an operator runs `cairn users link --subject 1234-abcd` in `single` mode with
+  `CAIRN_OIDC_ISSUER` set and no `--issuer`
+- **THEN** the command SHALL exit non-zero naming `--issuer` and change nothing
+- **AND** the same command with `--issuer https://idp.example.com/realms/example` SHALL link the
+  user
 
 #### Scenario: Relink without --replace
 

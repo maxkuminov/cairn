@@ -31,9 +31,11 @@ password store, and gives the operator one place to revoke access.
 - **New auth mode `CAIRN_AUTH_MODE=oidc`.** Every panel route requires a session. `/healthz`
   stays unauthenticated; `/static/*`, the login page, the OIDC start, callback and refusal
   endpoints, logout and the theme toggle are the only other public routes, by an explicit allowlist (default deny, so a future route is protected
-  without anyone remembering to protect it). The CLI keeps working without auth, as it does today.
-  `single` mode is unchanged byte for byte; `multi` is left reserved for the future password /
-  per-user-mount model (design D1).
+  without anyone remembering to protect it). The CLI keeps working without auth in `single` and
+  `oidc`, as it does today. `single` mode is unchanged byte for byte except one security fix: the
+  `/mode/toggle` open redirect (it followed any `Referer` off site) is closed in every mode
+  (design D6). `multi` is left reserved for the future password / per-user-mount model (design
+  D1). Configuration errors name the setting and never echo a secret (design D9).
 - **Federated login only, no password login.** The login page shows one button, **"Sign in with
   SSO"** (the label is defined in one place). Authorization code flow with PKCE S256, `state`,
   `nonce`, RFC 9207 `iss` checking, strict ID-token validation (RS256/PS256/ES256 intersected

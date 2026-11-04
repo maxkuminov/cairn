@@ -36,7 +36,9 @@ fixed below so no slice has to wait on another's guesswork.
   against a seeded fixture database, record status, relevant headers (`content-type`,
   `set-cookie` attributes, `location`, `hx-*`) and body for `/`, `/collections`,
   `/collection/{id}`, `/collection/{id}/review`, `/review`, `/settings`, `/verify`,
-  `/healthz`, `/mode/toggle`, one htmx fragment, and one CSRF-protected POST (ack). Normalize only
+  `/healthz`, `/mode/toggle` (with a same-site `Referer` only: the cross-origin case is fixed by
+  B.4a in every mode and is deliberately not goldened), one htmx fragment, and one
+  CSRF-protected POST (ack). Normalize only
   values that legitimately vary (timestamps, CSRF tokens, session cookie value), and assert the
   normalization did not hide anything else.
 - [ ] 0.2 Record `SessionMiddleware` arguments in `single` mode (secret source, `same_site`,
@@ -76,11 +78,16 @@ Files: `alembic/versions/0013_oidc_identity.py`, `src/models/db.py` (User column
   `--user` requirement, `replace` guard, pair-already-linked refusal, `session_epoch` increments
   on link/unlink/revoke, one commit per call.
 - [ ] A.4 `cairn users list|link|unlink|revoke-sessions` in `src/cli.py`; non-zero exit with a
-  one-line message on `IdentityError`; works in every auth mode without a server running. Assert
+  one-line message on `IdentityError`; works in `single` and `oidc` modes without a server
+  running (`multi` is not supported: with no user the command exits non-zero with one line). The
+  issuer defaults to `CAIRN_OIDC_ISSUER` only in `oidc` mode; outside it `--issuer` is required.
+  Assert
   explicitly that `cairn --help` lists `users` exactly once and that the slice 0 help goldens for
   every pre-existing command still pass unchanged.
 - [ ] A.5 Tests for every scenario under "The CLI SHALL manage identity links…", including the
-  512/513 issuer and 255/256 subject boundaries through the CLI.
+  512/513 issuer and 255/256 subject boundaries through the CLI, `link` in `single` mode with
+  `CAIRN_OIDC_ISSUER` set and no `--issuer` (refused, nothing changed) and with `--issuer`
+  (linked), and a `users` command on a database with no user (non-zero, one line).
 
 ## B. OIDC core and the login wall (after A and C merge)
 
@@ -93,6 +100,12 @@ Files: `src/config.py`, `src/main.py`, `src/database.py` (`ensure_implicit_user`
 - [ ] B.1 Config: `auth_mode` gains `oidc`; the `CAIRN_OIDC_*` settings; the fail-loud
   validation list (D9), reading `public_url` from env/YAML only and requiring `https` in `oidc`
   mode only (an `http` public URL still loads in `single`/`multi`, unchanged). Tests per scenario.
+  Secret-safe errors (design D9): `hide_input_in_errors=True`, `secret_key` and
+  `oidc_client_secret` as `SecretStr` (update every reader to `.get_secret_value()`), custom
+  messages `<SETTING>: <reason>` with no value. Subprocess tests: `cairn serve` once per invalid
+  `oidc` configuration in the D9 list, with recognisable `CAIRN_SECRET_KEY` and
+  `CAIRN_OIDC_CLIENT_SECRET` values, asserting the setting is named and neither secret appears
+  in stdout/stderr.
 - [ ] B.2 `ensure_implicit_user` runs in `single` and `oidc`. `SessionMiddleware` and the CSRF
   serializer take the real key in `oidc` mode with no fallback, `https_only=True`,
   `max_age=CAIRN_OIDC_SESSION_MAX_AGE`; `single` mode arguments unchanged (slice 0 goldens).
@@ -108,12 +121,19 @@ Files: `src/config.py`, `src/main.py`, `src/database.py` (`ensure_implicit_user`
   (303 / htmx 401 + `HX-Redirect` / JSON 401); safe `next`; per-request re-validation (exists,
   active, linked, epoch, absolute lifetime) clearing the session on failure. The local-path rule
   lives in one function used by `next`, the callback redirect and `/mode/toggle`.
-- [ ] B.4a `/mode/toggle` in `oidc` mode: Location = path and query of the `Referer` only when it
-  passes the local-path rule, else `/`. Tests: `Referer: https://evil.example/phish` →
-  `Location: /phish` (never another origin), `//evil.example/x` and a backslash form → `/`, a
-  same-site panel page → that page. `single` mode handler untouched (slice 0 golden).
+- [ ] B.4a `/mode/toggle` in **every** mode: Location = path and query of the `Referer` only when
+  it passes the local-path rule, else `/`. Tests in both `single` and `oidc` mode:
+  `Referer: https://evil.example/phish` → `Location: /phish` (never another origin),
+  `//evil.example/x` and a backslash form → `/`, a same-site panel page → that page with the
+  same status and `cairn_mode` cookie as before. The slice 0 same-site toggle golden passes
+  unchanged.
 - [ ] B.4b `_base_context` passes `session_username` (the session user's name in `oidc`, `None`
   otherwise); a test renders a real panel page in `oidc` mode and finds the sign-out control.
+- [ ] B.4c `panel_error_handler` in `src/main.py`: in `oidc` mode, `session_username` from the user
+  the wall validated for this request (kept on `request.state`, no extra datastore read) and a
+  real CSRF token from the session nonce instead of `""`; `None`/empty for an anonymous request.
+  Test: sign in, request a nonexistent panel URL, assert 404 with the username and a sign-out form
+  whose token is accepted by `POST /auth/logout`. `single` error page unchanged (slice 0).
 - [ ] B.5 `src/auth/routes.py`: `GET /login`, `POST /auth/oidc/start` (CSRF), `GET
   /auth/oidc/callback` (never renders at its own URL: success 303 → `next` with a fresh session,
   protocol failure 303 → `/login?error=failed`, D7 refusal 303 → `/auth/refused` with the one-shot

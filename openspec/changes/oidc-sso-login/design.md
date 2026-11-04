@@ -15,7 +15,9 @@ user is*, not how scoping works.
 
 1. A panel that refuses every request without a session minted from a verified ID token.
 2. Integrity-critical actions bound to that verified identity.
-3. `single` mode byte-for-byte unchanged; the CLI unaffected.
+3. `single` mode byte-for-byte unchanged except one security fix (the `/mode/toggle` open
+   redirect, D6, fixed in every mode); the CLI unaffected in the supported `single` and `oidc`
+   modes.
 4. Works with any standards-compliant OIDC provider that signs ID tokens asymmetrically, with no
    provider-specific code path (the audience profile in D3 accepts multi-audience tokens only when
    `azp` names this client).
@@ -175,8 +177,10 @@ claim are never used for admission (they are mutable at most providers).
 CLI (`cairn users …`), the only management surface in v1 and the break-glass path:
 
 - `list` — username, admin, active, linked issuer, subject, linked-at.
-- `link --subject SUB [--issuer URL] [--user NAME] [--replace]` — issuer defaults to the
-  configured `CAIRN_OIDC_ISSUER` and is validated as above whether given or defaulted; user defaults to the implicit owner and is required when more
+- `link --subject SUB [--issuer URL] [--user NAME] [--replace]` — in `oidc` mode the issuer
+  defaults to the configured `CAIRN_OIDC_ISSUER`; outside `oidc` mode the OIDC settings are
+  ignored (D9) by the CLI too, so `--issuer` is required there and its absence is a one-line
+  error. The issuer is validated as above whether given or defaulted; user defaults to the implicit owner and is required when more
   than one user exists; relinking an already-linked user needs `--replace`; bumps
   `session_epoch`. Refuses a subject that is empty, longer than 255 characters, or contains
   control characters, and a pair already bound to another user.
@@ -185,6 +189,12 @@ CLI (`cairn users …`), the only management surface in v1 and the break-glass p
 
 How the operator learns their subject: the refusal page shows the signed-in person their own
 issuer and subject (D7), or the provider's admin console does (for Keycloak, the user's ID).
+
+**Modes the CLI promises.** Every CLI command (the integrity commands and `users`) works without
+login and without a server in `single` and `oidc`, the two modes that bootstrap an owner. `multi`
+stays an unimplemented placeholder: it bootstraps no user, so owner-dependent commands on a fresh
+`multi` database have nothing to act on; this change does not make `multi` functional and does
+not test it beyond a `users` command exiting non-zero with a one-line message when no user exists.
 
 v1 binds the operator to the existing implicit user, so every collection keeps its owner.
 Additional linked users are future work and would arrive with `multi`. Alert recipients stay
@@ -217,12 +227,23 @@ plain email addresses.
   is left alone (no RP-initiated logout in v1).
 - **Login start is a POST** from the login page with a CSRF token, so a third-party page cannot
   start a flow in the victim's browser.
-- **`/mode/toggle` is public, so it must not be an open redirect.** Today it redirects to the raw
+- **`/mode/toggle` must not be an open redirect, in any mode.** Today it redirects to the raw
   `Referer`, which makes `GET /mode/toggle` with `Referer: https://evil.example/` a redirect off
-  site. In `oidc` mode the handler takes only the path and query of the `Referer`, applies the
-  same local-path rule as `next`, and falls back to `/`; a cross-origin `Referer` therefore lands
-  on a local path, never on another origin. In `single` mode the handler is unchanged (slice 0
-  golden); fixing it there too is a separate decision, recorded under Future decisions.
+  site. The handler now takes only the path and query of the `Referer`, applies the same
+  local-path rule as `next`, and falls back to `/`; a cross-origin `Referer` therefore lands on a
+  local path, never on another origin. This applies in **every** mode, including `single`: the
+  open redirect is a defect, not behaviour worth preserving, and the fix touches only the
+  `Location` for a `Referer` that fails the rule. It is the one deliberate exception to the
+  byte-identical `single` contract; the slice 0 golden records the toggle with a same-site
+  `Referer` only (unchanged), and the cross-origin cases are tested in both modes (B.4a).
+- **Every authenticated page shows the user, including error pages.** `base.html` renders the
+  signed-in username and a CSRF-protected sign-out form in `oidc` mode. Panel pages get
+  `session_username` through `_base_context`; the branded error page in `src/main.py`
+  (`panel_error_handler`) builds its own context with no datastore read and today passes an empty
+  CSRF token. In `oidc` mode it takes the username from the user the wall already validated for
+  this request (stored on `request.state` by the wall, so no second datastore read) and a real
+  CSRF token derived from the session's nonce; an anonymous error page (public paths) shows
+  neither. Owned by slice B, tested with an authenticated 404.
 
 ### D7. Refusals reveal nothing about local users
 
@@ -272,7 +293,18 @@ reachability is **not** checked at startup: an IdP outage must never stop scanni
 logins closed instead.
 
 `CAIRN_SECRET_KEY` has no dev fallback in `oidc` mode, for both the session middleware and the
-CSRF serializer. Outside `oidc` mode the OIDC settings are ignored entirely.
+CSRF serializer. Outside `oidc` mode the OIDC settings are ignored entirely, by the server and by
+the CLI.
+
+**Validation errors never echo secrets.** Pydantic includes the offending input in a validation
+error by default, so a too-short `CAIRN_SECRET_KEY` would be printed to stderr by the very check
+that rejects it, and a model-level error can surface other inputs. The settings model therefore
+sets `hide_input_in_errors=True`, holds `secret_key` and `oidc_client_secret` as `SecretStr`
+(callers use `.get_secret_value()` at the two points that need the value: the session middleware
+and CSRF signer, and the token exchange), and every custom check raises `<SETTING>: <reason>` with
+no value interpolated. A subprocess test runs `cairn serve` once per invalid `oidc` configuration
+listed above with recognisable secret values and asserts neither value appears in stdout/stderr.
+`multi`'s existing secret-key check keeps its wording, which already contains no value.
 
 ### D10. Required group (optional)
 
@@ -334,7 +366,8 @@ feature commits so it can be reviewed on its own.
 | Valid IdP user who is not the operator | no JIT; `(iss, sub)` link required; optional group (D5, D10) |
 | Stolen session after access is removed | per-request re-validation, `session_epoch`, absolute lifetime (D6) |
 | Open redirect via `next` | local-path-only rule (D6) |
-| Open redirect via `/mode/toggle` `Referer` | local-path-only rule in `oidc` mode (D6) |
+| Open redirect via `/mode/toggle` `Referer` | local-path-only rule in every mode (D6) |
+| Secret echoed in a startup validation error | hidden inputs, `SecretStr`, name+reason messages (D9) |
 | Authorization code or state in access logs / history | access-log filter, clean redirects, no-referrer (D11) |
 | Cascade deletion during the migration | in-place `ADD`/`DROP COLUMN`, no rebuild, preservation test (D5) |
 | Login CSRF / session fixation | POST start with CSRF, fresh session on login (D6) |
@@ -374,8 +407,6 @@ additive and its columns are ignored outside `oidc`; downgrading it is not requi
 
 ## Future decisions (not in this change)
 
-- Whether to apply the `/mode/toggle` local-path rule in `single` mode as well (it is an open
-  redirect there today; left untouched here because `single` must stay byte-identical).
 - Whether `/verify` (proof verification for a single file) should be reachable without login.
 - Additional users and how they relate to `multi` and per-user mounts.
 - Step-up re-authentication (`max_age`/`prompt=login`) for Accept.
@@ -392,3 +423,10 @@ additive and its columns are ignored outside `oidc`; downgrading it is not requi
   (tasks 0.2, A.4); whole-tree public-repo scan and a redaction commit (D12, tasks D.8–D.9);
   length CHECKs and issuer validation with boundary tests (D5); multi-audience tokens accepted
   only with `azp` equal to the client (D3).
+- **Codex spec review r2: FAIL** — 2 MAJOR, 1 MINOR, all folded: secret-safe configuration
+  errors (`hide_input_in_errors`, `SecretStr`, name+reason messages, a subprocess test per invalid
+  `oidc` configuration; D9, B.1); CLI guarantee narrowed to the supported `single` and `oidc`
+  modes, and `users link` requires `--issuer` outside `oidc` (D5, A.4/A.5); the authenticated
+  error page gets `session_username` and a valid CSRF token from the wall-validated user (D6,
+  B.4c). Supervisor decision folded at the same time: the `/mode/toggle` open redirect is fixed
+  in `single` mode too (D6, B.4a, slice 0 golden), and removed from Future decisions.
