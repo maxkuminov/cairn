@@ -1,0 +1,25 @@
+{
+  "headers": [
+    [
+      "content-type",
+      "text/html; charset=utf-8"
+    ],
+    [
+      "vary",
+      "Cookie"
+    ]
+  ],
+  "normalized": {
+    "ago": 1,
+    "csrf": 3,
+    "datetime": 1
+  },
+  "request": {
+    "headers": [
+      "Accept"
+    ],
+    "method": "GET",
+    "path": "/review"
+  },
+  "status": 200
+}

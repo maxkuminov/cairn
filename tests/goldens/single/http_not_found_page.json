@@ -1,0 +1,17 @@
+{
+  "headers": [
+    [
+      "content-type",
+      "text/html; charset=utf-8"
+    ]
+  ],
+  "normalized": {},
+  "request": {
+    "headers": [
+      "Accept"
+    ],
+    "method": "GET",
+    "path": "/collection/99999"
+  },
+  "status": 404
+}

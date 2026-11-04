@@ -1,0 +1,24 @@
+{
+  "headers": [
+    [
+      "content-type",
+      "text/html; charset=utf-8"
+    ],
+    [
+      "vary",
+      "Cookie"
+    ]
+  ],
+  "normalized": {
+    "ago": 1
+  },
+  "request": {
+    "headers": [
+      "HX-Request",
+      "X-CSRF-Token"
+    ],
+    "method": "POST",
+    "path": "/events/1/ack"
+  },
+  "status": 200
+}

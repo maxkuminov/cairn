@@ -1,0 +1,635 @@
+
+<!doctype html>
+<html lang="en" data-theme="slate" data-mode="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>fixture · Cairn</title>
+    <meta name="csrf-token" content="<CSRF>" />
+    
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f172a'/%3E%3Cg fill='%2338bdf8'%3E%3Cellipse cx='16' cy='9' rx='4' ry='2.6'/%3E%3Cellipse cx='16' cy='15.5' rx='6.5' ry='3'/%3E%3Cellipse cx='16' cy='22.5' rx='9' ry='3.4'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="http://testserver/static/css/tokens.css" />
+    <link rel="stylesheet" href="http://testserver/static/css/panel.css" />
+    
+    <script src="http://testserver/static/js/htmx.min.js" defer></script>
+    <script>
+      // Send the CSRF token on every htmx mutating request.
+      document.addEventListener("htmx:configRequest", function (e) {
+        var meta = document.querySelector('meta[name="csrf-token"]');
+        if (meta) { e.detail.headers["X-CSRF-Token"] = meta.getAttribute("content"); }
+      });
+
+      // The health pill fails CLOSED. htmx does not swap a 4xx/5xx response, so a failing poll
+      // would otherwise leave the LAST rendered verdict on screen indefinitely — and the verdict
+      // most likely to be standing is "Healthy". A green pill that outlives the datastore is the
+      // fabricated assurance this indicator exists to prevent, so any error that never reaches the
+      // route (a 500 from a failing dependency, a dropped connection, a timeout) neutralizes the
+      // pill in place instead. Defined here, before htmx loads, so both the server-rendered pill
+      // and every swapped-in replacement find it; the element keeps polling, so the next good
+      // answer swaps the real verdict back.
+      window.cairnHealthPillFailed = function (el) {
+        if (!el) { return; }
+        el.classList.remove("is-unknown", "is-degraded");
+        el.classList.add("is-error");
+        var label = el.querySelector(".health-pill__label");
+        if (label) { label.textContent = "Health check failed"; }
+        el.querySelectorAll(".dot__core, .dot__pulse").forEach(function (d) {
+          d.style.background = "var(--danger)";
+        });
+        el.setAttribute("title", "The panel could not reach its own health check — this pill is not reporting a verdict.");
+      };
+      // Belt and braces: a delegated listener catches the same failures even if the element's
+      // inline hooks are ever lost to a swap or a CSP that drops attribute handlers.
+      ["htmx:responseError", "htmx:sendError", "htmx:timeout"].forEach(function (evt) {
+        document.addEventListener(evt, function (e) {
+          var el = e.target;
+          if (el && el.id === "health-pill") { window.cairnHealthPillFailed(el); }
+        });
+      });
+    </script>
+  </head>
+  <body>
+    <div class="cairn-app">
+      
+      <div class="nav-backdrop" id="nav-backdrop"></div>
+      
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar__brand">
+          <svg width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <ellipse cx="16.6" cy="9" rx="6.2" ry="3.1" fill="var(--accent)" opacity="0.95"/>
+  <ellipse cx="15.2" cy="16" rx="8.4" ry="3.7" fill="var(--accent)" opacity="0.78"/>
+  <ellipse cx="16.4" cy="23.4" rx="10.2" ry="4.2" fill="var(--accent)" opacity="0.6"/>
+</svg>
+          <div>
+            <div class="sidebar__brand-name">Cairn</div>
+            <div class="sidebar__brand-eyebrow">Integrity &amp; Notary</div>
+          </div>
+        </div>
+
+        <nav class="sidebar__nav">
+          <a class="nav-item " href="/">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+            <span class="nav-item__label">Dashboard</span>
+            <span id="sidebar-alert-badge">
+              <span class="nav-badge" title="2 files missing or changed — open dashboard" aria-label="2 files missing or changed — open dashboard">2</span>
+            </span>
+          </a>
+          <a class="nav-item " href="/collections">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.6"/><path d="M5 6v5c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V6"/><path d="M5 12v5c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6v-5"/></svg><span class="nav-item__label">Collections</span>
+          </a>
+          <a class="nav-item " href="/verify">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6l7-3z"/><path d="M9 11.5l2 2 4-4"/></svg><span class="nav-item__label">Verify proof</span>
+          </a>
+          <a class="nav-item " href="/learn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg><span class="nav-item__label">How it works</span>
+          </a>
+
+          <div class="sidebar__divider"></div>
+          <div class="sidebar__label">Collections</div>
+          
+            <a class="collection-row" href="/collection/1">
+              <span class="dot"><span class="dot__pulse" style="background:var(--danger)"></span><span class="dot__core" style="width:7px;height:7px;background:var(--danger)"></span>
+</span>
+              <span class="collection-row__name">fixture</span>
+              <span class="collection-row__count">5</span>
+            </a>
+          
+          <a class="add-collection" href="/collection/new"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg> Add collection</a>
+        </nav>
+
+        <div class="sidebar__footer">
+          <a class="nav-item " href="/settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M22 12h-3M5 12H2M19.1 4.9l-2.1 2.1M7 17l-2.1 2.1M19.1 19.1L17 17M7 7L4.9 4.9"/></svg><span class="nav-item__label">Settings</span>
+          </a>
+          <div class="user-block">
+            <div class="avatar">L</div>
+            <div style="flex:1;min-width:0">
+              <div class="user-block__name">local<span class="admin-chip">ADMIN</span></div>
+              <div class="user-block__email">local@localhost</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      
+      <div class="main-col">
+        <header class="topbar">
+          <button class="icon-btn nav-toggle" id="nav-toggle" type="button"
+                  aria-label="Open navigation" aria-controls="sidebar">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+          </button>
+          
+          <form class="topbar__search" action="/verify" method="get" role="search">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg><input type="search" name="q" placeholder="Search files and paths…"
+                   aria-label="Search files and paths"
+                   value="" />
+          </form>
+          <div class="topbar__spacer"></div>
+
+          
+          
+            <a id="health-pill" href="/collections"
+   hx-get="/health-pill" hx-trigger="load, every 30s" hx-swap="outerHTML"
+   hx-on::response-error="window.cairnHealthPillFailed(this)"
+   hx-on::send-error="window.cairnHealthPillFailed(this)"
+   hx-on::timeout="window.cairnHealthPillFailed(this)"
+   class="health-pill is-unknown"
+   title="Collection scan freshness — exposed at /healthz for external monitors">
+  <span class="dot"><span class="dot__core" style="width:7px;height:7px;background:var(--text-3)"></span>
+</span>
+  <span class="health-pill__label">Checking&hellip;</span>
+  <span class="health-pill__url mono">/healthz</span>
+</a>
+          
+
+          <a class="icon-btn" href="/mode/toggle"
+             title="Switch to dark mode"
+             aria-label="Switch to dark mode">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+          </a>
+          
+          
+        </header>
+
+        <main class="content">
+          
+<div class="page-header">
+  <div>
+    <a class="back-link" href="/"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg> All collections</a>
+    <h1>fixture</h1>
+  </div>
+  <div class="page-header__actions">
+    <a class="btn" href="/collection/1/edit"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M22 12h-3M5 12H2M19.1 4.9l-2.1 2.1M7 17l-2.1 2.1M19.1 19.1L17 17M7 7L4.9 4.9"/></svg> Edit</a>
+    
+    <form hx-post="/collection/1/scan" hx-target="#op-status-1" hx-swap="outerHTML" style="display:inline">
+      <button class="btn btn--subtle" type="submit"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 4v4h-4"/></svg> Scan now</button>
+    </form>
+    
+      
+      <form hx-post="/collection/1/stamp-all" hx-target="#op-status-1" hx-swap="outerHTML"
+            hx-disabled-elt="find button" style="display:inline">
+        <button class="btn btn--subtle" type="submit"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 7.5h4a2.2 2.2 0 0 1 0 4.5h-4M9.5 12h4.3a2.2 2.2 0 0 1 0 4.5H9.5M9.5 7.5v9M11 6v1.5M11 16.5V18M13 6v1.5M13 16.5V18"/></svg> Stamp all</button>
+      </form>
+    
+    
+    
+      <a class="btn btn--primary" href="/collection/1/review"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.8 2.4 18a1.9 1.9 0 0 0 1.7 2.9h15.8a1.9 1.9 0 0 0 1.7-2.9L13.7 3.8a1.9 1.9 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg> Review issues</a>
+    
+  </div>
+</div>
+
+
+<div class="card card--flush" style="margin-bottom:20px">
+  <div class="meta-strip">
+    <div class="meta-cell meta-cell--wide">
+      <div class="meta-cell__label">Status</div>
+      
+      <div class="meta-cell__value">
+
+<span id="op-status-1" class="op-status"
+      >
+  
+    <span class="pill pill--soft pill--danger"><svg width="12.5" height="12.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>Alert</span>
+  
+</span></div>
+      
+      
+    </div>
+    
+    <div class="meta-cell"><div class="meta-cell__label">Root path</div><div class="meta-cell__value mono" style="font-size:12px" title="<TMP>/fixture"><TMP>/fixture</div></div>
+    <div class="meta-cell"><div class="meta-cell__label">Policy</div><div class="meta-cell__value" style="text-transform:uppercase;letter-spacing:0.03em">worm</div></div>
+    <div class="meta-cell"><div class="meta-cell__label">Notarization</div><div class="meta-cell__value">Per-file · new files only</div></div>
+    <div class="meta-cell"><div class="meta-cell__label">Scan cadence</div><div class="meta-cell__value">Every 15 minutes</div></div>
+    <div class="meta-cell" style="border-right:none"><div class="meta-cell__label">Owner</div><div class="meta-cell__value">local</div></div>
+  </div>
+</div>
+
+
+<div class="stat-row">
+  <div class="card mini-stat">
+    <div class="mini-stat__label"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg><span>Total files</span></div>
+    <div class="mini-stat__value">5</div>
+    <div class="mini-stat__sub">50 B</div>
+  </div>
+  <div class="card mini-stat">
+    <div class="mini-stat__label"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg><span>Matching baseline</span></div>
+    <div class="mini-stat__value" style="color:var(--ok)">2</div>
+    
+  </div>
+  
+  <div class="card mini-stat">
+    <div class="mini-stat__label"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg><span>New files</span></div>
+    <div class="mini-stat__value" style="color:var(--accent)">1</div>
+    <div class="mini-stat__sub">watched, not yet baselined</div>
+  </div>
+  
+  <a class="card mini-stat mini-stat--link" href="/collection/1/review">
+    <div class="mini-stat__label"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.8 2.4 18a1.9 1.9 0 0 0 1.7 2.9h15.8a1.9 1.9 0 0 0 1.7-2.9L13.7 3.8a1.9 1.9 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg><span>Changed / missing</span></div>
+    <div class="mini-stat__value" style="color:var(--danger)">2</div>
+    <div class="mini-stat__sub">1 missing · 1 modified <span class="mini-stat__cta">· Review <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg></span></div>
+  </a>
+  
+  
+    <div class="card mini-stat">
+      <div class="mini-stat__label"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 7.5h4a2.2 2.2 0 0 1 0 4.5h-4M9.5 12h4.3a2.2 2.2 0 0 1 0 4.5H9.5M9.5 7.5v9M11 6v1.5M11 16.5V18M13 6v1.5M13 16.5V18"/></svg><span>Anchored to chain</span></div>
+      <div class="mini-stat__value" style="color:var(--accent)">2</div>
+      
+      <div class="mini-stat__sub">2 / 4 confirmed · 1 pending confirmation</div>
+      <div class="mini-stat__sub" style="color:var(--warn)">1 not stamped — use Stamp all</div>
+    </div>
+  
+</div>
+
+
+<div class="card card--flush browser" id="browser-1" data-view="tree">
+  <div class="table-toolbar">
+    <h3 style="font-size:14.5px">Files</h3>
+    <div class="seg view-toggle">
+      <button type="button" class="seg__btn is-active" data-view="tree"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> Tree</button>
+      <button type="button" class="seg__btn " data-view="list"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.6"/><path d="M5 6v5c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V6"/><path d="M5 12v5c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6v-5"/></svg> List</button>
+    </div>
+    <div class="table-search browser-list-only" style="margin-left:auto">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>
+      <input type="search" name="q" placeholder="Search 5 files by path…"
+             hx-get="/collection/1/files"
+             hx-trigger="keyup changed delay:200ms, search"
+             hx-target="#file-table" hx-swap="outerHTML"
+             hx-include="[name='filter'],[name='sort'],[name='dir']" />
+    </div>
+    <div class="seg filter-seg browser-list-only">
+      
+        <label class="seg__btn is-active">
+          <input type="radio" name="filter" value="all" checked style="display:none"
+                 hx-get="/collection/1/files" hx-target="#file-table" hx-swap="outerHTML"
+                 hx-include="[name='q'],[name='sort'],[name='dir']" />
+          All
+        </label>
+      
+        <label class="seg__btn ">
+          <input type="radio" name="filter" value="issues"  style="display:none"
+                 hx-get="/collection/1/files" hx-target="#file-table" hx-swap="outerHTML"
+                 hx-include="[name='q'],[name='sort'],[name='dir']" />
+          Issues
+        </label>
+      
+        <label class="seg__btn ">
+          <input type="radio" name="filter" value="new"  style="display:none"
+                 hx-get="/collection/1/files" hx-target="#file-table" hx-swap="outerHTML"
+                 hx-include="[name='q'],[name='sort'],[name='dir']" />
+          New
+        </label>
+      
+        <label class="seg__btn ">
+          <input type="radio" name="filter" value="ok"  style="display:none"
+                 hx-get="/collection/1/files" hx-target="#file-table" hx-swap="outerHTML"
+                 hx-include="[name='q'],[name='sort'],[name='dir']" />
+          OK
+        </label>
+      
+    </div>
+  </div>
+  <div class="browser-tree">
+    
+
+<div class="tree-level">
+  
+    <div class="tree-folder">
+      
+      <button type="button" class="tree-row tree-row--folder"
+              hx-get="/collection/1/tree?prefix=gone/"
+              hx-target="next .tree-children" hx-swap="innerHTML"
+              hx-trigger="click once"
+              onclick="this.parentElement.classList.toggle('is-open')">
+        <span class="tree-caret"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg></span>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span class="tree-row__name mono">gone</span>
+        
+          <span class="tree-issue" title="1 file(s) modified or missing beneath this folder"><span class="dot"><span class="dot__core" style="width:7px;height:7px;background:var(--danger)"></span>
+</span></span>
+        
+        <span class="tree-row__count">1</span>
+      </button>
+      <div class="tree-children"></div>
+    </div>
+  
+    <div class="tree-folder">
+      
+      <button type="button" class="tree-row tree-row--folder"
+              hx-get="/collection/1/tree?prefix=mod/"
+              hx-target="next .tree-children" hx-swap="innerHTML"
+              hx-trigger="click once"
+              onclick="this.parentElement.classList.toggle('is-open')">
+        <span class="tree-caret"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg></span>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span class="tree-row__name mono">mod</span>
+        
+          <span class="tree-issue" title="1 file(s) modified or missing beneath this folder"><span class="dot"><span class="dot__core" style="width:7px;height:7px;background:var(--danger)"></span>
+</span></span>
+        
+        <span class="tree-row__count">1</span>
+      </button>
+      <div class="tree-children"></div>
+    </div>
+  
+    <div class="tree-folder">
+      
+      <button type="button" class="tree-row tree-row--folder"
+              hx-get="/collection/1/tree?prefix=new/"
+              hx-target="next .tree-children" hx-swap="innerHTML"
+              hx-trigger="click once"
+              onclick="this.parentElement.classList.toggle('is-open')">
+        <span class="tree-caret"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg></span>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span class="tree-row__name mono">new</span>
+        
+        <span class="tree-row__count">1</span>
+      </button>
+      <div class="tree-children"></div>
+    </div>
+  
+    <div class="tree-folder">
+      
+      <button type="button" class="tree-row tree-row--folder"
+              hx-get="/collection/1/tree?prefix=ok/"
+              hx-target="next .tree-children" hx-swap="innerHTML"
+              hx-trigger="click once"
+              onclick="this.parentElement.classList.toggle('is-open')">
+        <span class="tree-caret"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg></span>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        <span class="tree-row__name mono">ok</span>
+        
+        <span class="tree-row__count">2</span>
+      </button>
+      <div class="tree-children"></div>
+    </div>
+  
+
+  
+
+  
+</div>
+  </div>
+  <div class="browser-list">
+    <div class="table-scroll">
+      <div id="file-table">
+  
+  <input type="hidden" name="sort" value="modified" />
+  <input type="hidden" name="dir" value="desc" />
+  <div class="file-grid  file-head">
+    <span class="file-sort"
+      role="button" tabindex="0" aria-label="Sort by Path"
+      hx-get="/collection/1/files"
+      hx-vals='{"sort": "path", "dir": "asc"}'
+      hx-target="#file-table" hx-swap="outerHTML"
+      hx-include="[name='q'],[name='filter']">
+  Path
+</span>
+    <span class="file-sort"
+      role="button" tabindex="0" aria-label="Sort by Size"
+      hx-get="/collection/1/files"
+      hx-vals='{"sort": "size", "dir": "asc"}'
+      hx-target="#file-table" hx-swap="outerHTML"
+      hx-include="[name='q'],[name='filter']">
+  Size
+</span>
+    <span>Status</span>
+    
+      <span class="file-sort"
+      role="button" tabindex="0" aria-label="Sort by Notarized"
+      hx-get="/collection/1/files"
+      hx-vals='{"sort": "notarized", "dir": "desc"}'
+      hx-target="#file-table" hx-swap="outerHTML"
+      hx-include="[name='q'],[name='filter']">
+  Notarized
+</span>
+    
+    <span class="file-sort ta-right"
+      role="button" tabindex="0" aria-label="Sort by Last checked"
+      hx-get="/collection/1/files"
+      hx-vals='{"sort": "checked", "dir": "desc"}'
+      hx-target="#file-table" hx-swap="outerHTML"
+      hx-include="[name='q'],[name='filter']">
+  Last checked
+</span>
+  </div>
+  <div>
+    
+      <div class="file-grid  file-row">
+  <div class="file-row__path">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+    <span class="mono">gone/delta.txt</span>
+  </div>
+  <span class="file-row__size">10 B</span>
+  <span class="pill pill--soft pill--danger pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>Missing</span>
+  
+    <div class="file-row__notarized">
+      
+      <a class="ots-badge" href="/verify?file=4"
+         title="Check this file's notarization status"><span class="pill pill--soft pill--muted pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>Not stamped</span></a>
+      <span class="file-row__date">—</span>
+    </div>
+  
+  <span class="file-row__checked ta-right"><AGO></span>
+</div>
+    
+      <div class="file-grid  file-row">
+  <div class="file-row__path">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+    <span class="mono">mod/gamma.txt</span>
+  </div>
+  <span class="file-row__size">10 B</span>
+  <span class="pill pill--soft pill--warn pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.8 2.4 18a1.9 1.9 0 0 0 1.7 2.9h15.8a1.9 1.9 0 0 0 1.7-2.9L13.7 3.8a1.9 1.9 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>Modified</span>
+  
+    <div class="file-row__notarized">
+      
+      <a class="ots-badge" href="/verify?file=3"
+         title="Check this file's notarization status"><span class="pill pill--soft pill--warn pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Pending confirmation</span></a>
+      <span class="file-row__date">—</span>
+    </div>
+  
+  <span class="file-row__checked ta-right"><AGO></span>
+</div>
+    
+      <div class="file-grid  file-row">
+  <div class="file-row__path">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+    <span class="mono">new/epsilon.txt</span>
+  </div>
+  <span class="file-row__size">10 B</span>
+  <span class="pill pill--soft pill--accent pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>New</span>
+  
+    <div class="file-row__notarized">
+      
+      <a class="ots-badge" href="/verify?file=5"
+         title="Check this file's notarization status"><span class="pill pill--soft pill--muted pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>Not stamped</span></a>
+      <span class="file-row__date">—</span>
+    </div>
+  
+  <span class="file-row__checked ta-right"><AGO></span>
+</div>
+    
+      <div class="file-grid  file-row">
+  <div class="file-row__path">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+    <span class="mono">ok/alpha.txt</span>
+  </div>
+  <span class="file-row__size">10 B</span>
+  <span class="pill pill--soft pill--ok pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>OK</span>
+  
+    <div class="file-row__notarized">
+      
+      <a class="ots-badge" href="/verify?file=1"
+         title="Verify this proof for the block-confirmed date"><span class="pill pill--soft pill--ok pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 7.5h4a2.2 2.2 0 0 1 0 4.5h-4M9.5 12h4.3a2.2 2.2 0 0 1 0 4.5H9.5M9.5 7.5v9M11 6v1.5M11 16.5V18M13 6v1.5M13 16.5V18"/></svg>Anchored</span></a>
+      <span class="file-row__date">—</span>
+    </div>
+  
+  <span class="file-row__checked ta-right"><AGO></span>
+</div>
+    
+      <div class="file-grid  file-row">
+  <div class="file-row__path">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+    <span class="mono">ok/beta.txt</span>
+  </div>
+  <span class="file-row__size">10 B</span>
+  <span class="pill pill--soft pill--ok pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>OK</span>
+  
+    <div class="file-row__notarized">
+      
+      <a class="ots-badge" href="/verify?file=2"
+         title="Verify this proof for the block-confirmed date"><span class="pill pill--soft pill--ok pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 7.5h4a2.2 2.2 0 0 1 0 4.5h-4M9.5 12h4.3a2.2 2.2 0 0 1 0 4.5H9.5M9.5 7.5v9M11 6v1.5M11 16.5V18M13 6v1.5M13 16.5V18"/></svg>Anchored</span></a>
+      <span class="file-row__date">—</span>
+    </div>
+  
+  <span class="file-row__checked ta-right"><AGO></span>
+</div>
+    
+    
+  </div><div class="table-footer">
+    <span>
+      Showing 5 of 5 files
+    </span>
+    <div class="pager">
+      <button type="button" class="pager__btn" disabled
+              hx-get="/collection/1/files"
+              hx-vals='{"page": -1, "sort": "modified", "dir": "desc"}'
+              hx-target="#file-table" hx-swap="outerHTML"
+              hx-include="[name='q'],[name='filter']">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="pager__caret is-prev"><path d="m9 6 6 6-6 6"/></svg> Prev
+      </button>
+      <span class="pager__label">Page 1 of 1</span>
+      <button type="button" class="pager__btn" disabled
+              hx-get="/collection/1/files"
+              hx-vals='{"page": 1, "sort": "modified", "dir": "desc"}'
+              hx-target="#file-table" hx-swap="outerHTML"
+              hx-include="[name='q'],[name='filter']">
+        Next <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="pager__caret"><path d="m9 6 6 6-6 6"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
+    </div>
+  </div>
+</div>
+
+<script>
+  (function () {
+    // Tree ⇄ List toggle: flip the browser's data-view; CSS hides the inactive region + the
+    // list-only search/filter while in tree mode.
+    var browser = document.getElementById("browser-1");
+    if (browser) {
+      browser.querySelectorAll(".view-toggle .seg__btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          browser.dataset.view = btn.getAttribute("data-view");
+          browser.querySelectorAll(".view-toggle .seg__btn").forEach(function (b) { b.classList.remove("is-active"); });
+          btn.classList.add("is-active");
+        });
+      });
+    }
+  })();
+  // Keep the filter segmented control's active class in sync (scoped to its own group, so the
+  // Tree/List toggle's active state is left untouched).
+  document.addEventListener("change", function (e) {
+    if (e.target && e.target.name === "filter") {
+      var seg = e.target.closest(".seg");
+      if (seg) {
+        seg.querySelectorAll(".seg__btn").forEach(function (b) { b.classList.remove("is-active"); });
+        var lbl = e.target.closest(".seg__btn");
+        if (lbl) { lbl.classList.add("is-active"); }
+      }
+    }
+  });
+</script>
+
+        </main>
+      </div>
+    </div>
+    
+    
+<script>
+  (function () {
+    // Hidden-textarea + execCommand: the pre-async-clipboard path, still the only one that works
+    // on an insecure origin. Also the fallback when a secure-context write is rejected (permission
+    // policy, a document that isn't focused).
+    function legacyCopy(text) {
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "-1000px";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        var ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        return !!ok;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    // The visible outcome. `note` is an element or the id of one; a caller with nowhere to report
+    // to still gets the copy attempted.
+    window.cairnCopyReport = function (note, ok) {
+      if (typeof note === "string") { note = document.getElementById(note); }
+      if (!note) return;
+      note.textContent = ok ? "Copied ✓" : "Couldn't copy — select the text and copy it manually";
+      note.style.color = ok ? "" : "var(--danger)";
+      note.hidden = false;
+      setTimeout(function () { note.hidden = true; }, ok ? 1800 : 5000);
+    };
+
+    window.cairnCopy = function (text, note) {
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(function () {
+          window.cairnCopyReport(note, true);
+        }).catch(function () {
+          window.cairnCopyReport(note, legacyCopy(text));
+        });
+      } else {
+        window.cairnCopyReport(note, legacyCopy(text));
+      }
+    };
+  })();
+</script>
+    <script>
+      // Mobile nav drawer: the hamburger toggles `body.nav-open`; the backdrop and any sidebar
+      // link close it. No-op on desktop (the drawer styles only apply under the breakpoint).
+      (function () {
+        var body = document.body;
+        var close = function () { body.classList.remove("nav-open"); };
+        var toggle = document.getElementById("nav-toggle");
+        if (toggle) {
+          toggle.addEventListener("click", function () { body.classList.toggle("nav-open"); });
+        }
+        var backdrop = document.getElementById("nav-backdrop");
+        if (backdrop) { backdrop.addEventListener("click", close); }
+        document.querySelectorAll(".sidebar a").forEach(function (a) {
+          a.addEventListener("click", close);
+        });
+      })();
+    </script>
+  </body>
+</html>

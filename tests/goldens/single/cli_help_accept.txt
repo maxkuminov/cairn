@@ -1,0 +1,12 @@
+usage: cairn accept [-h] [--collection COLLECTION]
+
+Re-baseline a collection's acknowledged changes: new and modified files become ok, missing files'
+records are removed, and every open event on the collection is acknowledged. This is the UNSCOPED
+legacy verb — it acts on all three populations at once. For the scoped verbs, each named for the
+one thing it does (baseline new files / adopt changed files / stop tracking missing files, or
+accept a single file), use the web panel's collection and review pages.
+
+options:
+  -h, --help            show this help message and exit
+  --collection COLLECTION, --corpus COLLECTION
+                        Collection name (default: all)

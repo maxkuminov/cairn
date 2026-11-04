@@ -1,0 +1,30 @@
+{
+  "headers": [
+    [
+      "content-type",
+      "text/html; charset=utf-8"
+    ],
+    [
+      "set-cookie",
+      "session=<SESSION>; path=/; Max-Age=1209600; httponly; samesite=lax"
+    ],
+    [
+      "vary",
+      "Cookie"
+    ]
+  ],
+  "normalized": {
+    "ago": 4,
+    "csrf": 2,
+    "session_cookie": 1,
+    "tmp": 1
+  },
+  "request": {
+    "headers": [
+      "Accept"
+    ],
+    "method": "GET",
+    "path": "/"
+  },
+  "status": 200
+}

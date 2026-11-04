@@ -1,0 +1,7 @@
+usage: cairn bench [-h] [--path PATH] [--bytes BYTES] [--estimate]
+
+options:
+  -h, --help     show this help message and exit
+  --path PATH    Measure real throughput over files under DIR (default: in-memory)
+  --bytes BYTES  Bytes to hash for the probe (suffixes: KiB/MiB/GiB)
+  --estimate     Also estimate per-collection deep-scan duration

@@ -1,0 +1,7 @@
+usage: cairn stamp [-h] [--collection COLLECTION] [--all]
+
+options:
+  -h, --help            show this help message and exit
+  --collection COLLECTION, --corpus COLLECTION
+                        Collection name (default: the only one)
+  --all                 Also stamp the existing unstamped baseline (ots_state=none, non-missing)

@@ -1,0 +1,16 @@
+{
+  "csrf_secret_source": "built-in-dev-fallback",
+  "effective": {
+    "domain": null,
+    "https_only": false,
+    "max_age": 1209600,
+    "partitioned": false,
+    "path": "/",
+    "same_site": "lax",
+    "session_cookie": "session"
+  },
+  "explicit_kwargs": [
+    "same_site"
+  ],
+  "secret_source": "built-in-dev-fallback"
+}

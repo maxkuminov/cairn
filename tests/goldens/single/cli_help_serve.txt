@@ -1,0 +1,6 @@
+usage: cairn serve [-h] [--host HOST] [--port PORT]
+
+options:
+  -h, --help   show this help message and exit
+  --host HOST  Bind host (default from config)
+  --port PORT  Bind port (default from config)

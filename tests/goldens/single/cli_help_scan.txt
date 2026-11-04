@@ -1,0 +1,7 @@
+usage: cairn scan [-h] [--collection COLLECTION] [--once]
+
+options:
+  -h, --help            show this help message and exit
+  --collection COLLECTION, --corpus COLLECTION
+                        Collection name (default: all)
+  --once                Single pass (cron-friendly)

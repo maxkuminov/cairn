@@ -1,0 +1,25 @@
+{
+  "headers": [
+    [
+      "content-type",
+      "text/html; charset=utf-8"
+    ],
+    [
+      "vary",
+      "Cookie"
+    ]
+  ],
+  "normalized": {
+    "ago": 5,
+    "csrf": 1,
+    "tmp": 2
+  },
+  "request": {
+    "headers": [
+      "Accept"
+    ],
+    "method": "GET",
+    "path": "/collection/1"
+  },
+  "status": 200
+}

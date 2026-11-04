@@ -1,0 +1,13 @@
+{
+  "collections": [
+    {
+      "id": 1,
+      "last_scan_age_seconds": "<AGE>",
+      "name": "fixture",
+      "state": "fresh"
+    }
+  ],
+  "mode": "single",
+  "status": "ok",
+  "version": "<VERSION>"
+}

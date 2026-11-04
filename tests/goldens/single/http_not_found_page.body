@@ -1,0 +1,235 @@
+
+<!doctype html>
+<html lang="en" data-theme="slate" data-mode="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>404 · Cairn</title>
+    <meta name="csrf-token" content="" />
+    
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f172a'/%3E%3Cg fill='%2338bdf8'%3E%3Cellipse cx='16' cy='9' rx='4' ry='2.6'/%3E%3Cellipse cx='16' cy='15.5' rx='6.5' ry='3'/%3E%3Cellipse cx='16' cy='22.5' rx='9' ry='3.4'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="http://testserver/static/css/tokens.css" />
+    <link rel="stylesheet" href="http://testserver/static/css/panel.css" />
+    
+    <script src="http://testserver/static/js/htmx.min.js" defer></script>
+    <script>
+      // Send the CSRF token on every htmx mutating request.
+      document.addEventListener("htmx:configRequest", function (e) {
+        var meta = document.querySelector('meta[name="csrf-token"]');
+        if (meta) { e.detail.headers["X-CSRF-Token"] = meta.getAttribute("content"); }
+      });
+
+      // The health pill fails CLOSED. htmx does not swap a 4xx/5xx response, so a failing poll
+      // would otherwise leave the LAST rendered verdict on screen indefinitely — and the verdict
+      // most likely to be standing is "Healthy". A green pill that outlives the datastore is the
+      // fabricated assurance this indicator exists to prevent, so any error that never reaches the
+      // route (a 500 from a failing dependency, a dropped connection, a timeout) neutralizes the
+      // pill in place instead. Defined here, before htmx loads, so both the server-rendered pill
+      // and every swapped-in replacement find it; the element keeps polling, so the next good
+      // answer swaps the real verdict back.
+      window.cairnHealthPillFailed = function (el) {
+        if (!el) { return; }
+        el.classList.remove("is-unknown", "is-degraded");
+        el.classList.add("is-error");
+        var label = el.querySelector(".health-pill__label");
+        if (label) { label.textContent = "Health check failed"; }
+        el.querySelectorAll(".dot__core, .dot__pulse").forEach(function (d) {
+          d.style.background = "var(--danger)";
+        });
+        el.setAttribute("title", "The panel could not reach its own health check — this pill is not reporting a verdict.");
+      };
+      // Belt and braces: a delegated listener catches the same failures even if the element's
+      // inline hooks are ever lost to a swap or a CSP that drops attribute handlers.
+      ["htmx:responseError", "htmx:sendError", "htmx:timeout"].forEach(function (evt) {
+        document.addEventListener(evt, function (e) {
+          var el = e.target;
+          if (el && el.id === "health-pill") { window.cairnHealthPillFailed(el); }
+        });
+      });
+    </script>
+  </head>
+  <body>
+    <div class="cairn-app">
+      
+      <div class="nav-backdrop" id="nav-backdrop"></div>
+      
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar__brand">
+          <svg width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+  <ellipse cx="16.6" cy="9" rx="6.2" ry="3.1" fill="var(--accent)" opacity="0.95"/>
+  <ellipse cx="15.2" cy="16" rx="8.4" ry="3.7" fill="var(--accent)" opacity="0.78"/>
+  <ellipse cx="16.4" cy="23.4" rx="10.2" ry="4.2" fill="var(--accent)" opacity="0.6"/>
+</svg>
+          <div>
+            <div class="sidebar__brand-name">Cairn</div>
+            <div class="sidebar__brand-eyebrow">Integrity &amp; Notary</div>
+          </div>
+        </div>
+
+        <nav class="sidebar__nav">
+          <a class="nav-item " href="/">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>
+            <span class="nav-item__label">Dashboard</span>
+            <span id="sidebar-alert-badge">
+              
+            </span>
+          </a>
+          <a class="nav-item " href="/collections">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="7" ry="2.6"/><path d="M5 6v5c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V6"/><path d="M5 12v5c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6v-5"/></svg><span class="nav-item__label">Collections</span>
+          </a>
+          <a class="nav-item " href="/verify">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.4-3 7.6-7 9-4-1.4-7-4.6-7-9V6l7-3z"/><path d="M9 11.5l2 2 4-4"/></svg><span class="nav-item__label">Verify proof</span>
+          </a>
+          <a class="nav-item " href="/learn">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg><span class="nav-item__label">How it works</span>
+          </a>
+
+          <div class="sidebar__divider"></div>
+          <div class="sidebar__label">Collections</div>
+          
+          <a class="add-collection" href="/collection/new"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg> Add collection</a>
+        </nav>
+
+        <div class="sidebar__footer">
+          <a class="nav-item " href="/settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M22 12h-3M5 12H2M19.1 4.9l-2.1 2.1M7 17l-2.1 2.1M19.1 19.1L17 17M7 7L4.9 4.9"/></svg><span class="nav-item__label">Settings</span>
+          </a>
+          <div class="user-block">
+            <div class="avatar">?</div>
+            <div style="flex:1;min-width:0">
+              <div class="user-block__name"></div>
+              <div class="user-block__email"></div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      
+      <div class="main-col">
+        <header class="topbar">
+          <button class="icon-btn nav-toggle" id="nav-toggle" type="button"
+                  aria-label="Open navigation" aria-controls="sidebar">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+          </button>
+          
+          <form class="topbar__search" action="/verify" method="get" role="search">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg><input type="search" name="q" placeholder="Search files and paths…"
+                   aria-label="Search files and paths"
+                   value="" />
+          </form>
+          <div class="topbar__spacer"></div>
+
+          
+          
+            <a id="health-pill" href="/collections"
+   hx-get="/health-pill" hx-trigger="load, every 30s" hx-swap="outerHTML"
+   hx-on::response-error="window.cairnHealthPillFailed(this)"
+   hx-on::send-error="window.cairnHealthPillFailed(this)"
+   hx-on::timeout="window.cairnHealthPillFailed(this)"
+   class="health-pill is-unknown"
+   title="Collection scan freshness — exposed at /healthz for external monitors">
+  <span class="dot"><span class="dot__core" style="width:7px;height:7px;background:var(--text-3)"></span>
+</span>
+  <span class="health-pill__label">Checking&hellip;</span>
+  <span class="health-pill__url mono">/healthz</span>
+</a>
+          
+
+          <a class="icon-btn" href="/mode/toggle"
+             title="Switch to dark mode"
+             aria-label="Switch to dark mode">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+          </a>
+          
+          
+        </header>
+
+        <main class="content">
+          
+<div class="page-header">
+  <div>
+    <h1>Page not found</h1>
+    <div class="page-header__sub">This collection no longer exists, or the link is from a different Cairn instance. Nothing is wrong with your files — only the address is stale.</div>
+  </div>
+</div>
+
+<div class="card empty-state" style="padding:48px 24px">
+  <div class="mono" style="font-size:34px;font-weight:600;color:var(--text-3)">404</div>
+  <div style="margin-top:8px">collection not found</div>
+  <div style="margin-top:20px">
+    <a class="btn btn--primary" href="/"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg> Back to the dashboard</a>
+  </div>
+</div>
+
+        </main>
+      </div>
+    </div>
+    
+    
+<script>
+  (function () {
+    // Hidden-textarea + execCommand: the pre-async-clipboard path, still the only one that works
+    // on an insecure origin. Also the fallback when a secure-context write is rejected (permission
+    // policy, a document that isn't focused).
+    function legacyCopy(text) {
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "-1000px";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        var ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        return !!ok;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    // The visible outcome. `note` is an element or the id of one; a caller with nowhere to report
+    // to still gets the copy attempted.
+    window.cairnCopyReport = function (note, ok) {
+      if (typeof note === "string") { note = document.getElementById(note); }
+      if (!note) return;
+      note.textContent = ok ? "Copied ✓" : "Couldn't copy — select the text and copy it manually";
+      note.style.color = ok ? "" : "var(--danger)";
+      note.hidden = false;
+      setTimeout(function () { note.hidden = true; }, ok ? 1800 : 5000);
+    };
+
+    window.cairnCopy = function (text, note) {
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(function () {
+          window.cairnCopyReport(note, true);
+        }).catch(function () {
+          window.cairnCopyReport(note, legacyCopy(text));
+        });
+      } else {
+        window.cairnCopyReport(note, legacyCopy(text));
+      }
+    };
+  })();
+</script>
+    <script>
+      // Mobile nav drawer: the hamburger toggles `body.nav-open`; the backdrop and any sidebar
+      // link close it. No-op on desktop (the drawer styles only apply under the breakpoint).
+      (function () {
+        var body = document.body;
+        var close = function () { body.classList.remove("nav-open"); };
+        var toggle = document.getElementById("nav-toggle");
+        if (toggle) {
+          toggle.addEventListener("click", function () { body.classList.toggle("nav-open"); });
+        }
+        var backdrop = document.getElementById("nav-backdrop");
+        if (backdrop) { backdrop.addEventListener("click", close); }
+        document.querySelectorAll(".sidebar a").forEach(function (a) {
+          a.addEventListener("click", close);
+        });
+      })();
+    </script>
+  </body>
+</html>

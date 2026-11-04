@@ -1,0 +1,10 @@
+usage: cairn export [-h] [--collection COLLECTION] [--out OUT] relpath
+
+positional arguments:
+  relpath               File path relative to the collection root
+
+options:
+  -h, --help            show this help message and exit
+  --collection COLLECTION, --corpus COLLECTION
+                        Collection name (default: the only one)
+  --out OUT             Destination directory (default: .)

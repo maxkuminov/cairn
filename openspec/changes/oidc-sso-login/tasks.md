@@ -32,7 +32,7 @@ fixed below so no slice has to wait on another's guesswork.
 
 ## 0. OIDC-off regression goldens (lands first, alone)
 
-- [ ] 0.1 New `tests/test_single_mode_goldens.py` + `tests/goldens/single/`: in `single` mode,
+- [x] 0.1 New `tests/test_single_mode_goldens.py` + `tests/goldens/single/`: in `single` mode,
   against a seeded fixture database, record status, relevant headers (`content-type`,
   `set-cookie` attributes, `location`, `hx-*`) and body for `/`, `/collections`,
   `/collection/{id}`, `/collection/{id}/review`, `/review`, `/settings`, `/verify`,
@@ -41,12 +41,12 @@ fixed below so no slice has to wait on another's guesswork.
   CSRF-protected POST (ack). Normalize only
   values that legitimately vary (timestamps, CSRF tokens, session cookie value), and assert the
   normalization did not hide anything else.
-- [ ] 0.2 Record `SessionMiddleware` arguments in `single` mode (secret source, `same_site`,
+- [x] 0.2 Record `SessionMiddleware` arguments in `single` mode (secret source, `same_site`,
   `https_only`, `max_age`, cookie name) and the help text of every **pre-existing** command
   (`cairn <cmd> --help` for each) plus the top-level `cairn --help`. The top-level comparison
   removes exactly one line, the `users` subcommand entry, if present, before comparing, and fails
   if anything else differs; the presence of that entry is asserted by A.4, not hidden here.
-- [ ] 0.3 The same suite run with `CAIRN_OIDC_*` variables set (and `CAIRN_AUTH_MODE` unset)
+- [x] 0.3 The same suite run with `CAIRN_OIDC_*` variables set (and `CAIRN_AUTH_MODE` unset)
   must produce identical results. Commit goldens with a regeneration flag that is off by default.
 
 ## A. Migration, model, identity service, CLI

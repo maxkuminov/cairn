@@ -1,0 +1,24 @@
+{
+  "headers": [
+    [
+      "content-type",
+      "text/html; charset=utf-8"
+    ],
+    [
+      "vary",
+      "Cookie"
+    ]
+  ],
+  "normalized": {
+    "ago": 5
+  },
+  "request": {
+    "headers": [
+      "HX-Current-URL",
+      "HX-Request"
+    ],
+    "method": "GET",
+    "path": "/collection/1/files"
+  },
+  "status": 200
+}

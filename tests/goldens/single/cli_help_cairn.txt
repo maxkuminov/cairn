@@ -1,0 +1,23 @@
+usage: cairn [-h] [--version] <command> ...
+
+Cairn — file-integrity monitor + OpenTimestamps notary
+
+positional arguments:
+  <command>
+    init                Create data/proof dirs and migrate the database
+    serve               Run the web panel
+    add-collection (add-corpus)
+                        Create a collection to monitor
+    scan                Scan a collection (or all) for changes
+    accept              Re-baseline acknowledged changes (unscoped legacy verb)
+    import-manifest     Import a manifest.tsv as a pre-existing, unstamped baseline
+    verify              Verify a file against its stored OTS proof
+    export              Export a file + its .ots proof bundle
+    upgrade             Complete pending OTS proofs (daily pass)
+    stamp               Stamp pending files (or all unstamped files with --all)
+    bench               Benchmark SHA-256 throughput and estimate deep-scan cost
+    status              [planned] status
+
+options:
+  -h, --help            show this help message and exit
+  --version             show program's version number and exit

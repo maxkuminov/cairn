@@ -1,0 +1,8 @@
+usage: cairn import-manifest [-h] --collection COLLECTION --file FILE [--rehash]
+
+options:
+  -h, --help            show this help message and exit
+  --collection COLLECTION, --corpus COLLECTION
+                        Target collection name
+  --file FILE           Path to the manifest.tsv
+  --rehash              Recompute each file's SHA-256 and warn on mismatch

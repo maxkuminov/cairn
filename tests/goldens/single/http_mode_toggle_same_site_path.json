@@ -1,0 +1,21 @@
+{
+  "headers": [
+    [
+      "location",
+      "/collection/1?view=tree"
+    ],
+    [
+      "set-cookie",
+      "cairn_mode=light; Max-Age=31536000; Path=/; SameSite=lax"
+    ]
+  ],
+  "normalized": {},
+  "request": {
+    "headers": [
+      "Referer"
+    ],
+    "method": "GET",
+    "path": "/mode/toggle"
+  },
+  "status": 303
+}

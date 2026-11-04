@@ -1,0 +1,15 @@
+usage: cairn add-collection [-h] --name NAME --root ROOT [--mode {worm,churn}]
+                            [--ots-mode {none,perfile}] [--cadence CADENCE]
+                            [--verify-cadence VERIFY_CADENCE] [--exclude GLOB] [--auto-baseline]
+
+options:
+  -h, --help            show this help message and exit
+  --name NAME
+  --root ROOT           Directory to watch
+  --mode {worm,churn}
+  --ots-mode {none,perfile}
+  --cadence CADENCE     Scan cadence seconds
+  --verify-cadence VERIFY_CADENCE
+                        Deep re-hash cadence seconds (0 = disabled; default weekly)
+  --exclude GLOB        Exclude glob (repeatable)
+  --auto-baseline       Auto-promote intact new files to OK on the deep-verify pass (default off)

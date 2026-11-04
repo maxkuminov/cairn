@@ -1,0 +1,33 @@
+
+<div class="event-row" id="event-row-1">
+  <div class="event-icon" style="background:var(--danger-soft);color:var(--danger)">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>
+  </div>
+  <div class="event-row__body">
+    <div class="event-row__title">
+      <span class="event-row__kind" style="color:var(--danger)">Missing</span>
+      
+      <span class="event-row__time"><AGO></span>
+    </div>
+    <div class="event-row__relpath mono">—</div>
+    
+    
+    <div class="event-row__collection">fixture</div>
+    
+  </div>
+</div>
+
+<span id="open-events-pill" hx-swap-oob="innerHTML">
+  
+<span class="pill pill--soft pill--danger pill--sm">1 unreviewed</span>
+
+<button class="btn btn--sm btn--subtle" style="margin-left:6px"
+        hx-post="/events/ack-all" hx-target="#events-feed" hx-swap="innerHTML"
+        hx-confirm="Marks 1 alerts across all your collections as seen. The files stay missing or changed and the red counts stay — this only clears the notification."
+        title="Marks 1 alerts across all your collections as seen. The files stay missing or changed and the red counts stay — this only clears the notification.">
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> Mark all 1 reviewed (all collections)
+</button>
+</span>
+<span id="sidebar-alert-badge" hx-swap-oob="innerHTML">
+  <span class="nav-badge" title="2 files missing or changed — open dashboard" aria-label="2 files missing or changed — open dashboard">2</span>
+</span>

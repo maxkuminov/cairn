@@ -1,0 +1,157 @@
+<div id="file-table">
+  
+  <input type="hidden" name="sort" value="modified" />
+  <input type="hidden" name="dir" value="desc" />
+  <div class="file-grid  file-head">
+    <span class="file-sort"
+      role="button" tabindex="0" aria-label="Sort by Path"
+      hx-get="/collection/1/files"
+      hx-vals='{"sort": "path", "dir": "asc"}'
+      hx-target="#file-table" hx-swap="outerHTML"
+      hx-include="[name='q'],[name='filter']">
+  Path
+</span>
+    <span class="file-sort"
+      role="button" tabindex="0" aria-label="Sort by Size"
+      hx-get="/collection/1/files"
+      hx-vals='{"sort": "size", "dir": "asc"}'
+      hx-target="#file-table" hx-swap="outerHTML"
+      hx-include="[name='q'],[name='filter']">
+  Size
+</span>
+    <span>Status</span>
+    
+      <span class="file-sort"
+      role="button" tabindex="0" aria-label="Sort by Notarized"
+      hx-get="/collection/1/files"
+      hx-vals='{"sort": "notarized", "dir": "desc"}'
+      hx-target="#file-table" hx-swap="outerHTML"
+      hx-include="[name='q'],[name='filter']">
+  Notarized
+</span>
+    
+    <span class="file-sort ta-right"
+      role="button" tabindex="0" aria-label="Sort by Last checked"
+      hx-get="/collection/1/files"
+      hx-vals='{"sort": "checked", "dir": "desc"}'
+      hx-target="#file-table" hx-swap="outerHTML"
+      hx-include="[name='q'],[name='filter']">
+  Last checked
+</span>
+  </div>
+  <div>
+    
+      <div class="file-grid  file-row">
+  <div class="file-row__path">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+    <span class="mono">gone/delta.txt</span>
+  </div>
+  <span class="file-row__size">10 B</span>
+  <span class="pill pill--soft pill--danger pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>Missing</span>
+  
+    <div class="file-row__notarized">
+      
+      <a class="ots-badge" href="/verify?file=4"
+         title="Check this file's notarization status"><span class="pill pill--soft pill--muted pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>Not stamped</span></a>
+      <span class="file-row__date">—</span>
+    </div>
+  
+  <span class="file-row__checked ta-right"><AGO></span>
+</div>
+    
+      <div class="file-grid  file-row">
+  <div class="file-row__path">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+    <span class="mono">mod/gamma.txt</span>
+  </div>
+  <span class="file-row__size">10 B</span>
+  <span class="pill pill--soft pill--warn pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.8 2.4 18a1.9 1.9 0 0 0 1.7 2.9h15.8a1.9 1.9 0 0 0 1.7-2.9L13.7 3.8a1.9 1.9 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>Modified</span>
+  
+    <div class="file-row__notarized">
+      
+      <a class="ots-badge" href="/verify?file=3"
+         title="Check this file's notarization status"><span class="pill pill--soft pill--warn pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Pending confirmation</span></a>
+      <span class="file-row__date">—</span>
+    </div>
+  
+  <span class="file-row__checked ta-right"><AGO></span>
+</div>
+    
+      <div class="file-grid  file-row">
+  <div class="file-row__path">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+    <span class="mono">new/epsilon.txt</span>
+  </div>
+  <span class="file-row__size">10 B</span>
+  <span class="pill pill--soft pill--accent pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>New</span>
+  
+    <div class="file-row__notarized">
+      
+      <a class="ots-badge" href="/verify?file=5"
+         title="Check this file's notarization status"><span class="pill pill--soft pill--muted pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8"/></svg>Not stamped</span></a>
+      <span class="file-row__date">—</span>
+    </div>
+  
+  <span class="file-row__checked ta-right"><AGO></span>
+</div>
+    
+      <div class="file-grid  file-row">
+  <div class="file-row__path">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+    <span class="mono">ok/alpha.txt</span>
+  </div>
+  <span class="file-row__size">10 B</span>
+  <span class="pill pill--soft pill--ok pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>OK</span>
+  
+    <div class="file-row__notarized">
+      
+      <a class="ots-badge" href="/verify?file=1"
+         title="Verify this proof for the block-confirmed date"><span class="pill pill--soft pill--ok pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 7.5h4a2.2 2.2 0 0 1 0 4.5h-4M9.5 12h4.3a2.2 2.2 0 0 1 0 4.5H9.5M9.5 7.5v9M11 6v1.5M11 16.5V18M13 6v1.5M13 16.5V18"/></svg>Anchored</span></a>
+      <span class="file-row__date">—</span>
+    </div>
+  
+  <span class="file-row__checked ta-right"><AGO></span>
+</div>
+    
+      <div class="file-grid  file-row">
+  <div class="file-row__path">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="text-3"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
+    <span class="mono">ok/beta.txt</span>
+  </div>
+  <span class="file-row__size">10 B</span>
+  <span class="pill pill--soft pill--ok pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 12l2.5 2.5 4.5-5"/></svg>OK</span>
+  
+    <div class="file-row__notarized">
+      
+      <a class="ots-badge" href="/verify?file=2"
+         title="Verify this proof for the block-confirmed date"><span class="pill pill--soft pill--ok pill--sm"><svg width="11.5" height="11.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 7.5h4a2.2 2.2 0 0 1 0 4.5h-4M9.5 12h4.3a2.2 2.2 0 0 1 0 4.5H9.5M9.5 7.5v9M11 6v1.5M11 16.5V18M13 6v1.5M13 16.5V18"/></svg>Anchored</span></a>
+      <span class="file-row__date">—</span>
+    </div>
+  
+  <span class="file-row__checked ta-right"><AGO></span>
+</div>
+    
+    
+  </div><div class="table-footer">
+    <span>
+      Showing 5 of 5 files
+    </span>
+    <div class="pager">
+      <button type="button" class="pager__btn" disabled
+              hx-get="/collection/1/files"
+              hx-vals='{"page": -1, "sort": "modified", "dir": "desc"}'
+              hx-target="#file-table" hx-swap="outerHTML"
+              hx-include="[name='q'],[name='filter']">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="pager__caret is-prev"><path d="m9 6 6 6-6 6"/></svg> Prev
+      </button>
+      <span class="pager__label">Page 1 of 1</span>
+      <button type="button" class="pager__btn" disabled
+              hx-get="/collection/1/files"
+              hx-vals='{"page": 1, "sort": "modified", "dir": "desc"}'
+              hx-target="#file-table" hx-swap="outerHTML"
+              hx-include="[name='q'],[name='filter']">
+        Next <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" class="pager__caret"><path d="m9 6 6 6-6 6"/></svg>
+      </button>
+    </div>
+  </div>
+</div>
