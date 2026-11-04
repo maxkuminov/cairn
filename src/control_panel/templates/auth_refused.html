@@ -1,0 +1,45 @@
+{% import "_macros.html" as m %}
+<!doctype html>
+<html lang="en" data-theme="slate" data-mode="{{ mode }}">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Not authorized · Cairn</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='css/tokens.css') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', path='css/panel.css') }}" />
+  </head>
+  {# The one refusal page for a valid token that is not admitted (oidc-sso-login, design D7):
+     unlinked, inactive and missing-group all look the same. It shows the person their OWN issuer
+     and subject, so they can send them to the operator for `cairn users link`, and never a local
+     username, whether one exists, or which check failed. Context: `mode`, `issuer`, `subject`
+     (both None on a second visit: the route consumes the one-shot value). No script: the block is
+     select-all on click, which works without the panel's clipboard helper. #}
+  <body>
+    <div class="auth-screen">
+      <a class="icon-btn auth-screen__mode" href="/mode/toggle"
+         title="Switch to {{ 'light' if mode == 'dark' else 'dark' }} mode"
+         aria-label="Switch to {{ 'light' if mode == 'dark' else 'dark' }} mode">{{ m.icon("sun" if mode == "dark" else "moon", size=18) }}</a>
+      <div class="auth-screen__col auth-screen__col--wide">
+        <div class="auth-screen__brand">
+          {{ m.cairn_mark(48) }}
+          <div class="auth-screen__name">Cairn</div>
+        </div>
+        <div class="card auth-card">
+          <div class="auth-card__head">
+            {{ m.icon("lock", size=18) }}
+            <h1 class="auth-card__title">This identity is not authorized for this Cairn instance</h1>
+          </div>
+          {% if issuer and subject %}
+          <p class="auth-card__text">If you should have access, send the operator the identity below. They can link it to this instance.</p>
+          <pre class="auth-identity mono" aria-label="Your identity">issuer:  {{ issuer }}
+subject: {{ subject }}</pre>
+          <p class="auth-card__hint text-3">Select the block and copy it.</p>
+          {% else %}
+          <p class="auth-card__text">If you should have access, ask the operator to link your identity to this instance.</p>
+          {% endif %}
+          <a class="btn btn--subtle btn--full" href="/login">Back to sign in</a>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

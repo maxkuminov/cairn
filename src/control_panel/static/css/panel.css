@@ -1038,3 +1038,42 @@
   .review-list__legend { flex-wrap: wrap; row-gap: 6px; }
   .review-list__legend .btn { flex-basis: 100%; }
 }
+
+/* --- oidc-sso-login: login / refusal screens and the signed-in header (slice C) --- */
+.auth-screen { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px 16px; position: relative; }
+.auth-screen__mode { position: absolute; top: 22px; right: 22px; }
+.auth-screen__col { width: 100%; max-width: 380px; }
+.auth-screen__col--wide { max-width: 480px; }
+.auth-screen__brand { display: flex; flex-direction: column; align-items: center; margin-bottom: 28px; }
+.auth-screen__name { font-family: var(--font-head); font-size: 27px; font-weight: 700; letter-spacing: var(--head-spacing); margin-top: 12px; }
+.auth-screen__tagline { font-size: 13px; margin-top: 4px; }
+.auth-card { padding: 26px; display: flex; flex-direction: column; gap: 14px; }
+.auth-card__head { display: flex; align-items: flex-start; gap: 10px; color: var(--danger); }
+.auth-card__head svg { flex-shrink: 0; margin-top: 3px; }
+.auth-card__title { margin: 0; font-family: var(--font-head); font-size: 17px; font-weight: 700; line-height: 1.35; color: var(--text); }
+.auth-card__text { margin: 0; font-size: 13.5px; line-height: 1.55; color: var(--text-2); }
+.auth-card__hint { margin: -6px 0 0; font-size: 12px; }
+.auth-identity {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
+.auth-msg { display: flex; align-items: flex-start; gap: 9px; padding: 12px 14px; margin-bottom: 14px; border-radius: var(--radius); font-size: 13px; }
+.auth-msg svg { flex-shrink: 0; margin-top: 1px; }
+.auth-msg--danger { background: var(--danger-soft); color: var(--danger); }
+.auth-msg--warn { background: var(--warn-soft); color: var(--warn); }
+.session-user { font-size: 13px; font-weight: 600; color: var(--text-2); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-signout { margin: 0; display: flex; }
+.session-signout .icon-btn { cursor: pointer; font: inherit; padding: 0; }
+@media (max-width: 480px) {
+  /* The topbar is already crowded on a phone; the sidebar's user block still names the owner. */
+  .session-user { display: none; }
+}

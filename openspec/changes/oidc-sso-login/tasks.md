@@ -167,15 +167,15 @@ Files: `src/auth/ui.py`, `src/control_panel/templates/login.html`,
 (signed-in user + sign-out control, rendered only when `auth_mode == "oidc"`),
 `src/control_panel/static/css/panel.css` if needed, `tests/test_auth_templates.py`.
 
-- [ ] C.1 `SSO_BUTTON_LABEL` in `src/auth/ui.py`, exposed to templates as a global.
-- [ ] C.2 `login.html` in the Slate design: one "Sign in with SSO" POST form with the CSRF token
+- [x] C.1 `SSO_BUTTON_LABEL` in `src/auth/ui.py`, exposed to templates as a global.
+- [x] C.2 `login.html` in the Slate design: one "Sign in with SSO" POST form with the CSRF token
   and `next`, no username/password fields, light/dark toggle kept, `error` messages for
   `failed`/`busy`. Replace the stale "multi-user mode" info strip.
-- [ ] C.3 `auth_refused.html`: "This identity is not authorized for this Cairn instance", the
+- [x] C.3 `auth_refused.html`: "This identity is not authorized for this Cairn instance", the
   person's own issuer and subject in a copyable block, a link back to `/login`; no local username.
-- [ ] C.4 `base.html`: in `oidc` mode only, the signed-in username and a CSRF-protected "Sign out"
+- [x] C.4 `base.html`: in `oidc` mode only, the signed-in username and a CSRF-protected "Sign out"
   POST; `single` mode markup unchanged (slice 0 goldens).
-- [ ] C.5 Template tests: render each template with the contract context; assert the label
+- [x] C.5 Template tests: render each template with the contract context; assert the label
   appears exactly once and is not spelled anywhere else in `src/`; phone width usable.
 
 ## D. Documentation (parallel; final review after B and C merge)

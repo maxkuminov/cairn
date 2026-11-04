@@ -156,6 +156,18 @@
           <a class="icon-btn" href="#" title="Log out" aria-label="Log out">
             {{ m.icon("logout", size=18) }}
           </a>
+          {% elif auth_mode == "oidc" and session_username %}
+          {# oidc-sso-login: who is signed in, and a real sign-out. A POST carrying the CSRF token,
+             never a GET link, so a third-party page cannot sign the operator out.
+             `session_username` is None on an anonymous page (an error page on a public path), and
+             then neither control shows. #}
+          <span class="session-user" title="Signed in as {{ session_username }}">{{ session_username }}</span>
+          <form class="session-signout" method="post" action="/auth/logout">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <button class="icon-btn" type="submit" title="Sign out" aria-label="Sign out">
+              {{ m.icon("logout", size=18) }}
+            </button>
+          </form>
           {% endif %}
         </header>
 
