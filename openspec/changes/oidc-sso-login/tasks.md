@@ -55,36 +55,36 @@ Files: `alembic/versions/0013_oidc_identity.py`, `src/models/db.py` (User column
 `src/services/identity.py`, `src/cli.py` (the `users` subcommand group only),
 `tests/test_migration_0013.py`, `tests/test_identity_cli.py`.
 
-- [ ] A.1 Migration `0013` **without any table rebuild** (design D5): refuse below SQLite 3.35;
+- [x] A.1 Migration `0013` **without any table rebuild** (design D5): refuse below SQLite 3.35;
   upgrade = four `op.execute("ALTER TABLE users ADD COLUMN …")` statements carrying the named
   length CHECKs and the all-or-none CHECK (on `oidc_linked_at`, added last), then
   `CREATE UNIQUE INDEX uq_users_oidc_identity`; downgrade = drop the index, then drop
   `oidc_linked_at`, `oidc_subject`, `oidc_issuer`, `session_epoch` in that order. Never
   `batch_alter_table` on `users`.
-- [ ] A.1a Preservation test on a populated `0012` fixture (two users, collections owned by each,
+- [x] A.1a Preservation test on a populated `0012` fixture (two users, collections owned by each,
   files, runs, events with `acknowledged_by` set): record row counts and full ID sets of `users`,
   `collections`, `files`, `runs`, `events`, every `collections.user_id` and
   `events.acknowledged_by`; upgrade, assert identical and `PRAGMA foreign_key_check` empty;
   downgrade, assert identical again. A `sqlite3` trace callback asserts neither direction issues
   `CREATE TABLE`, `DROP TABLE` or `ALTER TABLE … RENAME` on `users`. Run with foreign keys ON,
   exactly as `alembic/env.py` connects.
-- [ ] A.1b Schema tests: UNIQUE violation, each half-linked combination, issuer of 512 accepted
+- [x] A.1b Schema tests: UNIQUE violation, each half-linked combination, issuer of 512 accepted
   and 513 refused, subject of 255 accepted and 256 refused (direct SQL writes, not the service).
-- [ ] A.2 Model columns on `User`, with the same three named CHECKs and the unique index in
+- [x] A.2 Model columns on `User`, with the same three named CHECKs and the unique index in
   `__table_args__`.
-- [ ] A.3 `src/services/identity.py` per the contract: subject validation (non-empty, ≤ 255, no
+- [x] A.3 `src/services/identity.py` per the contract: subject validation (non-empty, ≤ 255, no
   control characters), issuer validation whether given or defaulted (`https`, no userinfo, query
   or fragment, ≤ 512), issuer default from settings, the only-user default and the multi-user
   `--user` requirement, `replace` guard, pair-already-linked refusal, `session_epoch` increments
   on link/unlink/revoke, one commit per call.
-- [ ] A.4 `cairn users list|link|unlink|revoke-sessions` in `src/cli.py`; non-zero exit with a
+- [x] A.4 `cairn users list|link|unlink|revoke-sessions` in `src/cli.py`; non-zero exit with a
   one-line message on `IdentityError`; works in `single` and `oidc` modes without a server
   running (`multi` is not supported: with no user the command exits non-zero with one line). The
   issuer defaults to `CAIRN_OIDC_ISSUER` only in `oidc` mode; outside it `--issuer` is required.
   Assert
   explicitly that `cairn --help` lists `users` exactly once and that the slice 0 help goldens for
   every pre-existing command still pass unchanged.
-- [ ] A.5 Tests for every scenario under "The CLI SHALL manage identity links…", including the
+- [x] A.5 Tests for every scenario under "The CLI SHALL manage identity links…", including the
   512/513 issuer and 255/256 subject boundaries through the CLI, `link` in `single` mode with
   `CAIRN_OIDC_ISSUER` set and no `--issuer` (refused, nothing changed) and with `--issuer`
   (linked), and a `users` command on a database with no user (non-zero, one line).

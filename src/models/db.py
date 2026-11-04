@@ -46,9 +46,38 @@ class User(Base):
         DateTime(timezone=True), default=utcnow, nullable=False
     )
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Pinned OIDC identity (oidc-sso-login, migration 0013). The (issuer, subject) pair is the
+    # only thing ever matched at login; all three columns are NULL (unlinked) or all set. SQLite
+    # ignores VARCHAR(N), so the length bounds are CHECKs — mirrored here so a `create_all`
+    # schema enforces exactly what a migrated one does.
+    oidc_issuer: Mapped[str | None] = mapped_column(String(512))
+    oidc_subject: Mapped[str | None] = mapped_column(String(255))
+    oidc_linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Bumped on link / unlink / revoke-sessions; a session minted under an older epoch is refused.
+    session_epoch: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
 
     collections: Mapped[list["Collection"]] = relationship(
         back_populates="owner", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "oidc_issuer IS NULL OR length(oidc_issuer) <= 512",
+            name="ck_users_oidc_issuer_len",
+        ),
+        CheckConstraint(
+            "oidc_subject IS NULL OR length(oidc_subject) <= 255",
+            name="ck_users_oidc_subject_len",
+        ),
+        CheckConstraint(
+            "(oidc_issuer IS NULL AND oidc_subject IS NULL AND oidc_linked_at IS NULL) OR "
+            "(oidc_issuer IS NOT NULL AND oidc_subject IS NOT NULL "
+            "AND oidc_linked_at IS NOT NULL)",
+            name="ck_users_oidc_all_or_none",
+        ),
+        Index("uq_users_oidc_identity", "oidc_issuer", "oidc_subject", unique=True),
     )
 
 

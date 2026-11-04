@@ -2,8 +2,8 @@
 
 ``init`` and ``serve`` (foundation), ``scan``, ``accept``, and ``add-collection`` (scanner),
 ``verify``, ``export``, ``upgrade``, and ``stamp`` (notary), ``import-manifest`` (manifest baseline
-import), and ``bench`` (hash-throughput / deep-scan estimate) are functional. ``status`` is stubbed
-until the web-panel change.
+import), ``bench`` (hash-throughput / deep-scan estimate) and ``users`` (OIDC identity links) are
+functional. ``status`` is stubbed until the web-panel change.
 """
 
 from __future__ import annotations
@@ -911,6 +911,81 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
     return _run(run())
 
 
+_USERS_COLUMNS = ("username", "admin", "active", "epoch", "linked_at", "issuer", "subject")
+
+
+def _cmd_users(args: argparse.Namespace) -> int:
+    """``cairn users list|link|unlink|revoke-sessions`` (oidc-sso-login, design D5).
+
+    The only identity-management surface and the break-glass path: no login, no server. Works in
+    ``single`` and ``oidc`` (which bootstrap the implicit owner); ``multi`` is an unimplemented
+    placeholder, so a ``users`` command that finds no user exits non-zero with one line.
+    """
+    action = args.users_command
+
+    async def run() -> int:
+        from sqlalchemy import select
+
+        from .config import get_settings
+        from .database import ensure_implicit_user, get_sessionmaker
+        from .models.db import User
+        from .services import identity
+
+        async with get_sessionmaker()() as session:
+            if get_settings().auth_mode in ("single", "oidc"):
+                await ensure_implicit_user(session)
+            if action == "list":
+                users = (await session.scalars(select(User).order_by(User.id))).all()
+                if not users:
+                    raise identity.IdentityError("no user in the database")
+                rows = [_USERS_COLUMNS]
+                for u in users:
+                    rows.append((
+                        u.username,
+                        "yes" if u.is_admin else "no",
+                        "yes" if u.is_active else "no",
+                        str(u.session_epoch),
+                        u.oidc_linked_at.isoformat(timespec="seconds") if u.oidc_linked_at else "-",
+                        u.oidc_issuer or "-",
+                        u.oidc_subject or "-",
+                    ))
+                widths = [max(len(r[i]) for r in rows) for i in range(len(_USERS_COLUMNS) - 1)]
+                for r in rows:
+                    print("  ".join(c.ljust(w) for c, w in zip(r, widths)) + "  " + r[-1])
+                return 0
+            if action == "link":
+                user = await identity.link(
+                    session,
+                    subject=args.subject,
+                    issuer=args.issuer,
+                    username=args.user,
+                    replace=args.replace,
+                )
+                print(
+                    f"Linked user {user.username!r} to issuer {user.oidc_issuer} "
+                    f"(session epoch {user.session_epoch})."
+                )
+                return 0
+            if action == "unlink":
+                user = await identity.unlink(session, username=args.user)
+                print(f"Unlinked user {user.username!r} (session epoch {user.session_epoch}).")
+                return 0
+            user = await identity.revoke_sessions(session, username=args.user)
+            print(
+                f"Revoked every session of user {user.username!r} "
+                f"(session epoch {user.session_epoch})."
+            )
+            return 0
+
+    from .services.identity import IdentityError
+
+    try:
+        return _run(run())
+    except IdentityError as exc:
+        print(f"cairn users {action}: {exc}", file=sys.stderr)
+        return 1
+
+
 def _make_planned(name: str):
     def _run_planned(args: argparse.Namespace) -> int:
         print(
@@ -1043,6 +1118,46 @@ def build_parser() -> argparse.ArgumentParser:
         "--estimate", action="store_true", help="Also estimate per-collection deep-scan duration"
     )
     p_bench.set_defaults(func=_cmd_bench)
+
+    p_users = sub.add_parser(
+        "users",
+        help="Manage OIDC identity links and sessions",
+        description=(
+            "Manage the OIDC identity pinned to a local user, and revoke its sessions. Works "
+            "without a server or a login, in single and oidc modes."
+        ),
+    )
+    users_sub = p_users.add_subparsers(
+        dest="users_command", metavar="<action>", required=True
+    )
+    pu_list = users_sub.add_parser("list", help="List users with their identity link")
+    pu_list.set_defaults(func=_cmd_users)
+    pu_link = users_sub.add_parser(
+        "link", help="Pin an (issuer, subject) identity to a user; revokes its sessions"
+    )
+    pu_link.add_argument("--subject", required=True, help="The provider's subject (sub) claim")
+    pu_link.add_argument(
+        "--issuer",
+        default=None,
+        help="Issuer URL (default: CAIRN_OIDC_ISSUER in oidc mode; required otherwise)",
+    )
+    pu_link.add_argument(
+        "--user", default=None, help="Local username (default: the only user)"
+    )
+    pu_link.add_argument(
+        "--replace", action="store_true", help="Relink a user that is already linked"
+    )
+    pu_link.set_defaults(func=_cmd_users)
+    pu_unlink = users_sub.add_parser(
+        "unlink", help="Remove a user's identity link; revokes its sessions"
+    )
+    pu_unlink.add_argument("--user", default=None, help="Local username (default: the only user)")
+    pu_unlink.set_defaults(func=_cmd_users)
+    pu_revoke = users_sub.add_parser(
+        "revoke-sessions", help="End every existing session of a user (link unchanged)"
+    )
+    pu_revoke.add_argument("--user", default=None, help="Local username (default: the only user)")
+    pu_revoke.set_defaults(func=_cmd_users)
 
     for name in PLANNED:
         p = sub.add_parser(name, help=f"[planned] {name}")
