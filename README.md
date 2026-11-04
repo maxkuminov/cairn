@@ -20,8 +20,10 @@ file *existed, unaltered, by a given date*. SQLite-backed, no external service d
 **Alpha — a working hobby project, Phase 1.** Core monitoring and notarization are built and
 running. Honest caveats before you rely on it:
 
-- **Single-user only.** Multi-user login + admin is designed but **not yet shipped** (Phase 2).
-  In single-user mode the panel has **no in-app login wall** — see [Deployment](#deployment).
+- **One owner per instance.** Multi-user login + admin is designed but **not yet shipped**
+  (Phase 2). In the default `single` mode the panel has **no in-app login wall**; the optional
+  `oidc` mode adds an in-app **single sign-on** login against any standards-compliant OpenID
+  Connect provider (Keycloak, for example) — see [Deployment](#deployment).
 - **Email (SMTP) alerts work.** Webhook, ntfy, Signal (CallMeBot), and Uptime-Kuma heartbeat
   are scaffolded but not yet wired for routing.
 - APIs, schema, and CLI may still change. Pin to a commit if you depend on it.
@@ -108,6 +110,7 @@ Requires Docker. Cairn runs the `ots` CLI as a subprocess (bundled in the image)
 ```bash
 git clone <this-repo> cairn && cd cairn
 cp .env.example .env                       # set CAIRN_HOSTNAME, paths, etc.
+                                           # (for SSO: CAIRN_AUTH_MODE=oidc + CAIRN_OIDC_*)
 cp docker-compose.example.yml docker-compose.yml
 # edit docker-compose.yml: point the read-only mounts at the folders you want to watch
 make deploy                                # build, scan, bring up the panel
@@ -122,17 +125,22 @@ Watched folders are mounted **read-only** (`:ro`) — Cairn physically cannot mo
 the bytes it monitors. The SQLite DB and `.ots` proofs live on a separate writable volume.
 
 > ⚠️ **Single-user mode has no login wall.** Do not expose it directly to the internet. Front
-> it with a reverse proxy that enforces authentication (the example compose uses Traefik with
-> OAuth; Caddy basic-auth/IP-allowlist alternatives are bundled), and keep `/healthz` as the
-> only public route for your uptime monitor. In-app multi-user login is Phase 2.
+> it with a reverse proxy that enforces authentication (the example compose uses Traefik with a
+> forward-auth middleware; Caddy basic-auth/IP-allowlist alternatives are bundled), and keep
+> `/healthz` as the only public route for your uptime monitor. Or switch to
+> `CAIRN_AUTH_MODE=oidc` for an in-app SSO login — see
+> [provider setup](./DEPLOYMENT.md#provider-setup). In-app multi-user login is Phase 2.
 
 See **[`DEPLOYMENT.md`](./DEPLOYMENT.md)** for the full guide: read-only mounts, reverse-proxy
-auth, configuration, migrations, and cron-only operation.
+auth, [SSO login (`oidc` mode)](./DEPLOYMENT.md#authentication), configuration, migrations, and
+cron-only operation.
 
 ## Documentation
 
 - **[`DEPLOYMENT.md`](./DEPLOYMENT.md)** — how to deploy: read-only mounts, reverse-proxy auth,
-  configuration, operations.
+  SSO login and provider setup, configuration, operations.
+- **[`SECURITY.md`](./SECURITY.md)** — reporting vulnerabilities, and the security model
+  (including what `oidc` mode does and does not protect).
 - **[`DESIGN.md`](./DESIGN.md)** — full motivation, decisions, architecture, schema, panel
   pages, CLI, deployment modes, and phasing.
 - **[`CLAUDE.md`](./CLAUDE.md)** — development working notes (stack, layout, commands).

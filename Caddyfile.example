@@ -6,14 +6,35 @@
 {$CAIRN_HOSTNAME} {
     encode gzip
 
-    # Cairn owns its OWN login. In multi mode (CAIRN_AUTH_MODE=multi) it enforces
-    # username/password auth and per-user scoping at the application layer, so NO
-    # external auth proxy is required — just proxy straight through.
+    # In oidc mode (CAIRN_AUTH_MODE=oidc) Cairn owns its OWN login: an in-app
+    # single sign-on wall in front of every route except /healthz and the login
+    # routes. Once you have linked yourself (`cairn users link`) and verified
+    # sign-in, NO external auth gate is required — just proxy straight through.
+    # Keep the container port reachable only by Caddy (Cairn trusts
+    # X-Forwarded-* headers from any peer).
     reverse_proxy cairn:8000
 
+    # ── Access log without the OIDC callback secrets ──
+    # The provider redirects to /auth/oidc/callback?code=...&state=...&iss=...
+    # Cairn keeps the query out of its own log; if you enable Caddy's access log,
+    # strip those parameters from it too (Caddy 2.8+ filter syntax; older
+    # releases nest the field under `fields { ... }`):
+    # log {
+    #     format filter {
+    #         wrap json
+    #         request>uri query {
+    #             delete code
+    #             delete state
+    #             delete iss
+    #             delete session_state
+    #         }
+    #     }
+    # }
+
     # ── Optional gate for single-user installs ──
-    # Single-user mode (CAIRN_AUTH_MODE=single) has no in-app login. If you still
-    # want a front-door gate, uncomment ONE of the blocks below (and remove the
+    # Single-user mode (CAIRN_AUTH_MODE=single) has no in-app login, so you
+    # SHOULD gate the front door (in oidc mode these are optional — keep one
+    # during the rollout, then remove it). Uncomment ONE of the blocks below (and remove the
     # bare `reverse_proxy` above — fold it into the chosen block instead).
     #
     # ── Option 1: Caddy basic auth ──

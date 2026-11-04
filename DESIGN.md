@@ -93,8 +93,8 @@ use to verify it."*
 > **Status of the locked decisions (2026-08-28).** Every row still holds as written, with three
 > annotations: the **verify backend** is built, as a dispatcher (§6); the **distribution name**
 > question is settled (`cairn-integrity`, §12); and the *"the app owns its own auth → no external
-> OAuth proxy"* consequence of the multi-user row holds **only in `multi` mode, which has not been
-> built yet** — see the flag in §4. One granularity in the OTS row was never built: `ots_mode`
+> OAuth proxy"* consequence of the multi-user row holds in the app-native `oidc` mode (built by
+> `oidc-sso-login`) and will in `multi` (not built yet), **not** in `single` — see the flag in §4. One granularity in the OTS row was never built: `ots_mode`
 > shipped as `none | perfile` only, with no `manifest` mode (the manifest is an *import* format,
 > §8, not a stamping mode).
 
@@ -102,10 +102,16 @@ use to verify it."*
 
 ## 4. Deployment modes & multi-user model
 
-**Mode selected by env (`CAIRN_AUTH_MODE=single|multi`).**
+**Mode selected by env (`CAIRN_AUTH_MODE=single|oidc|multi`).**
 
 - **single-user** — no login; one implicit user owns every collection. The simple default for a
   personal install.
+- **oidc** — the same one implicit owner, behind an **app-native OpenID Connect login wall**
+  (default deny, a short public allowlist incl. `/healthz`). Admission only for the
+  `(issuer, subject)` pair pinned to the owner with `cairn users link`; 12 h absolute sessions
+  re-validated per request; Accept/Ack attributed to the verified user. Added by the
+  `oidc-sso-login` change (`openspec/changes/oidc-sso-login/`, later archived), whose design
+  records the full protocol profile and threat model.
 - **multi-user** — login required; an **admin** creates users and assigns each a mounted
   base. Every collection belongs to a user; queries are scoped by `user_id`; a user never sees
   another user's collections, files, events, or proofs.
@@ -117,20 +123,35 @@ mount — the panel rejects paths outside it (no traversal, no cross-user disclo
 the app has its own multi-user login, **no external OAuth proxy is required** (unlike the
 Obsidian-MCP panel, which sat behind Traefik `chain-oauth`).
 
-> **Shipped state (2026-08-28).** Only **single-user mode is built.** There is no login route and
-> `src/auth/` is still an empty package. The *scoping* half of the multi-user model is in place and
-> exercised on every request — the panel resolves an owning `User` (`current_user`, today the
-> implicit single row) and scopes every query and every collection lookup by it — but the login
+> **Shipped state (`oidc-sso-login`).** **`single` and `oidc` are built**; `multi` is still a
+> placeholder. `src/auth/` holds the OIDC client, the login wall, the auth routes and the
+> callback access-log filter — no password login. The *scoping* half of the multi-user model is in place and
+> exercised on every request — the panel resolves an owning `User` (`current_user`: the
+> implicit single row in `single`, the verified session's user in `oidc`) and scopes every query and every collection lookup by it — but the login
 > wall, user administration and admin-provisioned per-user mounted bases are Phase 2 (§10). The
 > Settings "Users & mounts" tab renders only for an admin in `multi` mode, so it is unreachable
 > today.
 >
-> ⚠️ **Reality contradicts the decision above.** "No external OAuth proxy is required" is a
-> consequence of multi mode. In `single` mode the panel has **no login wall at all**, so the
-> homelab deployment fronts it with Traefik `chain-oauth@file` (Google OAuth), keeping `/healthz`
-> public on a higher-priority router for the Uptime-Kuma poll (see `docker-compose.example.yml`
-> and CLAUDE.md). The shipped `Caddyfile.example` still documents the proxy-straight-through path
-> the locked decision describes. The middleware comes off when multi-user login lands.
+> ⚠️ **Forward-auth caveat.** "No external OAuth proxy is required" holds in `oidc` mode (and
+> will in `multi`). In `single` mode the panel has **no login wall at all**, so a deployment must
+> front it with an authenticating proxy (the example compose shows a Traefik forward-auth
+> middleware), keeping `/healthz` public on a higher-priority router for the uptime poll. A
+> forward-auth gate is the weaker control: it lives in the proxy, so a request that reaches the
+> container port bypasses it, and the app can only attribute Accept/Ack to the implicit user.
+> Switching to `oidc` lets the middleware come off after a rollout with both gates in place
+> (DEPLOYMENT.md, "Authentication").
+>
+> **Why a third mode and why app-native (record, `oidc-sso-login` D1/D2).** `oidc` is a separate
+> value rather than "`multi` + OIDC" because `multi` means admin-created users, per-user mounted
+> bases and password login, none of which is built or needed to put one operator behind SSO;
+> hanging OIDC on it would ship a half-built `multi` or drag user administration into the change.
+> When `multi` lands, OIDC becomes one of its login methods. App-native login was chosen over
+> swapping one forward-auth gate for another because the process that acts on a request verifies
+> the token itself (signature, issuer, audience, nonce, expiry), Accept and Acknowledge-all are
+> bound to a verified identity re-checked on every request, and revocation is local
+> (`cairn users unlink` / `revoke-sessions`). It does not protect against whoever controls TLS
+> termination, and the evidence (read-only mounts + `.ots` proofs) is unaffected by a panel
+> compromise either way.
 
 ### Example multi-user instance (illustrative config, NOT hardcoded)
 
@@ -175,7 +196,7 @@ cairn/
       base.py  dispatch.py  smtp.py  signal_callmebot.py  webhook.py  ntfy.py  kuma_push.py
     control_panel/      # routes.py (all panel + htmx endpoints) + Jinja2 templates + static assets
     api/                # reserved for a REST surface — empty package, nothing mounted
-    auth/               # reserved for session auth — empty package (Phase 2, §4)
+    auth/               # oidc mode: OIDC client, login wall, auth routes, access-log filter (§4)
     witness/            # reserved for the restic witness — empty package (deferred, §10)
     cli.py              # argparse entrypoint (command list below)
   alembic/versions/     # 0001 … 0011
@@ -185,12 +206,15 @@ cairn/
 ```
 
 The panel's endpoints live in `control_panel/routes.py`, not in `api/` — the panel is
-server-rendered htmx, so there was never a separate JSON API to mount. `api/`, `auth/` and
-`witness/` are reserved namespaces, empty today.
+server-rendered htmx, so there was never a separate JSON API to mount. `api/` and `witness/` are
+reserved namespaces, empty today.
 
 ### SQLite schema (as built; `src/models/db.py`, migrations `0001`–`0011`)
-- `users(id, username, password_hash, is_admin, is_active, created_at, last_login_at)`
-  — single-user mode uses one implicit row.
+- `users(id, username, password_hash, is_admin, is_active, created_at, last_login_at,
+  oidc_issuer, oidc_subject, oidc_linked_at, session_epoch)` — single-user and `oidc` modes use
+  one implicit row. The OIDC triple is all-or-none, unique on `(oidc_issuer, oidc_subject)`;
+  `session_epoch` is bumped by `cairn users link|unlink|revoke-sessions` to end sessions
+  (migration `0013`, added in place without rebuilding `users`).
 - `collections(id, user_id, name, root, mode[worm|churn], hash_cadence_seconds,
   verify_cadence_seconds, ots_mode[none|perfile], auto_baseline_new, exclude_globs_json,
   alert_json, created_at, last_full_scan_at)`
@@ -306,19 +330,22 @@ mechanism.) `CAIRN_SCHEDULER_ENABLED=0` gives a cron-only deployment driven by `
   the scaffolded channels shown as planned), **Verification** (block source, calendar servers —
   env-only values presented as description, never as a dead control), and **Users & mounts**
   (admin, `multi` mode only — not yet built)
-- **login / register** — Phase 2, not built (§4)
+- **login** — `oidc` mode only: one "Sign in with SSO" button, plus the "not authorized" refusal
+  page and a sign-out control in the header (§4). Password login / register — Phase 2, not built
 
 ### CLI (headless / cron / ops)
 `cairn init | serve | add-collection | scan [--collection X] [--once] | accept [--collection X] |
 verify <relpath> | export <relpath> | upgrade | stamp [--collection X] [--all] | bench |
-import-manifest --collection X --file PATH [--rehash]`. `--once` for cron; `serve` runs the panel;
-`stamp` backfills an unstamped baseline off the scan path; `bench` measures local SHA-256
+import-manifest --collection X --file PATH [--rehash] | users list|link|unlink|revoke-sessions`. `--once` for cron; `serve` runs the panel;
+`stamp` backfills an unstamped baseline off the scan path; `users list|link|unlink|revoke-sessions`
+manages the pinned OIDC identity and is the break-glass path; `bench` measures local SHA-256
 throughput and estimates a deep pass. **`status` is the one subcommand still planned** — it exists
 on the parser and exits non-zero. After the corpus→collection rename, `add-corpus` and `--corpus`
 remain as aliases. Flag defaults and behaviour live in CLAUDE.md, not here.
 
 ### Config (env + optional YAML) — captures everything that would otherwise be hardcoded
-`CAIRN_*` env via pydantic-settings, with an optional YAML file: auth mode · datastore path ·
+`CAIRN_*` env via pydantic-settings, with an optional YAML file: auth mode · OIDC client
+(`CAIRN_OIDC_*`, read in `oidc` mode only; incomplete config refuses to start) · datastore path ·
 proof-store path · OTS calendars · stamp batch size · verify backend (explorer URL or node RPC) ·
 incomplete-proof alarm days · scheduler enable/intervals · health freshness floor · public panel
 URL · SMTP server · per-collection policy + alert routing (on the collection row, not in env).
@@ -389,8 +416,8 @@ Cairn is the same *shape* of app, so we lift patterns (and where clean, code):
   unmaintained and whose bcrypt backend is broken against bcrypt>=5), `User` model with
   `is_admin`/`is_active`, per-user scoping (their `vault_path` → our per-user collections). Drop the
   API-key + OAuth2/PKCE layers (MCP-specific; Cairn v1 needs only the panel session auth).
-  *Status:* the `User` model and the per-user scoping are in; the session-login lift has not
-  happened yet (§4, Phase 2).
+  *Status:* the `User` model and the per-user scoping are in; the password session-login lift
+  has not happened (Phase 2). Login shipped instead as app-native OIDC (`oidc` mode, §4).
 - **Indexer → scanner:** the "run on startup, then on a cadence, hash-based change detection"
   loop is exactly our scan/diff/hash; we change the payload from "embed notes" to
   "classify + stamp".

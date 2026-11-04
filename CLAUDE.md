@@ -25,7 +25,7 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 - `src/config.py` — pydantic-settings (`CAIRN_AUTH_MODE`, paths, calendars, verify backend…)
 - `src/database.py` — async SQLAlchemy engine/session; sets SQLite `WAL` + `foreign_keys` pragmas
 - `src/models/db.py` — ORM: `users`, `collections`, `files`, `runs`, `events`
-- `src/auth/` — session login, password hashing, login/register routes (lift from obsidian_mcp)
+- `src/auth/` — `oidc` mode: OIDC client, login wall, auth routes, access-log filter, UI label (password login/register = Phase 2)
 - `src/services/scanner.py` — walk → diff → hash changed → classify (added/modified/missing)
 - `src/services/ots.py` — stamp / upgrade / verify (wraps the `ots` CLI)
 - `src/services/scheduler.py` — per-collection scan cadence (staggered) + daily OTS upgrade + heartbeat
@@ -44,8 +44,9 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 - **SQLite, not Postgres** — a safety tool must run without a DB service; trivial self-host
   install; the DB is just an index (the guarantee is bytes + `.ots` proofs). Scanner is the
   single writer; WAL mode keeps panel reads concurrent.
-- **Web-panel-first, dual-mode** — `CAIRN_AUTH_MODE=single|multi`. Multi-user = login + admin,
-  each user scoped to their own collections.
+- **Web-panel-first, multi-mode** — `CAIRN_AUTH_MODE=single|oidc|multi`. `oidc` = the single
+  owner behind an app-native OIDC login wall (built). Multi-user = login + admin, each user scoped
+  to their own collections (Phase 2 placeholder).
 - **Watched folders mounted read-only**; DB + proof store on a separate read-write volume. Cairn
   cannot modify/delete what it watches. Each user's collection roots are jailed under an
   admin-provisioned base mount.
@@ -81,6 +82,10 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
   deep-scan ETA (total size ÷ throughput). Read-only.
 - `cairn import-manifest --collection X --file PATH [--rehash]` — **implemented** (add-manifest-import):
   import the photo-tripwire `manifest.tsv` as a pre-existing, unstamped baseline (parity, DESIGN §8).
+- `cairn users list | link --subject SUB [--issuer URL] [--user NAME] [--replace] | unlink [--user NAME] | revoke-sessions [--user NAME]`
+  — **implemented** (oidc-sso-login): manage the pinned OIDC identity; the break-glass path. Works in
+  `single`/`oidc` without a server or login; `link` defaults `--issuer` to `CAIRN_OIDC_ISSUER` only in
+  `oidc` mode (required otherwise); `link`/`unlink`/`revoke-sessions` bump `users.session_epoch`.
 - `cairn status` — _planned_.
 
 > OTS notary (add-ots-notary): per-file stamps land in the writable proof store
@@ -163,6 +168,39 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > `multi` mode (Phase 2). In **single mode the panel has no login wall**, so the homelab deploy
 > fronts it with Traefik `chain-oauth@file` (Google OAuth), with `/healthz` kept public on a
 > higher-priority router for the Uptime-Kuma poll. Drop the middleware once multi-user login ships.
+
+> OIDC SSO login (oidc-sso-login): a third mode **`CAIRN_AUTH_MODE=oidc`** = the same one implicit
+> owner (`ensure_implicit_user` runs as in `single`) behind an app-native OIDC login wall; `single`
+> stays byte-identical (slice-0 goldens in `tests/goldens/single/`) except `/mode/toggle`, which in
+> **every** mode now redirects only to a local path from the `Referer` (open-redirect fix). Code:
+> `src/auth/oidc.py` (discovery 1 h cache, exact issuer, JWKS with rate-limited `kid` refetch, alg
+> allowlist RS256/PS256/ES256 ∩ advertised, never `none`/`HS*`, PKCE S256 + state + nonce, in-process
+> transaction store TTL 5 min / cap 1024 / single-use / browser-bound — **one worker only**, bounded
+> transport: no redirects, `trust_env=False`, 10 s, 128 KiB; `aud` string or array-with-`azp`, RFC 9207
+> `iss`; rate limits global 60/min, per-address 10/min), `src/auth/wall.py` (default-deny middleware;
+> public allowlist `/healthz`, `/static/*`, `/login`, `/auth/oidc/start`, `/auth/oidc/callback`,
+> `/auth/refused`, `/auth/logout`, `/mode/toggle`; 303 → `/login?next=` / htmx 401 + `HX-Redirect` /
+> `/api` JSON 401; one local-path rule for `next`, callback and toggle; per-request re-validation: user
+> exists, active, linked, `session_epoch` matches, `now - login_at` < max age — else clear + refuse),
+> `src/auth/routes.py` (`GET /login`, `POST /auth/oidc/start` CSRF, `GET /auth/oidc/callback` always
+> 303s, `GET /auth/refused` 403 with the person's own issuer+subject from a one-shot session value,
+> `POST /auth/logout` CSRF), `src/auth/access_log.py` (a `uvicorn.access` filter, `oidc` only, strips
+> the callback query and drops records it cannot parse), `src/auth/ui.py` (`SSO_BUTTON_LABEL`; the
+> label is spelled nowhere else). Admission = the `(issuer, subject)` pair on `users` (migration
+> `0013`, plain `ADD COLUMN`, **never a `users` rebuild** — FK cascades would eat every collection);
+> no JIT, never matched by email. Session = `uid`, `epoch`, `auth`, `login_at`, CSRF nonce; no tokens,
+> claims or subject. Cookie `https_only`, Lax, `max_age` = `CAIRN_OIDC_SESSION_MAX_AGE` (43200).
+> Settings: `CAIRN_OIDC_ISSUER|CLIENT_ID|CLIENT_SECRET|TOKEN_AUTH_METHOD|EXTRA_SCOPES|REQUIRED_GROUP|
+> GROUPS_CLAIM|SESSION_MAX_AGE`, ignored outside `oidc` (server and CLI). **Fail-loud** in `oidc`:
+> missing issuer/client/secret, non-https issuer, `CAIRN_PUBLIC_URL` (env/YAML only, never the panel
+> override) unset/invalid/non-https, `CAIRN_SECRET_KEY` missing or < 32 chars, `offline_access`, bad
+> auth method or lifetime → no startup, error `<SETTING>: <reason>` with no value (`hide_input_in_errors`,
+> `SecretStr`). The provider is never contacted at startup. Redirect URI = `{CAIRN_PUBLIC_URL}/auth/oidc/callback`,
+> never from headers. Accept/Ack/Ack-all log username + `auth=oidc`. **Accepted limitations:** TLS
+> terminator can hijack sessions; per-address limits key on a spoofable forwarded address (both
+> entrypoints trust `X-Forwarded-*` from any peer — the port must be proxy-only); restart drops
+> in-flight logins; unlink doesn't end the provider session; no step-up before Accept; one identity,
+> one user; broken static `oidc` config = no scanning. Operator docs: DEPLOYMENT.md "Authentication".
 
 > Event acknowledgement (streamline-event-acknowledgement): only the alarming kinds nag —
 > `missing` (both modes) + worm `modified`. The informational kinds `added`/`restored` are written
