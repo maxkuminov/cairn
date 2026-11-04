@@ -97,7 +97,7 @@ Files: `src/config.py`, `src/main.py`, `src/database.py` (`ensure_implicit_user`
 `session_username`, the `mode_toggle` handler, and the attribution log lines only),
 `requirements.txt`, `pyproject.toml`, `tests/test_oidc_*.py`.
 
-- [ ] B.1 Config: `auth_mode` gains `oidc`; the `CAIRN_OIDC_*` settings; the fail-loud
+- [x] B.1 Config: `auth_mode` gains `oidc`; the `CAIRN_OIDC_*` settings; the fail-loud
   validation list (D9), reading `public_url` from env/YAML only and requiring `https` in `oidc`
   mode only (an `http` public URL still loads in `single`/`multi`, unchanged). Tests per scenario.
   Secret-safe errors (design D9): `hide_input_in_errors=True`, `secret_key` and
@@ -106,10 +106,10 @@ Files: `src/config.py`, `src/main.py`, `src/database.py` (`ensure_implicit_user`
   `oidc` configuration in the D9 list, with recognisable `CAIRN_SECRET_KEY` and
   `CAIRN_OIDC_CLIENT_SECRET` values, asserting the setting is named and neither secret appears
   in stdout/stderr.
-- [ ] B.2 `ensure_implicit_user` runs in `single` and `oidc`. `SessionMiddleware` and the CSRF
+- [x] B.2 `ensure_implicit_user` runs in `single` and `oidc`. `SessionMiddleware` and the CSRF
   serializer take the real key in `oidc` mode with no fallback, `https_only=True`,
   `max_age=CAIRN_OIDC_SESSION_MAX_AGE`; `single` mode arguments unchanged (slice 0 goldens).
-- [ ] B.3 `src/auth/oidc.py`: bounded transport (no redirects, `trust_env=False`, 10 s, 128 KiB),
+- [x] B.3 `src/auth/oidc.py`: bounded transport (no redirects, `trust_env=False`, 10 s, 128 KiB),
   discovery cache (1 h, exact issuer, https endpoints), JWKS cache with rate-limited refetch on
   unknown `kid`, algorithm allowlist ∩ advertised, transaction store (TTL 5 min, 1024 cap, purge
   before admission, `Retry-After`, atomic single-use, browser binding), rate limits (global
@@ -117,48 +117,48 @@ Files: `src/config.py`, `src/main.py`, `src/database.py` (`ensure_implicit_user`
   checks (including the `aud` profile: string, or array containing the client with more than
   one element only when `azp` equals the client ID), RFC 9207 `iss`, closed reason codes. Use Authlib + joserfc pinned exactly; run
   `make trivy` on the built image and record the result in the PR.
-- [ ] B.4 `src/auth/wall.py`: default-deny middleware with the public allowlist; refusal shapes
+- [x] B.4 `src/auth/wall.py`: default-deny middleware with the public allowlist; refusal shapes
   (303 / htmx 401 + `HX-Redirect` / JSON 401); safe `next`; per-request re-validation (exists,
   active, linked, epoch, absolute lifetime) clearing the session on failure. The local-path rule
   lives in one function used by `next`, the callback redirect and `/mode/toggle`.
-- [ ] B.4a `/mode/toggle` in **every** mode: Location = path and query of the `Referer` only when
+- [x] B.4a `/mode/toggle` in **every** mode: Location = path and query of the `Referer` only when
   it passes the local-path rule, else `/`. Tests in both `single` and `oidc` mode:
   `Referer: https://evil.example/phish` → `Location: /phish` (never another origin),
   `//evil.example/x` and a backslash form → `/`, a same-site panel page → that page with the
   same status and `cairn_mode` cookie as before. The slice 0 same-site toggle golden passes
   unchanged.
   (Supervisor, after slice 0: an absolute same-site `Referer` now yields a path-only Location, e.g. `/collections` instead of `http://testserver/collections`. This is the intended fix; B regenerates exactly that one slice-0 golden and states it in its commit; the path-only-Referer golden must stay unchanged.)
-- [ ] B.4b `_base_context` passes `session_username` (the session user's name in `oidc`, `None`
+- [x] B.4b `_base_context` passes `session_username` (the session user's name in `oidc`, `None`
   otherwise); a test renders a real panel page in `oidc` mode and finds the sign-out control.
-- [ ] B.4c `panel_error_handler` in `src/main.py`: in `oidc` mode, `session_username` from the user
+- [x] B.4c `panel_error_handler` in `src/main.py`: in `oidc` mode, `session_username` from the user
   the wall validated for this request (kept on `request.state`, no extra datastore read) and a
   real CSRF token from the session nonce instead of `""`; `None`/empty for an anonymous request.
   Test: sign in, request a nonexistent panel URL, assert 404 with the username and a sign-out form
   whose token is accepted by `POST /auth/logout`. `single` error page unchanged (slice 0).
-- [ ] B.5 `src/auth/routes.py`: `GET /login`, `POST /auth/oidc/start` (CSRF), `GET
+- [x] B.5 `src/auth/routes.py`: `GET /login`, `POST /auth/oidc/start` (CSRF), `GET
   /auth/oidc/callback` (never renders at its own URL: success 303 → `next` with a fresh session,
   protocol failure 303 → `/login?error=failed`, D7 refusal 303 → `/auth/refused` with the one-shot
   `refused` session value), `GET /auth/refused` (403, consumes the value; without one it shows the
   generic text only), `POST /auth/logout` (CSRF). Callback and refusal responses carry
   `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. Provider tokens discarded before
   the session is written.
-- [ ] B.5a `src/auth/access_log.py`: in `oidc` mode only, a filter on the `uvicorn.access` logger
+- [x] B.5a `src/auth/access_log.py`: in `oidc` mode only, a filter on the `uvicorn.access` logger
   that rewrites any `/auth/oidc/callback` request target to the bare path and drops a record whose
   arguments it does not recognise; installed from `src/main.py` so both entrypoints (`cairn serve`
   and the image's `uvicorn` CMD) get it.
-- [ ] B.5b Real-server log test: start uvicorn in a subprocess through `cairn serve` and through
+- [x] B.5b Real-server log test: start uvicorn in a subprocess through `cairn serve` and through
   the image's CMD argv, hit the callback with recognisable `code`/`state`/`iss` values on the
   success, failure and refusal paths, and assert none of those values nor the raw query string
   appear in captured stdout/stderr.
-- [ ] B.6 `current_user` returns the session user in `oidc` mode; Accept, Ack and Ack-all log
+- [x] B.6 `current_user` returns the session user in `oidc` mode; Accept, Ack and Ack-all log
   action, collection, username and `auth=oidc` (no subject).
-- [ ] B.7 Tests with a local fake provider (signing keys generated in the test, never committed):
+- [x] B.7 Tests with a local fake provider (signing keys generated in the test, never committed):
   every scenario under the `oidc-login` capability, including the route-enumeration test, alg
   `none`/`HS256` refusal, multi-audience with and without a matching `azp`, foreign `azp`, missing/mismatched `iss` parameter,
   replayed and cross-browser state, oversized and redirecting provider responses, unlink and
   epoch revocation mid-session, lifetime expiry, fixation, group checks, and a log-capture
   assertion that no secret, token, state, nonce, verifier or subject is logged.
-- [ ] B.8 Slice 0 goldens still pass unchanged.
+- [x] B.8 Slice 0 goldens still pass unchanged.
 
 ## C. Login page and templates (parallel with A and D; merges before B starts)
 

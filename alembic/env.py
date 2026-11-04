@@ -23,7 +23,10 @@ from src.models.db import Base  # noqa: E402
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers=False`: migrations run in-process at startup (CAIRN_AUTO_MIGRATE)
+    # and from `cairn init`; the default would silently disable every logger already created —
+    # uvicorn's access/error loggers and Cairn's own `cairn.auth`/`cairn.audit` attribution lines.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

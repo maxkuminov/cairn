@@ -5,9 +5,10 @@ authentication", plus the 512/513 issuer and 255/256 subject boundaries through 
 in `single` mode with `CAIRN_OIDC_ISSUER` set (refused without `--issuer`, linked with it), and a
 `users` command on a `multi` database with no user (non-zero, one line).
 
-`oidc` mode itself is configured by slice B (`src/config.py`); until then these tests put the CLI
-and the identity service in `oidc` mode by overriding `get_settings()` with a view of the real
-settings whose `auth_mode`/`oidc_issuer` are replaced, so the tests keep working after B lands.
+`oidc` mode is a real setting since slice B; these tests still override `get_settings()` with a
+view of the real settings whose `auth_mode`/`oidc_issuer` are replaced, so they can also feed the
+identity service issuers that the configuration would already refuse (its own validation is the
+backstop for any writer that bypasses config).
 """
 
 from __future__ import annotations

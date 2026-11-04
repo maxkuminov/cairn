@@ -2,7 +2,7 @@
   "headers": [
     [
       "location",
-      "http://testserver/collections"
+      "/collections"
     ],
     [
       "set-cookie",

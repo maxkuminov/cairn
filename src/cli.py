@@ -45,9 +45,21 @@ def _cmd_init(args: argparse.Namespace) -> int:
 def _cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
+    from pydantic import ValidationError
+
     from .config import get_settings
 
-    settings = get_settings()
+    try:
+        settings = get_settings()
+    except ValidationError as exc:
+        # One `<SETTING>: <reason>` per line; the settings model hides every input value, so no
+        # secret can reach the terminal through this path (oidc-sso-login, design D9).
+        for err in exc.errors(include_input=False, include_url=False):
+            msg = str(err.get("msg", "")).removeprefix("Value error, ")
+            loc = ".".join(str(p) for p in err.get("loc", ()))
+            print(f"cairn serve: configuration error: {msg if not loc else f'{loc}: {msg}'}",
+                  file=sys.stderr)
+        return 2
     uvicorn.run(
         "src.main:app",
         host=args.host or settings.host,

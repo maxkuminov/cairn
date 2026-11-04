@@ -22,7 +22,15 @@ _DEV_FALLBACK_KEY = "cairn-single-user-dev-key"
 
 
 def _secret_key() -> str:
-    return get_settings().secret_key or _DEV_FALLBACK_KEY
+    settings = get_settings()
+    key = settings.secret_key.get_secret_value() if settings.secret_key is not None else ""
+    if settings.auth_mode == "oidc":
+        # No built-in fallback in `oidc` mode (design D9); config refuses to load without a key,
+        # so this is a backstop, never a path.
+        if not key:
+            raise RuntimeError("CAIRN_SECRET_KEY: required in oidc mode")
+        return key
+    return key or _DEV_FALLBACK_KEY
 
 
 def _serializer() -> URLSafeTimedSerializer:

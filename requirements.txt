@@ -26,3 +26,9 @@ opentimestamps-client>=0.7.2
 # `ots stamp/upgrade/verify` — but an unfloored transitive is how the built image ended up
 # carrying them, so it gets an explicit floor like starlette.
 gitpython>=3.1.60
+# OIDC login (oidc-sso-login, design D3). Authlib supplies the PKCE S256 challenge; joserfc (also
+# Authlib's own JOSE dependency) verifies ID-token signatures. Floors are the releases this mode
+# was written and tested against; both enter the image through the Trivy HIGH/CRITICAL gate
+# (`make trivy`, the CI image job), which blocks on a finding rather than waiving it.
+authlib>=1.9.4
+joserfc>=1.8.0

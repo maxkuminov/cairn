@@ -230,13 +230,19 @@ def _capture(out_path: str) -> None:
         if name not in ("self", "app", "secret_key")
     }
     effective.update(kwargs)
+    configured = get_settings().secret_key
+    # Only the values that decide the cookie's security, not Starlette's whole signature: a new
+    # keyword with a default (e.g. `partitioned`) must not fail this golden on a dependency bump.
     session_mw = {
-        "explicit_kwargs": sorted(kwargs),
-        "effective": {k: (v if isinstance(v, (str, int, bool, type(None))) else repr(v))
-                      for k, v in sorted(effective.items())},
+        "session_cookie": effective["session_cookie"],
+        "same_site": effective["same_site"],
+        "https_only": effective["https_only"],
+        "max_age": effective["max_age"],
         "secret_source": (
             "built-in-dev-fallback" if secret == "cairn-single-user-dev-key"
-            else "settings" if secret == get_settings().secret_key else "other"
+            else "settings"
+            if configured is not None and secret == configured.get_secret_value()
+            else "other"
         ),
         "csrf_secret_source": (
             "built-in-dev-fallback" if csrf._secret_key() == csrf._DEV_FALLBACK_KEY else "settings"
@@ -386,6 +392,9 @@ def _write_goldens(cap: dict) -> None:
         json.dumps(cap["session_middleware"], indent=2, sort_keys=True) + "\n"
     )
     for cmd, text in cap["cli_help"].items():
+        # The top-level golden is the pre-`users` help: regenerating must not bake the entry in.
+        if cmd == "cairn":
+            text = _strip_users_entry(text)
         (GOLDEN_DIR / f"cli_help_{cmd}.txt").write_text(text)
 
 
@@ -459,5 +468,6 @@ def test_normalization_hides_nothing_else(captures):
     assert http["dashboard"]["normalized"].get("session_cookie") == 1
     assert http["healthz"]["normalized"] == {"scan_age": 1, "version": 1}
     assert http["mode_toggle_same_site"]["status"] == 303
-    assert ["location", "http://testserver/collections"] in http["mode_toggle_same_site"]["headers"]
+    # B.4a: an absolute same-site Referer now yields its path only (never an origin).
+    assert ["location", "/collections"] in http["mode_toggle_same_site"]["headers"]
 

@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
 from ..csrf import generate_csrf_token, verify_csrf
+from ..auth.wall import local_target_from_referer
 from ..database import get_session
 from ..models.db import Collection, Event, FileEntry, Run, User
 from ..services import app_settings as app_settings_svc
@@ -142,8 +143,19 @@ def humanize_date(dt: datetime | None) -> str | None:
 # --- user / context -------------------------------------------------------------------------
 
 
-async def current_user(session: AsyncSession = Depends(get_session)) -> User:
-    """Resolve the implicit single user (scope anchor). Multi-user adds the login wall later."""
+async def current_user(request: Request, session: AsyncSession = Depends(get_session)) -> User:
+    """The user every query is scoped by.
+
+    ``oidc``: the session user the login wall validated for THIS request (``src/auth/wall.py``
+    re-checks existence, active, link, epoch and lifetime before any route runs). ``single``: the
+    implicit owner, exactly as before.
+    """
+    if get_settings().auth_mode == "oidc":
+        uid = getattr(request.state, "cairn_user_id", None)
+        user = await session.get(User, uid) if isinstance(uid, int) else None
+        if user is None:
+            raise HTTPException(status_code=401, detail="authentication required")
+        return user
     user = await session.scalar(select(User).order_by(User.id).limit(1))
     if user is None:  # pragma: no cover - lifespan bootstraps this
         raise HTTPException(status_code=500, detail="no user provisioned")
@@ -152,6 +164,17 @@ async def current_user(session: AsyncSession = Depends(get_session)) -> User:
 
 def _mode(request: Request) -> str:
     return "dark" if request.cookies.get("cairn_mode") == "dark" else "light"
+
+
+_audit_log = logging.getLogger("cairn.audit")
+
+
+def _audit(action: str, collection_id: int | str, user: User) -> None:
+    """Attribution line for an integrity-critical action: never a subject or a token."""
+    _audit_log.info(
+        "action=%s collection=%s user=%s auth=%s",
+        action, collection_id, user.username, get_settings().auth_mode,
+    )
 
 
 async def _collection_counts(session: AsyncSession, collection_id: int) -> dict[str, int]:
@@ -524,6 +547,8 @@ async def _base_context(
         # Copy that describes who can open a panel URL has to know which mode is running: in
         # `single` there is no login wall at all, so a claim about owner-scoping would be false.
         "auth_mode": get_settings().auth_mode,
+        # The signed-in user for the header's sign-out control; None outside `oidc`.
+        "session_username": user.username if get_settings().auth_mode == "oidc" else None,
         "username": user.username,
         "is_admin": user.is_admin,
         "user_email": f"{user.username}@localhost",
@@ -540,7 +565,9 @@ async def _base_context(
 async def mode_toggle(request: Request):
     current = _mode(request)
     new = "light" if current == "dark" else "dark"
-    target = request.headers.get("referer") or "/"
+    # Path + query of the Referer only, through THE local-path rule; never another origin, in
+    # every mode (oidc-sso-login B.4a: this used to be an open redirect).
+    target = local_target_from_referer(request.headers.get("referer"))
     resp = RedirectResponse(target, status_code=303)
     resp.set_cookie("cairn_mode", new, max_age=60 * 60 * 24 * 365, samesite="lax")
     return resp
@@ -809,6 +836,7 @@ async def ack_event(
         event.acknowledged_at = datetime.now(timezone.utc)
         event.acknowledged_by = user.id
         await session.commit()
+        _audit("ack", collection.id, user)
 
     # Recompute the global open-count + missing badge for the OOB swaps shared by both views.
     collections = await collections_svc.list_collections(session, user_id=user.id)
@@ -928,6 +956,7 @@ async def ack_all_events(
             .values(acknowledged_at=datetime.now(timezone.utc), acknowledged_by=user.id)
         )
         await session.commit()
+        _audit("ack-all", ",".join(str(i) for i in collection_ids), user)
 
     feed = await _event_feed(session, collection_ids)
     return templates.TemplateResponse(
@@ -1805,10 +1834,12 @@ async def _guarded_accept(
             await session.rollback()
             return stale
         await scanner_svc.accept_file(session, collection, fe, user.id)
+        _audit(f"accept:{form}", collection.id, user)
         return None
     await scanner_svc.accept_collection(
         session, collection, user.id, scope=_FP_ACCEPT_SCOPES[form]
     )
+    _audit(f"accept:{form}", collection.id, user)
     return None
 
 
@@ -2236,6 +2267,7 @@ async def collection_review_ack_all(
         .values(acknowledged_at=datetime.now(timezone.utc), acknowledged_by=user.id)
     )
     await session.commit()
+    _audit("ack-all", collection.id, user)
     return RedirectResponse(f"/collection/{collection_id}/review", status_code=303)
 
 

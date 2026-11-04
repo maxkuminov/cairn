@@ -146,9 +146,13 @@ def run_migrations() -> None:
 
 
 async def ensure_implicit_user(session: AsyncSession) -> None:
-    """In single-user mode, ensure one implicit owner row exists (idempotent)."""
+    """In ``single`` and ``oidc`` mode, ensure one implicit owner row exists (idempotent).
+
+    ``oidc`` is one owner behind a login wall (oidc-sso-login, design D1): the bootstrap is the
+    same, the wall decides who may act as that owner.
+    """
     settings = get_settings()
-    if settings.auth_mode != "single":
+    if settings.auth_mode not in ("single", "oidc"):
         return
     existing = await session.scalar(select(User).limit(1))
     if existing is None:

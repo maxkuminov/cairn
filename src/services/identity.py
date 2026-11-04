@@ -74,9 +74,9 @@ def validate_issuer(issuer: str | None) -> str:
 def _default_issuer() -> str:
     """The configured issuer — only in ``oidc`` mode; outside it the OIDC settings are ignored."""
     settings = get_settings()
-    if getattr(settings, "auth_mode", None) != "oidc":
+    if settings.auth_mode != "oidc":
         raise IdentityError("--issuer is required outside oidc mode")
-    configured = getattr(settings, "oidc_issuer", None)
+    configured = settings.oidc_issuer
     if not configured:
         raise IdentityError("--issuer is required: CAIRN_OIDC_ISSUER is not set")
     return str(configured)

@@ -21,7 +21,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__
-from .config import get_settings
+from .config import Settings, get_settings
+from .csrf import generate_csrf_token
 from .database import (
     ensure_dirs,
     ensure_implicit_user,
@@ -115,17 +116,6 @@ async def lifespan(app: FastAPI):
         await get_engine().dispose()
 
 
-app = FastAPI(title="Cairn", version=__version__, lifespan=lifespan)
-STATIC_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-# Sessions back the CSRF nonce + (later) login. In single-user mode CAIRN_SECRET_KEY is optional,
-# so fall back to a stable dev key; multi-user mode requires a real key (enforced in config).
-_session_secret = get_settings().secret_key or "cairn-single-user-dev-key"
-app.add_middleware(SessionMiddleware, secret_key=_session_secret, same_site="lax")
-
-
-@app.get("/healthz")
 async def healthz() -> JSONResponse:
     """Liveness + per-collection scan freshness, for an external dead-man's-switch monitor.
 
@@ -194,11 +184,13 @@ async def healthz() -> JSONResponse:
     return JSONResponse(body, status_code=200 if report.status == "ok" else 503)
 
 
-# Mount the control panel (dashboard at /, collection detail, add/edit, verify, settings).
+# The control panel (dashboard at /, collection detail, add/edit, verify, settings).
+from .auth.ui import register_template_globals  # noqa: E402
 from .control_panel.routes import router as panel_router  # noqa: E402
 from .control_panel.routes import templates as panel_templates  # noqa: E402
 
-app.include_router(panel_router)
+# `login.html` and `base.html` read the SSO label as a Jinja global (src/auth/ui.py).
+register_template_globals(panel_templates)
 
 
 # --- branded HTML errors for panel navigations ----------------------------------------------
@@ -236,7 +228,6 @@ def _wants_html(request: Request) -> bool:
     return "text/html" in request.headers.get("accept", "")
 
 
-@app.exception_handler(StarletteHTTPException)
 async def panel_error_handler(request: Request, exc: StarletteHTTPException):
     """Render panel errors as a branded page; leave the API/JSON contract untouched.
 
@@ -249,6 +240,16 @@ async def panel_error_handler(request: Request, exc: StarletteHTTPException):
         return await http_exception_handler(request, exc)
 
     detail = exc.detail if isinstance(exc.detail, str) else ""
+    # In `oidc` mode the signed-in user comes from what the wall validated for THIS request (no
+    # second datastore read), and the sign-out form needs a real CSRF token. An anonymous error
+    # page (a public path, or no valid session) shows neither.
+    auth_mode = get_settings().auth_mode
+    session_username = None
+    csrf_token = ""
+    if auth_mode == "oidc":
+        session_username = getattr(request.state, "cairn_username", None)
+        if session_username:
+            csrf_token = generate_csrf_token(request)
     ctx = {
         "status_code": exc.status_code,
         "heading": _ERROR_HEADINGS.get(exc.status_code, "Something went wrong"),
@@ -257,15 +258,75 @@ async def panel_error_handler(request: Request, exc: StarletteHTTPException):
         # datastore may be exactly what failed.
         "page": "",
         "mode": "dark" if request.cookies.get("cairn_mode") == "dark" else "light",
-        "auth_mode": get_settings().auth_mode,
+        "auth_mode": auth_mode,
+        "session_username": session_username,
         "username": "",
         "is_admin": False,
         "user_email": "",
         "sidebar_collections": [],
         "alert_count": 0,
-        "csrf_token": "",
+        "csrf_token": csrf_token,
         "detail": detail,
     }
     return panel_templates.TemplateResponse(
         request, "error.html", ctx, status_code=exc.status_code, headers=exc.headers
     )
+
+
+# --- application factory -----------------------------------------------------------------------
+
+
+def session_middleware_kwargs(settings: Settings) -> dict:
+    """The `SessionMiddleware` arguments for this mode.
+
+    ``single``/``multi``: exactly as before ``oidc`` existed — the configured key or a stable dev
+    fallback (``multi`` requires a key; config enforces), ``same_site="lax"``, everything else
+    Starlette's default. ``oidc``: the real key with NO fallback (config refuses to load without
+    one), ``Secure``, ``SameSite=Lax`` (the callback is a top-level GET) and a cookie max age equal
+    to the absolute OIDC session lifetime (design D6).
+    """
+    key = settings.secret_key.get_secret_value() if settings.secret_key is not None else ""
+    if settings.auth_mode == "oidc":
+        if not key:  # pragma: no cover - config refuses this; a backstop, never a path
+            raise RuntimeError("CAIRN_SECRET_KEY: required in oidc mode")
+        return {
+            "secret_key": key,
+            "same_site": "lax",
+            "https_only": True,
+            "max_age": settings.oidc_session_lifetime,
+        }
+    return {"secret_key": key or "cairn-single-user-dev-key", "same_site": "lax"}
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Build the ASGI app for the configured mode. ``src.main:app`` is ``create_app()``."""
+    settings = settings or get_settings()
+    application = FastAPI(title="Cairn", version=__version__, lifespan=lifespan)
+    STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    application.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    if settings.auth_mode == "oidc":
+        from .auth import access_log
+        from .auth.oidc import OIDCClient
+        from .auth.wall import LoginWall
+
+        # Both entrypoints import this module, so both get the access-log filter (design D11).
+        access_log.install()
+        application.state.oidc = OIDCClient(settings)
+        # Added BEFORE SessionMiddleware, so it runs INSIDE it and sees the decoded session.
+        application.add_middleware(LoginWall)
+
+    # Sessions back the CSRF nonce and, in `oidc` mode, the login.
+    application.add_middleware(SessionMiddleware, **session_middleware_kwargs(settings))
+
+    application.add_api_route("/healthz", healthz, methods=["GET"])
+    application.include_router(panel_router)
+    if settings.auth_mode == "oidc":
+        from .auth.routes import router as auth_router
+
+        application.include_router(auth_router)
+    application.add_exception_handler(StarletteHTTPException, panel_error_handler)
+    return application
+
+
+app = create_app()
