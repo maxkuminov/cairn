@@ -8,7 +8,7 @@
 # flat env vars (the per-corpus policy + alert-routing tables below).
 
 # ─── Core (same settings as .env, YAML form) ─────────────────────────────────
-auth_mode: single                                   # single | multi
+auth_mode: single                                   # single | oidc | multi (multi = Phase 2 placeholder)
 hostname: cairn.example.com
 # OPTIONAL — the panel's externally-reachable base URL: the address a HUMAN
 # opens in a browser (your reverse proxy), NOT the container's bind address.
@@ -18,9 +18,25 @@ hostname: cairn.example.com
 # Grammar: http/https, a host, an optional port and path prefix
 # (https://example.com/cairn); no query string, fragment, or credentials.
 # Also settable in the panel (Settings -> Notifications), which wins over both
-# this file and CAIRN_PUBLIC_URL.
+# this file and CAIRN_PUBLIC_URL -- for alert links only. In `oidc` mode this
+# value (here or CAIRN_PUBLIC_URL, never the panel override) is REQUIRED, must be
+# https, and is the base of the OIDC redirect URI ({public_url}/auth/oidc/callback).
 # public_url: https://cairn.example.com
-# secret_key: ""                                    # prefer setting via env, never commit
+# secret_key: ""                                    # SECRET — env only, never commit. Required (>= 32 chars) in oidc mode
+
+# ─── Single sign-on (auth_mode: oidc only; ignored in every other mode) ─────
+# Any standards-compliant OpenID Connect provider (confidential client,
+# authorization code flow, ID token signed RS256/PS256/ES256). Missing or invalid
+# values stop startup in oidc mode with an error naming the setting. See
+# DEPLOYMENT.md "Authentication" for provider setup and `cairn users link`.
+# oidc_issuer: https://idp.example.com/realms/example
+# oidc_client_id: cairn
+# oidc_client_secret: ""                            # SECRET — set CAIRN_OIDC_CLIENT_SECRET in env, never here
+# oidc_token_auth_method: client_secret_basic       # client_secret_basic | client_secret_post
+# oidc_extra_scopes: ""                             # added to `openid`, e.g. "groups"; offline_access is refused
+# oidc_required_group: ""                           # unset = no group check; exact, case-sensitive match
+# oidc_groups_claim: groups                         # ID-token claim holding the groups array
+# oidc_session_max_age: 43200                       # absolute session lifetime, seconds (12 h)
 database_url: sqlite+aiosqlite:////app/data/cairn.db
 proof_store_path: /app/proofs
 auto_migrate: true

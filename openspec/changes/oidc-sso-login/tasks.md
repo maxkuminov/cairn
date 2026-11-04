@@ -185,7 +185,7 @@ Files: `README.md`, `DEPLOYMENT.md`, `SECURITY.md`, `DESIGN.md` (§4 and the aut
 `Caddyfile.example`. Use placeholders only (`https://idp.example.com/realms/example`,
 `https://cairn.example.com`, client ID `cairn`).
 
-- [ ] D.1 DEPLOYMENT.md: an "Authentication" section — the three modes; a **provider setup**
+- [x] D.1 DEPLOYMENT.md: an "Authentication" section — the three modes; a **provider setup**
   subsection (generic: confidential client, authorization code flow, redirect URI
   `https://cairn.example.com/auth/oidc/callback`, signing algorithm RS256/PS256/ES256, optional
   groups claim in the ID token; then a Keycloak example: client authentication on, standard flow
@@ -193,34 +193,38 @@ Files: `README.md`, `DEPLOYMENT.md`, `SECURITY.md`, `DESIGN.md` (§4 and the aut
   path" as the operator prefers, where to find the user's ID = subject); `cairn users link`;
   the rollout (run alongside an existing front-door gate, link, verify, then remove the gate,
   keeping `/healthz` public); rollback; break-glass; the new variables in the configuration table.
-- [ ] D.2 SECURITY.md: the `oidc` mode and what it protects; the network-isolation requirement
+- [x] D.2 SECURITY.md: the `oidc` mode and what it protects; the network-isolation requirement
   (`cairn serve` trusts forwarded headers from any peer, so the container port must be reachable
   only by the reverse proxy); a TLS terminator can hijack sessions; the evidence (read-only
   mounts + OTS proofs) is unaffected by panel compromise; suppress callback query logging at the
   proxy.
-- [ ] D.3 README: status and quickstart mention SSO; link to the provider setup.
-- [ ] D.4 DESIGN.md §4: add `oidc` to the modes, update the "shipped state" note and the
+- [x] D.3 README: status and quickstart mention SSO; link to the provider setup.
+- [x] D.4 DESIGN.md §4: add `oidc` to the modes, update the "shipped state" note and the
   forward-auth caveat; record D1/D2 rationale briefly with a pointer to this change.
-- [ ] D.5 `config.example.yaml`, `.env.example`: `auth_mode` values, commented `oidc_*` keys,
+- [x] D.5 `config.example.yaml`, `.env.example`: `auth_mode` values, commented `oidc_*` keys,
   secrets marked env-only.
-- [ ] D.6 `docker-compose.example.yml`: comment showing the `oidc` variables and that the
+- [x] D.6 `docker-compose.example.yml`: comment showing the `oidc` variables and that the
   front-door auth middleware becomes optional once `oidc` is verified; `/healthz` router
   unchanged. `Caddyfile.example`: `oidc` mode proxies straight through, with a log filter
   example that drops the callback query string.
-- [ ] D.7 CLAUDE.md: the `oidc-sso-login` note (mode, routes, wall allowlist, CLI, settings,
+- [x] D.7 CLAUDE.md: the `oidc-sso-login` note (mode, routes, wall allowlist, CLI, settings,
   accepted limitations) and the commands list gains `cairn users`.
-- [ ] D.8 Public-repo gate (design D12) over the **whole tracked tree** (`git grep` on every
+- [x] D.8 Public-repo gate (design D12) over the **whole tracked tree** (`git grep` on every
   tracked file: docs, archived OpenSpec changes, code comments, tests, design mock data), not the
   diff: personal names other than the copyright/author lines, real host paths, real collection
   sizes and file names, private-deployment monitor/ticket identifiers, private hostnames and
   repositories, private addresses, non-`example` emails. The names/hostnames list comes from the
   operator at gate time and is never committed; only generic category patterns may be.
+  Tooling: `scripts/public-repo-gate.sh [--terms FILE] [--allow REGEX]` (generic patterns:
+  RFC 1918/link-local IPv4, non-example emails, real host paths; operator terms file refused if
+  tracked). Running it with the operator's terms is part of D.9/E.1.
 - [ ] D.9 Redact or generalise every existing hit found by D.8 (DESIGN.md first; also CLAUDE.md,
   archived OpenSpec changes, code comments, tests, CI workflow comments and the design mock data)
   as **one dedicated commit** within this change, separate from the feature commits. It runs
   after A, B and C have merged (it touches files those slices own, so it is not part of the
   parallel D slice); behaviour
   and test assertions unchanged except for renamed fixture strings.
+  (Not done in slice D: supervisor, after A–C merge.)
 
 ## E. Verification and archive (supervisor)
 

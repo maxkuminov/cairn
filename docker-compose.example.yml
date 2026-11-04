@@ -20,6 +20,20 @@
 #   DATA_HOST_PATH    -- host path for the SQLite DB (writable)
 #   PROOFS_HOST_PATH  -- host path for the .ots proof store (writable)
 #   ...plus the corpus mounts below (edit the `volumes:` list directly).
+#
+# In-app single sign-on (optional): set in `.env`
+#   CAIRN_AUTH_MODE=oidc
+#   CAIRN_PUBLIC_URL=https://cairn.example.com          (required, https)
+#   CAIRN_SECRET_KEY=<at least 32 random characters>     (required)
+#   CAIRN_OIDC_ISSUER=https://idp.example.com/realms/example
+#   CAIRN_OIDC_CLIENT_ID=cairn
+#   CAIRN_OIDC_CLIENT_SECRET=<from your provider>        (secret, env only)
+#   ...optional CAIRN_OIDC_* settings: see .env.example / DEPLOYMENT.md.
+# then link yourself once: docker compose exec cairn cairn users link --subject <sub>
+# Incomplete oidc configuration makes the container refuse to start.
+#
+# The container port (8000) must be reachable ONLY by the reverse proxy: both
+# entrypoints trust X-Forwarded-* headers from any peer. Never add `ports:`.
 
 networks:
   t2_proxy:
@@ -84,9 +98,18 @@ services:
     labels:
       - "traefik.enable=true"
       # AUTH: in single-user mode the app has NO in-app login wall, so the panel
-      # is fronted by Traefik's chain-oauth@file middleware (defense in depth /
-      # interim protection). Once CAIRN_AUTH_MODE=multi (Phase 2) enforces in-app
-      # login + admin, this middleware becomes optional and can be dropped.
+      # is fronted by a Traefik forward-auth middleware (`chain-oauth@file` here;
+      # use whatever your Traefik provides).
+      #
+      # With CAIRN_AUTH_MODE=oidc the app enforces its own SSO login, so this
+      # middleware becomes OPTIONAL: keep it while you roll out (both gates
+      # apply; link yourself, sign in, check an unlinked account is refused),
+      # then delete only the `cairn-rtr.middlewares=` label below. The
+      # /healthz router stays exactly as it is.
+      #
+      # Traefik's own access log records the callback query (?code=&state=) of
+      # /auth/oidc/callback; if you enable it, drop the request path field
+      # (accessLog.fields.names.RequestPath=drop).
       #
       # /healthz is the dead-man's-switch poll target (Uptime Kuma) and MUST stay
       # public — it gets its own higher-priority router with NO middleware.
