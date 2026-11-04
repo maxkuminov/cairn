@@ -127,6 +127,7 @@ Files: `src/config.py`, `src/main.py`, `src/database.py` (`ensure_implicit_user`
   `//evil.example/x` and a backslash form → `/`, a same-site panel page → that page with the
   same status and `cairn_mode` cookie as before. The slice 0 same-site toggle golden passes
   unchanged.
+  (Supervisor, after slice 0: an absolute same-site `Referer` now yields a path-only Location, e.g. `/collections` instead of `http://testserver/collections`. This is the intended fix; B regenerates exactly that one slice-0 golden and states it in its commit; the path-only-Referer golden must stay unchanged.)
 - [ ] B.4b `_base_context` passes `session_username` (the session user's name in `oidc`, `None`
   otherwise); a test renders a real panel page in `oidc` mode and finds the sign-out control.
 - [ ] B.4c `panel_error_handler` in `src/main.py`: in `oidc` mode, `session_username` from the user
