@@ -1,7 +1,7 @@
 # Tolerate un-writable proof output paths and never abort a stamp batch
 
 ## Why
-On 2026-07-07 the live deploy crash-looped while batch-stamping the Skate SharePoint tree. A single
+On 2026-07-07 the live deploy crash-looped while batch-stamping a large synced document tree. A single
 Cyrillic filename made the batch raise an uncaught `OSError`, and because the container runs
 `restart: unless-stopped`, every restart re-ran scan-all-on-startup over the whole read-only tree —
 pinning the host (the co-located document-extraction pool saturated ~10 of 12 cores; the box went
@@ -13,7 +13,7 @@ Root cause (`src/services/ots.py`, `ots-notarization` §"Stamp pending files in 
 File "/app/src/services/ots.py", line 250, in stamp_batch_via_symlink
     os.replace(staged_ots, out)
 OSError: [Errno 36] File name too long:
-  '…/Договор займа от 09.19.2024 - Линева Елена - Расчет процентов.xlsx.ots'
+  '…/<a long Cyrillic file name>.xlsx.ots'
 ```
 
 - Errno 36 = **ENAMETOOLONG**. A filesystem caps one path component at `NAME_MAX` **bytes** (255 on
@@ -81,4 +81,4 @@ here the notary can't **write the proof file** for a relpath it stored fine.
 - **Operational:** the stopped container can be redeployed and restarted safely once this ships —
   the bad file is now skipped-and-counted and the batch completes. Files previously wedged `pending`
   by this bug drop to `none` on their next stamp pass. Deploy/restart of the live host is gated on
-  Max's go-ahead (see the queue ticket's stop conditions) because restarting re-runs the full batch.
+  the operator's go-ahead (see the task's stop conditions) because restarting re-runs the full batch.

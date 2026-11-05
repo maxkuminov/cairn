@@ -218,13 +218,15 @@ Files: `README.md`, `DEPLOYMENT.md`, `SECURITY.md`, `DESIGN.md` (§4 and the aut
   Tooling: `scripts/public-repo-gate.sh [--terms FILE] [--allow REGEX]` (generic patterns:
   RFC 1918/link-local IPv4, non-example emails, real host paths; operator terms file refused if
   tracked). Running it with the operator's terms is part of D.9/E.1.
-- [ ] D.9 Redact or generalise every existing hit found by D.8 (DESIGN.md first; also CLAUDE.md,
+- [x] D.9 Redact or generalise every existing hit found by D.8 (DESIGN.md first; also CLAUDE.md,
   archived OpenSpec changes, code comments, tests, CI workflow comments and the design mock data)
   as **one dedicated commit** within this change, separate from the feature commits. It runs
   after A, B and C have merged (it touches files those slices own, so it is not part of the
   parallel D slice); behaviour
   and test assertions unchanged except for renamed fixture strings.
-  (Not done in slice D: supervisor, after A–C merge.)
+  (Not done in slice D: supervisor, after A–C merge.) Done in commit "Redact deployment-specific
+  data from the public tree (D.9)": the generic gate's remaining hits are the illustrative LAN
+  address `192.168.1.10` (UI copy, spec scenario, tests) and `a@x.com`-style test fixtures.
 
 ## E. Verification and archive (supervisor)
 

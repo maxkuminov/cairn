@@ -62,7 +62,7 @@
   DB advanced pending→incomplete=4672 and exactly 4672 `.ots` on disk.)_
 - [x] 7.2 Verify one stamped file independently (`cairn verify` / `ots verify`) and confirm a `none`
   baseline corpus (Photos) gained no proofs; spot-check `cairn stamp --corpus X --all` backfills.
-  _(`cairn verify ATX-codes.pdf` re-hashed + matched the proof → "pending, not yet anchored" (correct
+  _(`cairn verify report.pdf` re-hashed + matched the proof → "pending, not yet anchored" (correct
   for a same-day stamp). Photos stayed at 0 proofs / 186427 `none`. The `--all` backfill was NOT run
   live — the only large `none` baseline is Photos (must stay unstamped); it is covered by unit +
   panel tests and rides the now-live-proven batched path.)_

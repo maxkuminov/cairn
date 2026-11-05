@@ -22,7 +22,7 @@ threat). The container SHALL run as a non-root user with dropped Linux capabilit
 The project SHALL provide a `Makefile` whose `deploy` target builds the image, pushes it,
 backs up the SQLite database, and recreates the running container from the compose file. Host-
 specific paths SHALL be supplied via a gitignored `Makefile.local` (e.g.
-`DEPLOY_DIR=/srv/cairn`), never committed.
+`DEPLOY_DIR=/opt/cairn`), never committed.
 
 #### Scenario: Deploy performs an online SQLite backup before recreate
 

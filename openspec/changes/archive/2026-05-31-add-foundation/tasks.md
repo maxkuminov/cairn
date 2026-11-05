@@ -17,12 +17,12 @@
 
 ## 4. Migrations (async Alembic)
 
-- [x] 4.1 `alembic.ini` + `alembic/env.py` adapted from `obsidian_mcp` for `sqlite+aiosqlite` async (run_migrations_online via async engine; `render_as_batch=True` for SQLite ALTER support). Point `target_metadata` at the models' `Base.metadata`.
+- [x] 4.1 `alembic.ini` + `alembic/env.py` adapted from the sibling project for `sqlite+aiosqlite` async (run_migrations_online via async engine; `render_as_batch=True` for SQLite ALTER support). Point `target_metadata` at the models' `Base.metadata`.
 - [x] 4.2 Initial migration `0001_initial` creating all five tables, FKs, CHECK constraints, unique + secondary indexes. `alembic upgrade head` succeeds on a fresh file; `alembic downgrade base` drops cleanly.
 
 ## 5. App runtime (`src/main.py`)
 
-- [x] 5.1 FastAPI app with `lifespan`: on startup open the engine, run `alembic upgrade head` when `auto_migrate`, call `ensure_implicit_user`, and call a `start_scheduler()` no-op hook (placeholder for the scheduler change); cancel/close on shutdown. Mirror the obsidian_mcp lifespan structure.
+- [x] 5.1 FastAPI app with `lifespan`: on startup open the engine, run `alembic upgrade head` when `auto_migrate`, call `ensure_implicit_user`, and call a `start_scheduler()` no-op hook (placeholder for the scheduler change); cancel/close on shutdown. Mirror the sibling project's lifespan structure.
 - [x] 5.2 `GET /healthz` → JSON `{status, mode, version, scans: {stub}}`, 200 when DB reachable, 503 when not. (Real scan-freshness lands with the scheduler.)
 - [x] 5.3 Mount Jinja2 templates (`src/control_panel/templates/`) + `/static` (`src/control_panel/static/`) with a placeholder `index.html` ("Cairn — panel coming soon") so the app serves something. Add CSRF/session middleware seams (config from settings) without enforcing login yet.
 
@@ -36,8 +36,8 @@
 - [x] 7.1 `Dockerfile`: `python:3.12-slim`, `apt` curl + (build deps for opentimestamps if needed), non-root `appuser` (uid 1000), install `requirements.txt`, install the `ots` CLI, copy `alembic*`/`src/`, `EXPOSE 8000`, CMD uvicorn `src.main:app`. Verify `ots --version` in the image.
 - [x] 7.2 `docker-compose.yml`: `cairn` service from `${REGISTRY}/cairn:latest`, `restart unless-stopped`, `cap_drop: ALL`, `no-new-privileges`, resource limits, `env_file: .env`. Volumes: example corpus mounts as **`:ro`**, plus `${DATA_HOST_PATH}:/app/data` and `${PROOFS_HOST_PATH}:/app/proofs` read-write, timezone mounts. Healthcheck hits `/healthz`. Comment the read-only-corpus / writable-data invariant (DESIGN §4).
 - [x] 7.3 `Caddyfile.example` (TLS reverse proxy to `cairn:8000`, app owns its own auth) and `.env.example` (CAIRN_* keys incl. `CAIRN_HOSTNAME`, generated `SECRET_KEY` guidance, host paths). Add `config.example.yaml`.
-- [x] 7.4 `Makefile` modeled on `obsidian_mcp/Makefile`: `-include Makefile.local`; vars `IMAGE_NAME=cairn`, `REGISTRY?=localhost:5000`, `DEPLOY_DIR?=.`, `DATA_DIR?=./data`, `COMPOSE` macro. Targets: `help init build build-cached push image deploy up down restart logs shell db-backup status clean audit`. `db-backup` = `sqlite3 $(DATA_DIR)/cairn.db ".backup ..."` + gzip. `deploy: image` then backup + `compose up -d --force-recreate` + prune.
-- [x] 7.5 `Makefile.local` (gitignored) with `DEPLOY_DIR := /srv/cairn` and `DATA_DIR := /srv/cairn` for Max's host. Confirm `.gitignore` already ignores `Makefile.local` (it does) and add if missing.
+- [x] 7.4 `Makefile` modeled on the sibling project's `Makefile`: `-include Makefile.local`; vars `IMAGE_NAME=cairn`, `REGISTRY?=localhost:5000`, `DEPLOY_DIR?=.`, `DATA_DIR?=./data`, `COMPOSE` macro. Targets: `help init build build-cached push image deploy up down restart logs shell db-backup status clean audit`. `db-backup` = `sqlite3 $(DATA_DIR)/cairn.db ".backup ..."` + gzip. `deploy: image` then backup + `compose up -d --force-recreate` + prune.
+- [x] 7.5 `Makefile.local` (gitignored) with `DEPLOY_DIR := /opt/cairn` and `DATA_DIR := /opt/cairn` for the operator's host. Confirm `.gitignore` already ignores `Makefile.local` (it does) and add if missing.
 
 ## 8. Verification
 

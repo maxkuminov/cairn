@@ -1,4 +1,4 @@
-"""CSRF protection (adapted from obsidian_mcp's ``csrf.py``).
+"""CSRF protection (adapted from a sibling FastAPI project's ``csrf.py``).
 
 An itsdangerous-signed token bound to a per-session nonce; validated with a timing-safe compare.
 The token is rendered into templates and echoed back via the ``X-CSRF-Token`` header (htmx) or a

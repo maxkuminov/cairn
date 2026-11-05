@@ -147,7 +147,7 @@ operator wants. The spec states this weakening so it is a decision, not an overs
   (D5 of sprint 1: `complete_active == stampable > 0`) but its wording also names the
   population: `"all {a} present files anchored"` instead of `"{a} anchored · all confirmed"` —
   round 2 of the spec audit caught that leaving that branch's words alone reproduces issue
-  #40's second half (Max Documents: "all confirmed" with a count visibly below Total because
+  #40's second half (the Documents collection: "all confirmed" with a count visibly below Total because
   missing files are excluded, explained nowhere). Only words change; no computed value changes
   anywhere.
 - No second segbar (per Non-goals): the misread is "unlabelled bar adjacent to a ratio";

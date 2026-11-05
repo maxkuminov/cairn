@@ -151,8 +151,8 @@ function AddCorpusPage({ go, editId }) {
   const [cadence, setCadence] = React.useState(existing ? String(existing.cadenceSeconds) : "86400");
   const [excludes, setExcludes] = React.useState((existing?.excludes || ["**/.thumbnails/**", "**/*.tmp"]).join("\n"));
   const [alerts, setAlerts] = React.useState(existing?.alerts || ["email"]);
-  const base = "/srv";
-  const rootValid = !root || root.startsWith(base) || root.startsWith("/mnt/");
+  const base = "/data";
+  const rootValid = !root || root.startsWith(base) || root.startsWith("/media/");
 
   const toggleAlert = (a) => setAlerts(p => p.includes(a) ? p.filter(x => x !== a) : [...p, a]);
 

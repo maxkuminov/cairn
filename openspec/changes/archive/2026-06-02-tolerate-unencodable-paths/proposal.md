@@ -5,7 +5,7 @@ A single file with a non-UTF-8 name silently freezes a whole corpus. On the live
 **Photos** corpus (186k files) has had run 113 stuck at `result='running'` since
 2026-06-01 22:58 — every scheduled scan since has been refused — while the other corpora scan
 every cadence. Root cause: exactly one file,
-`…/Wedding Irkutsk 19 Sept 09/All pictures-small/1à.jpg`, whose name is the Latin-1 byte `0xe0`,
+`…/<an album folder>/1à.jpg`, whose name is the Latin-1 byte `0xe0`,
 not valid UTF-8.
 
 The failure chain (DESIGN.md §5 *Per-run flow*; §3 *SQLite is the index*):

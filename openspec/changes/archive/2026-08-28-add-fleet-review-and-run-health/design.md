@@ -416,7 +416,7 @@ already carry the per-collection scan story. So the sub-line becomes
 `"<collection> <kind>"` plus `" · <result>"` for any result other than `ok`:
 
 - `Photos scan` (ok) · `Photos scan · partial` · `Photos scan · failed` ·
-  `Photos scan · interrupted` · `Max Docs upgrade` · `Bob Tax stamp`.
+  `Photos scan · interrupted` · `Docs upgrade` · `Bob Tax stamp`.
 - `interrupted` is worded neutrally here for the same reason as everywhere else (D7): it is what a
   deploy during a scan produces.
 - The existing `· N moved` suffix is kept.

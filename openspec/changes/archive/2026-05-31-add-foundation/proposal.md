@@ -6,14 +6,14 @@ runnable skeleton: configuration, an async SQLite datastore with the locked sche
 app + lifespan, a CLI entrypoint, and a deployment path. This change establishes that foundation
 so every later change is purely additive.
 
-It also stands up `make deploy` (modeled on the sibling `obsidian_mcp` project) now, while the
+It also stands up `make deploy` (modeled on a sibling FastAPI project) now, while the
 surface is small, so the deploy pipeline matures alongside the code rather than being bolted on
 at the end. Per DESIGN.md §3/§4, watched corpus folders are mounted **read-only** and the DB +
 proof store live on a **separate writable volume** — that security invariant is encoded in the
 container/compose layout from day one.
 
 References: DESIGN.md §3 (locked decisions), §4 (deployment/multi-user model), §5 (architecture,
-SQLite schema), §7 (reuse from obsidian_mcp).
+SQLite schema), §7 (reuse from the sibling project).
 
 ## What Changes
 
@@ -45,7 +45,7 @@ SQLite schema), §7 (reuse from obsidian_mcp).
   Traefik-frontable), `Caddyfile.example`, `.env.example`, and a `Makefile` with
   `init/build/push/deploy/up/down/logs/shell/db-backup/status/clean/audit` — `make deploy` =
   build → push → backup (SQLite copy) → `compose up -d --force-recreate`. Host-specific paths
-  live in a gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).
+  live in a gitignored `Makefile.local` (`DEPLOY_DIR=/opt/cairn`).
 
 ### Out of scope (deferred to later changes)
 

@@ -3,7 +3,7 @@
 - [x] 1.1 `static/css/tokens.css` — copy the Slate `:root`/`[data-mode=light|dark]` oklch variables from `docs/design/cairn/theme.css` (Slate only). `static/css/panel.css` — component classes per the handoff (card, pill, status-badge, ots-badge, dot/pulse `cairnPulse`, btn variants, field/input/select/textarea, toggle, seg control, segbar, page-header, spinner `cairnSpin`). Self-host fonts under `static/fonts/` + `@font-face`; vendor `static/js/htmx.min.js`.
 - [x] 1.2 `templates/base.html` — `<html data-mode>` from the `cairn_mode` cookie; load tokens/panel css + htmx; blocks for title/content. Macros: `{% macro icon(name) %}` (inline SVG set the handoff lists) and the CairnMark SVG.
 - [x] 1.3 `templates/_shell.html` (or base) — 248px sidebar (brand+CairnMark, primary nav Dashboard/Corpora/Verify with the missing-files alert badge, CORPORA list with status dots + counts, dashed "Add corpus", footer user block with ADMIN chip) + 60px topbar (search box, health pill bound to `/healthz`, mode toggle button, logout placeholder). Content max-width 1240px.
-- [x] 1.4 Mount the panel router in `src/main.py`; wire session + CSRF middleware (lift `csrf.py` from obsidian_mcp). `GET /panel/mode/toggle` flips the cookie.
+- [x] 1.4 Mount the panel router in `src/main.py`; wire session + CSRF middleware (lift `csrf.py` from the sibling project). `GET /panel/mode/toggle` flips the cookie.
 
 ## 2. Dashboard
 

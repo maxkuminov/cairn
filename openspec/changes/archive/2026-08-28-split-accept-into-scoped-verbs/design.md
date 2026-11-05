@@ -200,7 +200,7 @@ the ABA in D3 walks straight through it. The spec's *justification* for the gate
 also marks every open event on the collection reviewed") lapses with the scoped ack; what remains
 is the ordering argument — a baseline control must not sit in front of an alarm nobody has read.
 *Whether the baseline control should become available beside open issues is a UX question for its
-own change.* Flagged for Max.
+own change.* Flagged for the maintainer.
 
 ## D6 — The per-file guard
 
@@ -311,7 +311,7 @@ modifier over the existing `--warn` token; no new colour), the per-row stop-trac
 `btn--danger btn--sm`, and Mark reviewed is unchanged. Both destructive per-row controls carry their
 own confirm naming the single file.
 
-*Alternative Max may prefer:* reuse `btn--subtle` per row for literal consistency with #16's table
+*Alternative the maintainer may prefer:* reuse `btn--subtle` per row for literal consistency with #16's table
 and rely on label + icon alone to separate it from Mark reviewed. Cheaper, and one fewer CSS rule.
 
 ## D11 — What the CLI keeps

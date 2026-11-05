@@ -403,7 +403,7 @@ page that shows the operator what they are clearing.
 its `onsubmit` confirm already exists. The side benefit #14 notes holds: a deletion landing between
 page render and click can no longer be swept up by a stale header label.
 
-*Overridable:* demoting "Baseline new files" to `btn--subtle` is a one-class change if Max wants
+*Overridable:* demoting "Baseline new files" to `btn--subtle` is a one-class change if the maintainer wants
 `btn--primary` reserved for navigation only.
 
 **Render-time visibility is not the guard.** The header is decided when the page is built, and the

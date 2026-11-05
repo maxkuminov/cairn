@@ -290,15 +290,15 @@ def test_parser_handles_legacy_tripwire_format():
 
     sha = "8cea05853e56ea22833b3b011cd2dab472b351dbfba212e62f6a566e0585ca8f"
     text = (
-        f"20250223_161622.jpg\t6536053\t1740345451.8128441110\t{sha}\n"
-        f"Alice - modeling agency/4x6.jpg\t1629323\t1418076796.5799910000\t{'b' * 64}\n"
+        f"20240315_101500.jpg\t6536053\t1740345451.8128441110\t{sha}\n"
+        f"Family album - summer/4x6.jpg\t1629323\t1418076796.5799910000\t{'b' * 64}\n"
     )
     rows, skipped = parse_manifest(text)
     assert skipped == 0
     assert len(rows) == 2
     first = rows[0]
-    assert first.relpath == "20250223_161622.jpg"  # not the mtime float
+    assert first.relpath == "20240315_101500.jpg"  # not the mtime float
     assert first.size == 6536053
     assert first.mtime is not None and abs(first.mtime - 1740345451.8128) < 1.0
     assert first.sha256 == sha
-    assert rows[1].relpath == "Alice - modeling agency/4x6.jpg"
+    assert rows[1].relpath == "Family album - summer/4x6.jpg"

@@ -7,7 +7,7 @@ into `files` rows, `events`, and `runs`, plus the nag-until-accept lifecycle. It
 the scheduler (later) drives and the panel (later) displays.
 
 References: DESIGN.md §5 (per-run flow, schema), §8 (nag-until-accept lifecycle from the photo
-tripwire), §7 (reuse the obsidian_mcp indexer's hash-based change-detection loop).
+tripwire), §7 (reuse the sibling project's indexer hash-based change-detection loop).
 
 ## What Changes
 

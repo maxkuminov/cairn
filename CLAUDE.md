@@ -40,7 +40,7 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 ## Key decisions (see DESIGN.md §3 for full rationale)
 - **Python, not Node** — the maintained OTS tooling is Python (`opentimestamps-client` v0.7.2,
   2024-12-31); the JS lib is abandoned (v0.4.9, 2021, CI on EOL Node 6/7). Plus reuse of the
-  obsidian_mcp codebase and one stack on the host.
+  author's sibling FastAPI codebase and one stack on the host.
 - **SQLite, not Postgres** — a safety tool must run without a DB service; trivial self-host
   install; the DB is just an index (the guarantee is bytes + `.ots` proofs). Scanner is the
   single writer; WAL mode keeps panel reads concurrent.
@@ -52,7 +52,7 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
   admin-provisioned base mount.
 - **OTS per-file** where proofs may be shown externally; stamp on first-seen, re-stamp on change,
   daily `upgrade` pass. Verify defaults to a block-explorer lookup, configurable to a Bitcoin node.
-- **App owns its own auth** → no external OAuth proxy needed (unlike the obsidian_mcp panel).
+- **App owns its own auth** → no external OAuth proxy needed (unlike the sibling FastAPI app's panel).
 
 ## What to reuse from the sibling FastAPI app
 - Auth/session/password code and the `User`/admin/per-user-scoping pattern (drop the API-key &
@@ -123,7 +123,7 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > `CAIRN_SMTP_*` defaults (**DB wins**, empty table = pure env fallback) via
 > `effective_settings(session, get_settings())` at the scanner's dispatch site — no restart, no cache
 > bust. A "Send test email" button (`POST /settings/smtp/test`) verifies the config. The SMTP
-> password lives in the DB (homelab choice; a departure from "secrets via env only"). Follow-up:
+> password lives in the DB (self-hosting choice; a departure from "secrets via env only"). Follow-up:
 > source the scaffolded Signal CallMeBot key from env (not `alert_json`) before enabling that channel.
 > **Alert deep links (add-alert-deep-links):** an alert now carries `Alert.url` — a one-click link to
 > `{public_url}/collection/{id}/review`, so the reader lands on the missing/modified list with the
@@ -165,9 +165,9 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > labels or an IP literal), so `https://exa%mple.com`, `https://-` and `https://.` no longer pass as
 > valid and become dead links.
 > Deploy auth caveat: DESIGN says "app owns its own auth, no OAuth proxy" — that only holds in
-> `multi` mode (Phase 2). In **single mode the panel has no login wall**, so the homelab deploy
-> fronts it with Traefik `chain-oauth@file` (Google OAuth), with `/healthz` kept public on a
-> higher-priority router for the Uptime-Kuma poll. Drop the middleware once multi-user login ships.
+> `multi` mode (Phase 2). In **single mode the panel has no login wall**, so a single-mode deploy
+> fronts it with a forward-auth proxy middleware, with `/healthz` kept public on a
+> higher-priority router for the uptime poll. Drop the middleware once multi-user login ships.
 
 > OIDC SSO login (oidc-sso-login): a third mode **`CAIRN_AUTH_MODE=oidc`** = the same one implicit
 > owner (`ensure_implicit_user` runs as in `single`) behind an app-native OIDC login wall; `single`
@@ -289,7 +289,7 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > Verify via block explorer (inline fix, no openspec): the design says "verify defaults to a
 > block-explorer lookup, configurable to a Bitcoin node", but `ots.verify()` only ever ran
 > `ots verify -d`, and the maintained `ots` CLI (v0.7.2) can ONLY verify against a Bitcoin Core
-> node — so on the homelab host (no `bitcoind`) **every complete proof failed** with "Could not
+> node — so on a host without `bitcoind` **every complete proof failed** with "Could not
 > connect to Bitcoin node". `ots.verify()` is now a dispatcher: `backend="explorer"` (default)
 > parses the `.ots` with the `opentimestamps` library and confirms each `BitcoinBlockHeaderAttestation`'s
 > commitment equals the real block's merkle root, fetched from an esplora-compatible explorer
@@ -324,7 +324,7 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 
 > Un-writable proof paths (tolerate-unstampable-proof-paths): a proof filename that the store's
 > filesystem refuses (ext4 caps one path component at 255 **bytes**; multi-byte UTF-8 names + the
-> `.ots` suffix can exceed it — the 2026-07-07 Skate crash-loop) is **skipped per-file, never
+> `.ots` suffix can exceed it — the 2026-07-07 crash-loop) is **skipped per-file, never
 > batch-fatal**: the file is warned, counted, and dropped to `ots_state='none'` (`ots_path` and
 > `ots_stamped_at` cleared) so a normal scan never re-queues it; `stamp --all` may retry it cheaply.
 > Governing rule (module docstring, `src/services/ots.py`): **only a failure on the final proof
@@ -542,14 +542,14 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
-  Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).
+  Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/opt/cairn`).
 
 > **Standard session flow:** finish a unit of work by committing directly to `main`, pushing to
 > `origin`, then `make deploy`. `make deploy` does **not** run migrations and the container
 > auto-migrates only when `CAIRN_AUTO_MIGRATE` is set — so when a change adds an Alembic revision,
 > run `make migrate` (`alembic upgrade head`, idempotent) right after deploy. Verify with
 > `make status` / the `/healthz` poll. **This commit → push → `make deploy` → `make migrate` (when a
-> revision was added) flow is run automatically at the end of a unit of work — Max has standing
+> revision was added) flow is run automatically at the end of a unit of work — the maintainer has standing
 > authorization, so don't ask per change.** Only stage the files belonging to the change (leave
 > unrelated dirty files like in-progress proposals or local `docker-compose.yml` tweaks alone).
 
@@ -631,7 +631,7 @@ operator, not a consumer app.
 Keep it that way.
 
 ## Conventions
-- Build private; open-source when stable. Keep Max's host-specific paths/secrets out of tracked
+- Build private; open-source when stable. Keep host-specific paths/secrets out of tracked
   files (config & env, never hardcoded) — see DESIGN.md "core vs personal".
 - De-risk the OTS dependency early: smoke-test `ots stamp/upgrade/verify` on Python 3.12 before
   building `src/services/ots.py`.

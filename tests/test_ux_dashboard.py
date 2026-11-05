@@ -2008,7 +2008,7 @@ def test_the_anchored_ratio_names_the_population_its_denominator_counts(cairn_en
 
 
 def test_the_all_confirmed_claim_names_its_population_when_files_are_missing(cairn_env):
-    """The Max-Documents reading of #40: "all confirmed" over a count below the card's own total."""
+    """The Documents-collection reading of #40: "all confirmed" over a count below the card's own total."""
     root = cairn_env / "allconfirmed"
     root.mkdir()
 

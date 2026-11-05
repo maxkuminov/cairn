@@ -1,7 +1,7 @@
 ## Context
 
 DESIGN is web-panel-first; the handoff (`docs/design/`) is a high-fidelity React prototype that we
-must reproduce as server-rendered Jinja2 + htmx, NOT port literally. obsidian_mcp's
+must reproduce as server-rendered Jinja2 + htmx, NOT port literally. The sibling project's
 `control_panel/` (base layout, routes returning `TemplateResponse`, htmx partial swaps, CSRF) is
 the pattern to lift. The non-negotiable is scale: a corpus can hold 186k files, so the file list
 is always server-paginated and searched.
@@ -39,7 +39,7 @@ scoped to `ots_state='complete'`-or-`incomplete` anchored files.
   refreshed status. (Synchronous for small corpora; a progress affordance is acceptable.)
 - Root validation → `hx-get /panel/corpus/validate-root?path=...` → returns the ok/✗ indicator and
   toggles the submit button (also re-validated on the server at create/save).
-All mutating endpoints require a CSRF token (lifted from obsidian_mcp's `csrf.py`).
+All mutating endpoints require a CSRF token (lifted from the sibling project's `csrf.py`).
 
 ### D5 — Single-user scoping now; multi-user later
 The panel resolves the implicit single user and scopes all queries by `user_id`, so the same code

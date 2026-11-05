@@ -56,6 +56,6 @@ no-stamp behavior, which is driven by `status='ok'` + known hash, not by `first_
   real manifest needs a specific mapping, a `--columns` hint can be added later.
 - **Trust without `--rehash`**: importing without re-hashing trusts the legacy manifest's integrity.
   That is the intended speed/΄safety trade (re-hashing 1.4 TiB is the thing we are avoiding); the
-  `--rehash` option exists for the one-time verification Max can run opportunistically.
+  `--rehash` option exists for the one-time verification the operator can run opportunistically.
 - **mtime/size absent**: if the manifest lacks them, imported rows seed `size=0`/`mtime=null`; the
   first scan backfills them via a single hash that matches and does not stamp. Acceptable one-time cost.

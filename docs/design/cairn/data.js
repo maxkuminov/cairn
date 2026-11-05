@@ -5,7 +5,7 @@
       id: "photos",
       name: "Photos",
       owner: "alice",
-      root: "/srv/media/photos",
+      root: "/data/photos",
       mode: "worm",                 // worm | churn
       ots: "perfile",               // none | manifest | perfile
       otsNote: "new files only",
@@ -25,7 +25,7 @@
       id: "tax",
       name: "Tax practice files",
       owner: "bob",
-      root: "/srv/documents/tax",
+      root: "/data/documents/tax",
       mode: "worm",
       ots: "perfile",
       otsNote: "",
@@ -45,7 +45,7 @@
       id: "roms",
       name: "Game ROM collection",
       owner: "carol",
-      root: "/srv/games/roms",
+      root: "/data/games/roms",
       mode: "worm",
       ots: "none",
       otsNote: "tripwire only",
@@ -65,9 +65,9 @@
 
   const EVENTS = [
     { id: 1, corpus: "photos", kind: "missing", relpath: "2019/Italy/IMG_4821.jpg", at: "2h ago", atFull: "Today 09:34", ack: false },
-    { id: 2, corpus: "tax",    kind: "modified", relpath: "TAX CLIENTS/Brennan LLC/2024-return.pdf", at: "4 min ago", atFull: "Today 11:42", ack: false },
-    { id: 3, corpus: "tax",    kind: "modified", relpath: "TAX CLIENTS/Brennan LLC/W2-scan.pdf", at: "4 min ago", atFull: "Today 11:42", ack: false },
-    { id: 4, corpus: "tax",    kind: "modified", relpath: "TAX CLIENTS/Okafor/invoice-0142.pdf", at: "4 min ago", atFull: "Today 11:42", ack: false },
+    { id: 2, corpus: "tax",    kind: "modified", relpath: "Clients/Brennan LLC/2024-return.pdf", at: "4 min ago", atFull: "Today 11:42", ack: false },
+    { id: 3, corpus: "tax",    kind: "modified", relpath: "Clients/Brennan LLC/W2-scan.pdf", at: "4 min ago", atFull: "Today 11:42", ack: false },
+    { id: 4, corpus: "tax",    kind: "modified", relpath: "Clients/Okafor/invoice-0142.pdf", at: "4 min ago", atFull: "Today 11:42", ack: false },
     { id: 5, corpus: "photos", kind: "added",    relpath: "Alices phone/Upload/2026-05-29_173210.jpg", at: "1 day ago", atFull: "Sat 17:32", ack: true, stamped: true },
     { id: 6, corpus: "photos", kind: "added",    relpath: "Bobs Phone/Upload/2026-05-29_154411.heic", at: "1 day ago", atFull: "Sat 15:44", ack: true, stamped: true },
     { id: 7, corpus: "photos", kind: "restored", relpath: "2015/Wedding/DSC_0099.jpg", at: "3 days ago", atFull: "Thu 21:08", ack: true },
@@ -88,11 +88,11 @@
       { relpath: "2009/Archive/0002.jpg",              size: "2.4 MB",  status: "ok",       ots: "none",       checked: "6h ago" },
     ],
     tax: [
-      { relpath: "TAX CLIENTS/Brennan LLC/2024-return.pdf", size: "1.2 MB", status: "modified", ots: "pending", checked: "4 min ago" },
-      { relpath: "TAX CLIENTS/Brennan LLC/W2-scan.pdf",     size: "880 KB", status: "modified", ots: "pending", checked: "4 min ago" },
-      { relpath: "TAX CLIENTS/Okafor/invoice-0142.pdf",     size: "210 KB", status: "modified", ots: "pending", checked: "4 min ago" },
-      { relpath: "TAX CLIENTS/Okafor/2023-return.pdf",      size: "1.4 MB", status: "ok",       ots: "complete", checked: "4 min ago" },
-      { relpath: "TAX CLIENTS/Delgado/receipts-2024.pdf",   size: "3.1 MB", status: "ok",       ots: "complete", checked: "4 min ago" },
+      { relpath: "Clients/Brennan LLC/2024-return.pdf", size: "1.2 MB", status: "modified", ots: "pending", checked: "4 min ago" },
+      { relpath: "Clients/Brennan LLC/W2-scan.pdf",     size: "880 KB", status: "modified", ots: "pending", checked: "4 min ago" },
+      { relpath: "Clients/Okafor/invoice-0142.pdf",     size: "210 KB", status: "modified", ots: "pending", checked: "4 min ago" },
+      { relpath: "Clients/Okafor/2023-return.pdf",      size: "1.4 MB", status: "ok",       ots: "complete", checked: "4 min ago" },
+      { relpath: "Clients/Delgado/receipts-2024.pdf",   size: "3.1 MB", status: "ok",       ots: "complete", checked: "4 min ago" },
       { relpath: "Engagement Letters/2025-master.docx",     size: "94 KB",  status: "ok",       ots: "complete", checked: "4 min ago" },
     ],
     roms: [
@@ -105,17 +105,17 @@
   };
 
   const USERS = [
-    { username: "alice",    email: "alice@example.com",    admin: true,  active: true,  base: "/srv", corpora: 1, lastLogin: "Today 08:12" },
-    { username: "bob", email: "bob@example.com", admin: false, active: true,  base: "/srv/documents/tax", corpora: 1, lastLogin: "Today 11:40" },
-    { username: "carol", email: "carol@example.com", admin: false, active: true,  base: "/srv/games", corpora: 1, lastLogin: "5 days ago" },
+    { username: "alice",    email: "alice@example.com",    admin: true,  active: true,  base: "/data", corpora: 1, lastLogin: "Today 08:12" },
+    { username: "bob", email: "bob@example.com", admin: false, active: true,  base: "/data/documents/tax", corpora: 1, lastLogin: "Today 11:40" },
+    { username: "carol", email: "carol@example.com", admin: false, active: true,  base: "/data/games", corpora: 1, lastLogin: "5 days ago" },
   ];
 
-  const HEARTBEAT = { ok: true, last: "3 min ago", endpoint: "GET /healthz", monitor: "Health endpoint · polled by Uptime Kuma #85" };
+  const HEARTBEAT = { ok: true, last: "3 min ago", endpoint: "GET /healthz", monitor: "Health endpoint · polled by an uptime monitor" };
 
   // Sample verify result (file already tracked → proof looked up internally)
   const VERIFY_SAMPLE = {
     filename: "2024-return.pdf",
-    relpath: "TAX CLIENTS/Brennan LLC/2024-return.pdf",
+    relpath: "Clients/Brennan LLC/2024-return.pdf",
     corpus: "Tax practice files",
     sha256: "9f2a4c1e8b7d6033a5e1c9b40f8e2d7a16c3b9e05d4a8f2c1b6e9d0a3f7c2e84",
     verified: true,

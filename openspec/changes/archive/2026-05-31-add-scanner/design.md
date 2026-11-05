@@ -2,7 +2,7 @@
 
 The scanner is the single writer to SQLite (DESIGN §3). It must scale to ~186k files / 1.4 TiB
 without re-hashing everything every pass, and must be safe to run from the CLI now and from the
-scheduler later. It mirrors the obsidian_mcp indexer's "diff by path, hash only changes" shape
+scheduler later. It mirrors the sibling project's indexer "diff by path, hash only changes" shape
 but classifies for integrity instead of embedding.
 
 ## Decisions

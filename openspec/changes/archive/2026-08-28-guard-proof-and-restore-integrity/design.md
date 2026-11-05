@@ -288,7 +288,7 @@ stays `pending`.
 - **kept existing** (only reachable with the caller's *confirmed* verdict) → `ots_path = out`,
   `ots_state = 'complete'`, `ots_digest = <existing digest>`,
   and **`ots_stamped_at` is left as it is** — NULL on a row re-created by accept→restore.
-  *(Flagged for Max.)* The alternative, stamping it with `now`, would print "notarized today" over a
+  *(Flagged for the maintainer.)* The alternative, stamping it with `now`, would print "notarized today" over a
   three-year-old anchor: the same class of lie as #12's rejected fix 6 (labelling a download
   "existed by `<ots_stamped_at>`"). The proof's own attestation, which `/verify` reads, carries the
   real date; an unknown submission time is the honest record. The one cost is that

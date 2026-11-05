@@ -91,7 +91,7 @@ downgrade honest rather than lossy.
 The dashboard's **"last activity" tile** is included: it summarises the newest finished run of *any*
 kind and currently calls every one of them a "scan" with no result, so a `partial` scan, a failed
 scan, a reclaimed one and last night's `upgrade` pass all render identically to a clean scan. It
-becomes generic-and-correct — `Photos scan · partial`, `Max Docs upgrade` — rather than
+becomes generic-and-correct — `Photos scan · partial`, `Docs upgrade` — rather than
 scan-shaped-and-wrong (design **D14**).
 
 `interrupted` gets its own, deliberately **neutral** rendering. Since the operation-claim lease

@@ -1,6 +1,6 @@
 ## Context
 
-The obsidian_mcp indexer pattern — "run on startup, then on a cadence" as a lifespan background
+The sibling project's indexer pattern — "run on startup, then on a cadence" as a lifespan background
 task — is exactly our scheduler shape, but per-corpus rather than one global vault, and with a
 second daily job (OTS upgrade). The scanner is the single writer, so the loop must serialize
 scans (never two at once).

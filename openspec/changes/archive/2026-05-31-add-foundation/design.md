@@ -2,7 +2,7 @@
 
 Cairn is a single-writer integrity tool: the scanner is the only writer to SQLite; the panel
 reads (and writes light user/ack state). DESIGN.md locks SQLite (WAL) over Postgres precisely so
-a safety tool runs with no DB service. The sibling `obsidian_mcp` provides the FastAPI/auth/
+a safety tool runs with no DB service. The sibling FastAPI project provides the FastAPI/auth/
 session/lifespan patterns to lift, but it is Postgres-based — the datastore layer is the main
 adaptation.
 
@@ -41,20 +41,20 @@ startup and skips the login wall. `multi` mode's login/admin UI is a later chang
 rewrite, no data backfill).
 
 ### D6 — Async Alembic
-Mirror `obsidian_mcp/alembic/env.py`'s async pattern, swapping the URL to `sqlite+aiosqlite`.
+Mirror the sibling project's `alembic/env.py` async pattern, swapping the URL to `sqlite+aiosqlite`.
 Migrations are the source of truth for schema; `Base.metadata.create_all` is used only by the
 in-process test smoke if needed. On container start, `CAIRN_AUTO_MIGRATE=1` runs
 `alembic upgrade head` before uvicorn binds.
 
-### D7 — Deploy layout mirrors obsidian_mcp, adapted for SQLite + read-only corpora
+### D7 — Deploy layout mirrors the sibling project, adapted for SQLite + read-only corpora
 - `Makefile` includes a gitignored `Makefile.local` for host paths; defaults `DEPLOY_DIR=.`,
-  `DATA_DIR=./data`. Max's host sets `DEPLOY_DIR=/srv/cairn`.
+  `DATA_DIR=./data`. The operator's host sets e.g. `DEPLOY_DIR=/opt/cairn`.
 - `make deploy` = `build → push → db-backup → compose up -d --force-recreate → prune`.
 - `db-backup` copies the SQLite file via `sqlite3 <db> ".backup <dest>"` (consistent online
   backup) instead of `pg_dump`; no `db-init` step (Alembic handles schema).
 - `docker-compose.yml`: corpus host paths mounted **`:ro`**; `data/` (DB) and `proofs/` (`.ots`
   store) mounted read-write on a separate volume. Container runs as non-root, `cap_drop: ALL`,
-  `no-new-privileges`. Frontable by Caddy (shipped example) or an existing Traefik like Max's.
+  `no-new-privileges`. Frontable by Caddy (shipped example) or an existing Traefik.
 - `Dockerfile` installs the `ots` CLI (`opentimestamps-client`) so the notary service can
   subprocess it.
 

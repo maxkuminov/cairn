@@ -82,7 +82,7 @@ Pick whichever proxy you run. Both are pre-wired in the examples.
 The example uses Traefik labels with two routers:
 
 - A high-priority **public** router for `/healthz` only (no auth — your uptime monitor polls it).
-- A main router for everything else, behind an auth middleware (`chain-oauth@file` in the
+- A main router for everything else, behind an auth middleware (`forward-auth@file` in the
   example, e.g. a Google-OAuth forward-auth chain). Replace it with whatever auth middleware
   your Traefik provides.
 

@@ -1,6 +1,6 @@
 ## Why
 
-A working bash photo-integrity tripwire protects Max's ~186k photos right now and must not
+A working bash photo-integrity tripwire protects the operator's ~186k photos right now and must not
 regress when Cairn takes over. Cairn reaches parity by importing the tripwire's existing
 `manifest.tsv` baseline into the `files` table under the Photos corpus, WITHOUT re-hashing 1.4 TiB
 and WITHOUT treating those long-existing files as brand-new. The whole "stamp new photos only"
@@ -8,8 +8,8 @@ rule hinges on this import being correct: everything imported is pre-existing (d
 files first-seen after the import get a per-file OTS proof. DESIGN calls this a first-class, tested
 step before the bash script is retired.
 
-References: DESIGN.md §8 (migration from the photo tripwire; `manifest.tsv` at
-`/srv/integrity/`), §1 (the silent-loss fear the tripwire guards), §10 (Phase 1
+References: DESIGN.md §8 (migration from the photo tripwire; `manifest.tsv` in
+its state directory), §1 (the silent-loss fear the tripwire guards), §10 (Phase 1
 parity).
 
 ## What Changes
@@ -35,7 +35,7 @@ parity).
 
 ### Out of scope (deferred)
 
-- Retiring the bash script / cron / Kuma monitor (an operational step Max performs once parity is
+- Retiring the bash script / cron / Kuma monitor (an operational step the operator performs once parity is
   confirmed, not code here).
 - Importing the tripwire's `pending-deletions.tsv` acknowledgement state (the panel's
   accept/acknowledge flow supersedes it).

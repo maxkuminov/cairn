@@ -1,6 +1,6 @@
 """Import a legacy photo-tripwire ``manifest.tsv`` as a pre-existing, UNSTAMPED baseline.
 
-Cairn reaches parity with Max's bash tripwire (DESIGN.md §8) by loading its existing manifest
+Cairn reaches parity with the original bash tripwire (DESIGN.md §8) by loading its existing manifest
 into the ``files`` table WITHOUT re-hashing 1.4 TiB and WITHOUT treating long-existing files as
 brand-new. Every imported row is inserted as ``status='ok'`` with the manifest's known SHA-256 and
 ``ots_state='none'``, and NO ``added`` event is written. Because the scanner only stamps files it

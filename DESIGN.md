@@ -28,8 +28,8 @@ service dependency.
 
 ## 1. Motivation & origin
 
-Started as a fix for one concrete fear: Max's irreplaceable family photos
-(`/srv/media/photos`, ~1.4 TiB / 186k files) suffering **silent logical
+Started as a fix for one concrete fear: the operator's irreplaceable family photos
+(`/data/photos`, ~1.4 TiB / 186k files) suffering **silent logical
 loss** — a file deleted, overwritten, or corrupted *above* the block layer — that goes
 unnoticed until it ages off the off-site backup (~90–180 days) and is gone forever.
 
@@ -43,8 +43,8 @@ The gap is **logical-change detection** (scrub can't tell you a file *vanished*)
 photos (see §8); Cairn generalizes it into a reusable, multi-user product.
 
 Two real-world drivers that shaped scope:
-- **EXIF dates lie.** Max hit bad EXIF timestamps doing memoir research. For *new* photos
-  (auto-uploaded from phones via Nextcloud), an OTS proof gives a **trustworthy "existed-by"
+- **EXIF dates lie.** The operator hit bad EXIF timestamps while researching family history. For *new* photos
+  (auto-uploaded from phones via a sync app), an OTS proof gives a **trustworthy "existed-by"
   date independent of EXIF**. (It cannot retro-date the old archive — stamping a 2015 file
   today only proves "existed by 2026".)
 - **Document provenance.** Tax/legal documents where a *portable, third-party-verifiable*
@@ -75,10 +75,10 @@ use to verify it."*
 |---|---|---|
 | Product name | **Cairn** | Durable marker (provenance) you'd notice if disturbed (integrity); carries both halves. PyPI `cairn` is a dead-ish minor tool, so the *distribution* name needed a suffix — **resolved: `cairn-integrity`** (§12); the brand is clean |
 | Shape | **Web-panel-first**, with a headless CLI underneath | Multi-user requires a UI; users self-serve their monitored paths, see status, and verify proofs. The CLI still drives cron/headless ops |
-| Language/runtime | **Python 3.12** | (1) The OTS tooling that is *actually maintained* is Python — `opentimestamps-client` shipped **v0.7.2 on 2024-12-31**, vs the JS `opentimestamps` npm lib stuck at **v0.4.9 (2021-01-29)**, CI-tested only against EOL Node 6/7. Betting an integrity tool's core on abandoned crypto code is the wrong risk. (2) Direct reuse of Max's hardened Obsidian-MCP FastAPI codebase. (3) One stack to operate on the home server. (Node/TS evaluated and rejected; see §11.) |
-| Web stack | **FastAPI + uvicorn; Jinja2 + htmx + Tailwind panel** | Mirrors the Obsidian-MCP server — proven, server-rendered, minimal JS |
+| Language/runtime | **Python 3.12** | (1) The OTS tooling that is *actually maintained* is Python — `opentimestamps-client` shipped **v0.7.2 on 2024-12-31**, vs the JS `opentimestamps` npm lib stuck at **v0.4.9 (2021-01-29)**, CI-tested only against EOL Node 6/7. Betting an integrity tool's core on abandoned crypto code is the wrong risk. (2) Direct reuse of the author's hardened sibling FastAPI codebase. (3) One stack to operate on the home server. (Node/TS evaluated and rejected; see §11.) |
+| Web stack | **FastAPI + uvicorn; Jinja2 + htmx + Tailwind panel** | Mirrors the sibling FastAPI app — proven, server-rendered, minimal JS |
 | Datastore | **SQLite** (single file, WAL mode) | No service dependency (a safety tool must run even if a DB server is down); trivial self-host install; rides in existing snapshots/backups; "the DB is just an index — the guarantee is bytes + proofs". The scanner is the single writer; panel reads/writes are light. Postgres rejected: its concurrency/multi-app wins don't justify the install burden for a single-writer tool |
-| Multi-user | **Dual-mode (single / multi), like Obsidian MCP** | `single` = no login wall, one implicit user. `multi` = login + admin role, each user scoped to their own collections, can't see anyone else's |
+| Multi-user | **Dual-mode (single / multi), like the sibling FastAPI app** | `single` = no login wall, one implicit user. `multi` = login + admin role, each user scoped to their own collections, can't see anyone else's |
 | Filesystem access | **Read-only mounts, per-user jailed roots** | Cairn *physically cannot* modify or delete what it watches (the integrity tool can't become the threat). Each user's collection roots must live under an admin-provisioned, read-only mounted base |
 | OTS proof storage | **Parallel store** (separate writable volume) + `export` | Keeps watched trees clean & read-only; `cairn export <file>` bundles file + `.ots` for handoff |
 | OTS granularity | **Per-file** where proofs may be presented externally; manifest/none where only personal | Per-file = standalone portable proof, zero inventory disclosure. Calendar Merkle-aggregation makes per-file cheap (not N transactions); the *lifecycle* (incomplete→complete, N `.ots`) is what mandates the DB |
@@ -86,9 +86,9 @@ use to verify it."*
 | OTS cadence | **Stamp on first-seen, re-stamp on content change, daily `upgrade` pass** | Each distinct content state anchored; upgrades complete after Bitcoin confirms (~hours/day) |
 | Verify backend | **Block-explorer lookup by default (configurable to a Bitcoin node)** | Self-hosters get working verify out of the box ("trust the lookup"); node owners get fully trustless. Browser-side verify deferred (§11). **Shipped as a dispatcher — see §6** |
 | Codebase | **New standalone Python project** (a new project dir → rename to `cairn`) | Supersedes the bash photo script, which keeps running until parity then migrates (the manifest import shipped; §8) |
-| Dev model | **Build private, open-source when stable** | Protect Max's data now; public release is battle-tested |
-| Obsidian | **Separate track, NOT in Cairn** | High churn → OTS is noise. Use private GitHub repo + hourly git commit/push instead (see §9) |
-| Core vs personal | **Clean separation** | Max's CallMeBot/s-nail/Kuma/restic/paths are *config & optional plugins*, never hardcoded |
+| Dev model | **Build private, open-source when stable** | Protect the operator's data now; public release is battle-tested |
+| Notes vault | **Separate track, NOT in Cairn** | High churn → OTS is noise. Version it with git instead (see §9) |
+| Core vs personal | **Clean separation** | A deployment's CallMeBot/s-nail/Kuma/restic/paths are *config & optional plugins*, never hardcoded |
 
 > **Status of the locked decisions (2026-08-28).** Every row still holds as written, with three
 > annotations: the **verify backend** is built, as a dispatcher (§6); the **distribution name**
@@ -121,7 +121,7 @@ are mounted **read-only**; the SQLite DB + OTS proof store live on a **separate 
 volume. A user can only create collections whose root falls under their admin-provisioned base
 mount — the panel rejects paths outside it (no traversal, no cross-user disclosure). Because
 the app has its own multi-user login, **no external OAuth proxy is required** (unlike the
-Obsidian-MCP panel, which sat behind Traefik `chain-oauth`).
+sibling FastAPI app's panel, which sat behind a forward-auth proxy).
 
 > **Shipped state (`oidc-sso-login`).** **`single` and `oidc` are built**; `multi` is still a
 > placeholder. `src/auth/` holds the OIDC client, the login wall, the auth routes and the
@@ -157,13 +157,13 @@ Obsidian-MCP panel, which sat behind Traefik `chain-oauth`).
 
 | User | Collection | Root (mounted ro) | Mode | OTS | Alerts |
 |---|---|---|---|---|---|
-| **alice** | Photos | `/srv/media/photos` (incl. phone-upload subdirs `Phone Uploads`, `Camera`, `Unsorted`) | WORM | **per-file on newly-added files only** (archive stays a hash-tripwire) | Alice: Signal + email |
-| **bob** | Tax practice files | `/srv/documents/tax` (incl. `TAX CLIENTS`) | WORM-ish | per-file | bob@example.com (cc admin? — open Q) |
+| **alice** | Photos | `/data/photos` (incl. phone-upload subdirs) | WORM | **per-file on newly-added files only** (archive stays a hash-tripwire) | Alice: Signal + email |
+| **bob** | Tax practice files | `/data/documents/tax` | WORM-ish | per-file | bob@example.com (cc admin? — open Q) |
 | **carol** | Game ROM collection | (Carol's mounted base) | WORM | **none** (tripwire only) | Carol + cc admin (alice) by default |
 
 - A ROM set doesn't change, so any modify/delete is real signal and OTS adds no provenance
   value — tripwire-only WORM is the right, cheap policy.
-- Exclude generated/cache files and any editor/notes vault (e.g. under `/srv/documents`) from any
+- Exclude generated/cache files and any editor/notes vault (e.g. under `/data/documents`) from any
   document collections.
 
 ---
@@ -287,7 +287,7 @@ One sentence of *shape* per step; the behavioural contract is
     to fail the scan.
 
 ### Scheduler
-Background task in the FastAPI lifespan (the Obsidian-MCP indexer pattern), but **per-collection
+Background task in the FastAPI lifespan (the sibling app's indexer pattern), but **per-collection
 cadence**, staggered — you cannot full-rescan 186k files every 5 min. E.g. documents every
 15 min, photos nightly. Scan-all on startup, then each tick scans the due collections
 **sequentially, cheapest-estimated-cost first** (tracked bytes, then file count), so a multi-hour
@@ -351,7 +351,7 @@ incomplete-proof alarm days · scheduler enable/intervals · health freshness fl
 URL · SMTP server · per-collection policy + alert routing (on the collection row, not in env).
 A small set is additionally **editable from the panel** and stored in `app_settings`, which is
 overlaid over the env values at read time with the DB winning (currently the SMTP server and the
-public panel address; the SMTP password living in the DB is a deliberate homelab departure from
+public panel address; the SMTP password living in the DB is a deliberate self-hosting departure from
 "secrets via env only" — §12). The living list is `openspec/specs/configuration/` plus
 `.env.example` / `config.example.yaml`.
 
@@ -409,7 +409,7 @@ is `openspec/specs/ots-notarization/`; this section is the shape and the rationa
 
 ---
 
-## 7. What we reuse from the Obsidian-MCP server (the sibling FastAPI app)
+## 7. What we reuse from the sibling FastAPI app
 Cairn is the same *shape* of app, so we lift patterns (and where clean, code):
 - **Stack:** FastAPI / uvicorn / SQLAlchemy async / Alembic / Jinja2 + htmx + Tailwind.
 - **Auth:** session login, password hashing (`pwdlib[argon2]` — *not* passlib, which is
@@ -425,7 +425,7 @@ Cairn is the same *shape* of app, so we lift patterns (and where clean, code):
 - **Ops:** Docker + reverse proxy + Makefile deploy + the "host paths live outside the public
   tree" discipline + OpenSpec. *Status:* both paths ship — `Caddyfile.example` is the simple
   self-host path (proxy straight through, the app owns its auth), while `docker-compose.example.yml`
-  carries the Traefik labels the homelab actually runs, including the `chain-oauth@file` middleware
+  carries Traefik labels, including a forward-auth middleware
   that stands in for the login wall single mode does not have and the higher-priority public router
   that keeps `/healthz` pollable (§4).
 - **Drop the Postgres-isms** (JSONB/ARRAY/TSVECTOR/pgvector) — Cairn's models are plain columns
@@ -441,10 +441,10 @@ starting state, not as a description of the host today.
 
 A working bash tripwire protected the photos and had to keep running until the
 Python engine reached parity:
-- `/srv/scripts/photo-integrity.sh` (+ `photo-integrity.env`, chmod 600)
-- State: `/srv/integrity/{manifest.tsv, pending-deletions.tsv, photo-integrity.log}`
+- `<scripts>/photo-integrity.sh` (+ `photo-integrity.env`, chmod 600)
+- State: `<state>/{manifest.tsv, pending-deletions.tsv, photo-integrity.log}`
 - Cron (example): daily `check` 05:00, monthly `verify-backup` (restic) 1st 14:00
-- Uptime Kuma push monitor **#85** "Photo Integrity Tripwire" (dead-man's-switch)
+- An Uptime Kuma push monitor (dead-man's-switch)
 - Modes: `check` (delete/edit detection, Signal+email, nag-until-`accept`), `verify-backup`
   (restic `--force` + `diff` independent witness), `accept` (re-baseline)
 
@@ -457,13 +457,12 @@ the operator step that follows parity; it is not recorded here as done.
 
 ---
 
-## 9. Obsidian (separate track — not part of Cairn)
-- Vault is a symlink → `/srv/documents/Obsidian` (so it *is* in restic), 1.4 GB.
-  Largest file 49 MB (< GitHub's 100 MB limit). No `.git` today; `/srv` is not
-  btrfs-snapshotted → weak fine-grained version history for the source-of-truth.
-- **Plan:** private GitHub repo (Max has a paid account) + **hourly `git commit`/push** cron.
-- **`.gitignore` is essential** — the 1.4 GB is mostly generated junk: 2462 `.ajson`
-  (Smart Connections embeddings), 1252 `.pyc`, fonts, big PDFs. Ignore `.ajson`, `.pyc`,
+## 9. Notes vault (separate track — not part of Cairn)
+- A high-churn notes vault gets little from per-file OTS; it needs fine-grained version
+  history instead.
+- **Plan:** a private git repository + a periodic `git commit`/push.
+- **`.gitignore` is essential** — such a vault is often mostly generated junk (plugin
+  embeddings, `.pyc`, fonts, big PDFs). Ignore `.ajson`, `.pyc`,
   `.obsidian/workspace*`, plugin caches; big PDFs via gitignore or Git-LFS. Version the
   markdown + real attachments only.
 
@@ -507,7 +506,7 @@ OTS verification where the user's file never leaves their machine). Rejected bec
 - The browser-verify win was built *on that abandoned lib*. We keep the option for **Phase 4**
   by vendoring + auditing the JS lib **only** for an isolated client-side verify page — the
   benefit without betting the backend on dead code.
-- Python also lets us reuse Max's hardened Obsidian-MCP codebase and run one stack on the
+- Python also lets us reuse the author's hardened sibling FastAPI codebase and run one stack on the
   home server.
 
 ---
@@ -532,7 +531,7 @@ OTS verification where the user's file never leaves their machine). Rejected bec
    (`src/witness/` is empty), so the restic-vs-general question has not had to be answered.
 8. **Secrets** — **partly decided.** Env (or a secret file) remains the rule; the deliberate
    exception is the **SMTP password, which lives in the DB** (`app_settings`) so the server can be
-   configured from the panel — a homelab trade recorded in CLAUDE.md. Keyring / age-sops were not
+   configured from the panel — a self-hosting trade recorded in CLAUDE.md. Keyring / age-sops were not
    pursued. The scaffolded Signal CallMeBot key should move to env before that channel is enabled.
 
 ---
