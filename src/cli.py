@@ -133,7 +133,9 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 if await blocking_run(session, collection.id) is not None:
                     skipped_names.append(name)
                     continue
-                s = await scan_collection(session, collection)
+                s = await scan_collection(
+                    session, collection, allow_empty=getattr(args, "allow_empty", False)
+                )
                 if s.result == "skipped":
                     skipped_names.append(name)
                     continue
@@ -144,12 +146,29 @@ def _cmd_scan(args: argparse.Namespace) -> int:
                 came_back = (
                     f" restored_changed={s.restored_changed}" if s.restored_changed else ""
                 )
+                # The safety-net counts (add-scan-safety-nets), likewise only when non-zero.
+                extra = "".join(
+                    f" {label}={value}"
+                    for label, value in (
+                        ("corrupted", s.corrupted),
+                        ("reverted", s.reverted),
+                        ("mass_change", s.mass_change),
+                    )
+                    if value
+                )
+                if s.walk_incomplete:
+                    extra += " walk_incomplete=yes (nothing marked missing)"
                 print(
                     f"[{name}] added={s.added} modified={s.modified} "
-                    f"missing={s.missing} restored={s.restored}{came_back} "
+                    f"missing={s.missing} restored={s.restored}{came_back}{extra} "
                     f"baselined={s.baselined} "
                     f"ok={s.ok} errors={s.errors} -> {s.result}"
                 )
+                if s.refused is not None:
+                    print(
+                        f"[{name}] REFUSED ({s.refused}) — {s.refusal}",
+                        file=sys.stderr,
+                    )
                 if s.result == "error":
                     rc = 1
             for name in skipped_names:
@@ -1029,6 +1048,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--collection", "--corpus", default=None, help="Collection name (default: all)"
     )
     p_scan.add_argument("--once", action="store_true", help="Single pass (cron-friendly)")
+    p_scan.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="Permit a pass over an EMPTY root: the collection's tracked files are marked missing. "
+        "Without it a scan refuses an empty root (a volume that did not mount looks the same).",
+    )
     p_scan.set_defaults(func=_cmd_scan)
 
     p_accept = sub.add_parser(

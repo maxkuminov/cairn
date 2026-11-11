@@ -124,6 +124,13 @@ class FileEntry(Base):
     # together with them; NULL means "no proof, or a proof placed before provenance was recorded".
     # Never filled from an uncorroborated read of the `.ots` (design D2).
     ots_digest: Mapped[str | None] = mapped_column(String(64))
+    # The contents on record when the file was last healthy, kept while an unaccepted change is open
+    # (add-scan-safety-nets D3): set only when nothing is kept yet and a change takes the row out of
+    # the healthy state, never overwritten while set, cleared by every accept and by a return (a scan
+    # finding the file's digest equal to `prior_sha256` again). All NULL on a healthy row.
+    prior_sha256: Mapped[str | None] = mapped_column(String(64))
+    prior_size: Mapped[int | None] = mapped_column(BigInteger)
+    prior_mtime: Mapped[float | None] = mapped_column(Float)
 
     __table_args__ = (
         UniqueConstraint("collection_id", "relpath", name="uq_files_collection_relpath"),
@@ -244,7 +251,8 @@ class Event(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "kind in ('added','modified','missing','restored','moved','restored_changed')",
+            "kind in ('added','modified','missing','restored','moved','restored_changed',"
+            "'corrupted')",
             name="ck_events_kind",
         ),
     )

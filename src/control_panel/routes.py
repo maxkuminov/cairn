@@ -279,9 +279,9 @@ _POLICY = {
         "label": "Working",
         "short": "Edits are normal",
         "flags": (
-            "Ordinary edits are not flagged — nor, yet, is a change of contents that a deep "
-            "verify finds with the size and date untouched. Deletions are flagged, and so is a "
-            "file that comes back different after going missing."
+            "Ordinary edits are not flagged. Deletions are, and so are a file that comes back "
+            "different after going missing, possible corruption (contents changed while size and "
+            "date did not), and an unusually large change in one scan."
         ),
     },
 }
@@ -443,9 +443,15 @@ async def _collection_view(session: AsyncSession, collection: Collection) -> dic
     # `interrupted`/`error` that the "Last scan" line cannot express. `None` otherwise, including
     # when the newest terminal run IS the last completed scan.
     latest_run_result = None
+    # Why that later run failed — taken from THAT run, never from the last completed scan's
+    # diagnostics: a refused scan (folder unreachable, or empty while files are tracked) records a
+    # sentence the operator can act on.
+    latest_run_reason = None
     if latest_terminal is not None and latest_terminal.result in ("error", "interrupted"):
         if last_run is None or latest_terminal.id != last_run.id:
             latest_run_result = latest_terminal.result
+            if latest_terminal.result == "error":
+                latest_run_reason = scanner_svc.refusal_reason(latest_terminal)
     status = _collection_status(counts)
     meta = _STATUS_META[status]
     excludes = json.loads(collection.exclude_globs_json or "[]")
@@ -497,6 +503,12 @@ async def _collection_view(session: AsyncSession, collection: Collection) -> dic
         # offered as a copyable path list, never fed to a filesystem call.
         "last_error_sample": _decode_error_sample(last_run.error_sample if last_run else None),
         "latest_run_result": latest_run_result,
+        "latest_run_reason": latest_run_reason,
+        # The last completed scan could not list some folders: what it skipped is not "files".
+        "last_walk_incomplete": any(
+            entry.startswith(f"{scanner_svc.WALK_UNREADABLE}:")
+            for entry in _decode_error_sample(last_run.error_sample if last_run else None)
+        ),
         "last_scan_full": (
             last_run.finished.strftime("%Y-%m-%d %H:%M UTC") if last_run and last_run.finished
             else "no completed scans yet"
@@ -636,6 +648,7 @@ ACTIVITY_LINES = 12
 # first. `restored_changed` is named for what it is — never folded into "restored".
 _ACTIVITY_KINDS: tuple[tuple[str, str, str, bool], ...] = (
     ("restored_changed", "came back different", "came back different", True),
+    ("corrupted", "possibly corrupted", "possibly corrupted", True),
     ("missing", "missing", "missing", True),
     ("modified", "changed", "changed", True),
     ("added", "added", "added", False),
@@ -1343,6 +1356,8 @@ class _PopFile(NamedTuple):
     last_changed: datetime | None
     ots_state: str
     mtime: float | None
+    # The size on record before an unaccepted change (display only — never hashed).
+    prior_size: int | None
 
 
 class _PopEvent(NamedTuple):
@@ -1420,7 +1435,7 @@ async def _read_population(
     snapshot, by construction.
 
     The union is the price of that: the file rows, the open-event rows and the file total live in
-    different tables/shapes, so they are padded to one 11-column row shape and tagged in the first
+    different tables/shapes, so they are padded to one 12-column row shape and tagged in the first
     column. SQLAlchemy takes result types from the first leg, so the events' ``detected_at`` is
     decoded by ``first_seen``'s ``DateTime`` processor (same column type, same storage format).
     """
@@ -1436,6 +1451,7 @@ async def _read_population(
         FileEntry.last_changed.label("d3"),
         FileEntry.ots_state.label("t4"),
         FileEntry.mtime.label("f1"),
+        FileEntry.prior_size.label("n3"),
     ).where(
         FileEntry.collection_id == collection.id,
         FileEntry.status.in_(_FP_READ_STATUSES),
@@ -1459,6 +1475,7 @@ async def _read_population(
         null(),
         null(),
         null(),
+        null(),
     ).where(Event.collection_id == collection.id, Event.acknowledged_at.is_(None))
     # The collection's entire file population, counted in the same snapshot as the rows above so a
     # concurrent accept cannot empty the collection between "are there issues?" and "is this
@@ -1467,6 +1484,7 @@ async def _read_population(
         select(
             literal("t"),
             func.count(),
+            null(),
             null(),
             null(),
             null(),
@@ -1487,7 +1505,7 @@ async def _read_population(
     for row in (await session.execute(union_all(files_q, events_q, total_q))).all():
         part = row[0]
         if part == "f":
-            files.append(_PopFile(*row[1:11]))
+            files.append(_PopFile(*row[1:12]))
         elif part == "e":
             events.append(_PopEvent(row[1], row[2], row[5], row[6]))
         else:
@@ -1789,7 +1807,7 @@ FLEET_COLLECTION_ROW_LIMIT = 100
 FLEET_ROW_LIMIT = 500
 
 # The kinds of event that record a change to a file's contents (as opposed to its presence).
-_CHANGE_EVENT_KINDS = ("modified", "restored_changed")
+_CHANGE_EVENT_KINDS = ("modified", "restored_changed", "corrupted")
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
@@ -1919,10 +1937,16 @@ def _row(
     # only surviving record of the digest the file had before it came back, and accepting the row
     # closes that event too, so it must never be accepted without having been shown.
     came_back = index.newest_event(f.id, "restored_changed") if f.status != "missing" else None
+    # Possible corruption — contents changed while size and date did not — is likewise never drawn
+    # as an ordinary change while that alert is open. "Came back different" outranks it: that row
+    # carries the digest record.
+    corrupted = index.newest_event(f.id, "corrupted") if f.status != "missing" else None
     if f.status == "missing":
         kind = "missing"
     elif came_back is not None:
         kind = "came_back"
+    elif corrupted is not None:
+        kind = "corrupted"
     else:
         kind = "changed"
     return {
@@ -1933,6 +1957,12 @@ def _row(
         "status": f.status,
         "kind": kind,
         "size": humanize_size(f.size),
+        # What the size was before the change, where that differs — one more fact for "was that me?".
+        "was_size": (
+            humanize_size(f.prior_size)
+            if f.status != "missing" and f.prior_size is not None and f.prior_size != f.size
+            else None
+        ),
         "found": humanize_delta(found),
         "found_full": _stamp_utc(found),
         "written": humanize_delta(written) if written is not None else None,

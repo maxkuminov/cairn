@@ -119,6 +119,7 @@ async def test_identical_restore_is_unchanged(cairn_env, no_stamping):
     root = cairn_env / "same"
     root.mkdir()
     (root / "a.txt").write_text("original")
+    (root / "keep.txt").write_text("bystander")  # keeps the root non-empty (D1)
     cid = await seed_collection(root, mode="worm", ots_mode="perfile")
 
     await _scan(cid)
@@ -166,6 +167,7 @@ async def test_changed_restore_is_modified_and_alarms(cairn_env, no_stamping):
     root = cairn_env / "changed"
     root.mkdir()
     (root / "deed.pdf").write_text("the real deed")
+    (root / "keep.txt").write_text("bystander")  # keeps the root non-empty (D1)
     cid = await seed_collection(root, mode="worm", ots_mode="perfile")
 
     await _scan(cid)
@@ -212,6 +214,7 @@ async def test_no_recorded_digest_means_no_alarm(cairn_env, no_stamping):
     root = cairn_env / "legacy"
     root.mkdir()
     (root / "old.txt").write_text("body")
+    (root / "keep.txt").write_text("bystander")  # keeps the root non-empty (D1)
     cid = await seed_collection(root, mode="worm")
 
     await _scan(cid)
@@ -252,6 +255,7 @@ async def test_changed_restore_alarms_in_churn_mode(cairn_env, no_stamping):
     root = cairn_env / "churn"
     root.mkdir()
     (root / "y.txt").write_text("original-y")
+    (root / "keep.txt").write_text("bystander")  # keeps the root non-empty (D1)
     cid = await seed_collection(root, mode="churn")
 
     await _scan(cid)
@@ -286,6 +290,7 @@ async def test_open_worm_modified_survives_a_changed_restore(cairn_env, no_stamp
     root.mkdir()
     (root / "a.txt").write_text("original-a")
     (root / "b.txt").write_text("original-b")
+    (root / "keep.txt").write_text("bystander")  # keeps the root non-empty (D1)
     cid = await seed_collection(root, mode="worm")
 
     await _scan(cid)
@@ -362,6 +367,7 @@ async def test_changed_restore_is_not_auto_baselined_by_the_deep_pass(cairn_env,
     root = cairn_env / "autobaseline"
     root.mkdir()
     (root / "doc.txt").write_text("doc-original")
+    (root / "keep.txt").write_text("bystander")  # keeps the root non-empty (D1)
     async with get_sessionmaker()() as s:
         await ensure_implicit_user(s)
         uid = await s.scalar(select(User.id))
@@ -415,6 +421,7 @@ async def test_changed_restore_reaches_the_alert_dispatch(cairn_env, monkeypatch
     root = cairn_env / "alerting"
     root.mkdir()
     (root / "photo.jpg").write_text("photo-bytes")
+    (root / "keep.txt").write_text("bystander")  # keeps the root non-empty (D1)
     cid = await seed_collection(root, mode="churn")
 
     await _scan(cid)

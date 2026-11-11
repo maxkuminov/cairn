@@ -239,6 +239,9 @@ async def import_manifest(
             # carries an open, unaccepted change alert stays `modified` (unify-issue-model D12) —
             # the file's status is the only thing the panel counts, so `ok` here would hide it.
             entry.status = "modified" if entry.id in unresolved_ids else "ok"
+            if entry.status == "ok":
+                # A healthy row never carries kept prior contents (add-scan-safety-nets D3).
+                entry.prior_sha256 = entry.prior_size = entry.prior_mtime = None
             entry.last_checked = now
             result.updated += 1
 

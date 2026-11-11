@@ -106,6 +106,13 @@ class Settings(BaseSettings):
     upgrade_interval_seconds: int = 86400  # daily OTS upgrade pass
     health_freshness_floor_seconds: int = 900  # floor on the per-collection freshness window
 
+    # --- Mass-change ceiling (churn collections) ---
+    # A churn pass whose silent re-baselines number at least `mass_change_min_files` AND at least
+    # `mass_change_percent` % of the collection's tracked (non-missing) files converts them all into
+    # `modified` issues instead of absorbing them. A share of 0 disables the rule.
+    mass_change_percent: int = Field(default=25, ge=0, le=100)
+    mass_change_min_files: int = Field(default=200, ge=0)
+
     # --- Notifications (channel credentials; routing lives per-collection in alert_json) ---
     # Email transport. SMTP is the implemented transport; resend/ses are recognized but stubbed.
     smtp_host: str | None = None

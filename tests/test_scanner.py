@@ -335,17 +335,22 @@ async def test_deep_detects_silent_bitrot_worm(cairn_env):
         assert summ.modified == 0
         assert (await _file(s, cid, "img.raw")).status == "new"
 
-    # Deep scan re-hashes everything and detects the corruption.
+    # Deep scan re-hashes everything and detects the corruption — reported as possible corruption,
+    # its own event kind (add-scan-safety-nets D2), not as an ordinary modification.
     async with sm() as s:
         summ = await scan_collection(s, await s.get(Collection, cid), deep=True)
-        assert summ.modified == 1
+        assert summ.modified == 1 and summ.corrupted == 1
         assert (await _file(s, cid, "img.raw")).status == "modified"
-        assert len(await _events(s, cid, kind="modified")) == 1
+        assert len(await _events(s, cid, kind="corrupted")) == 1
+        assert len(await _events(s, cid, kind="modified")) == 0
 
 
 @pytest.mark.asyncio
-async def test_deep_bitrot_churn_rebaselines(cairn_env):
-    """In churn mode a deep-detected byte change silently re-baselines (no nag), hash updated."""
+async def test_deep_bitrot_churn_is_flagged_as_possible_corruption(cairn_env):
+    """Renamed from `test_deep_bitrot_churn_rebaselines`, whose meaning add-scan-safety-nets (D2)
+    reverses: bytes that changed behind an unchanged size and mtime are never the routine editing
+    churn exempts, so the deep pass flags them `modified` with an open `corrupted` event and keeps
+    the contents they replaced — it does not silently re-baseline."""
     from src.database import get_sessionmaker
     from src.models.db import Collection
     from src.services.scanner import scan_collection
@@ -367,10 +372,12 @@ async def test_deep_bitrot_churn_rebaselines(cairn_env):
 
     async with sm() as s:
         summ = await scan_collection(s, await s.get(Collection, cid), deep=True)
-        assert summ.modified == 0
+        assert summ.modified == 1 and summ.corrupted == 1
         row = await _file(s, cid, "data.bin")
-        assert row.status == "ok"
-        assert row.sha256 != old_sha  # re-baselined to the new bytes
+        assert row.status == "modified"
+        assert row.sha256 != old_sha  # the index describes the bytes on disk now...
+        assert row.prior_sha256 == old_sha  # ...and keeps the ones it had before
+        assert len(await _events(s, cid, kind="corrupted")) == 1
         assert len(await _events(s, cid, kind="modified")) == 0
 
 
@@ -868,6 +875,7 @@ async def test_restore_system_acknowledges_only_that_files_missing_event(cairn_e
     root.mkdir()
     (root / "a.txt").write_text("original-a")
     (root / "b.txt").write_text("original-b")
+    (root / "bystander.txt").write_text("bystander")  # keeps the root non-empty (scan-safety-nets D1)
     cid = await _make_collection(root, mode="worm")
     sm = get_sessionmaker()
 
@@ -919,6 +927,7 @@ async def test_restore_ack_covers_every_chunk(cairn_env, monkeypatch):
     names = ["f1.txt", "f2.txt", "f3.txt"]
     for n in names:
         (root / n).write_text(f"body-{n}")
+    (root / "bystander.txt").write_text("bystander")  # keeps the root non-empty (scan-safety-nets D1)
     cid = await _make_collection(root, mode="worm")
     sm = get_sessionmaker()
 
@@ -959,6 +968,7 @@ async def test_failed_restore_ack_rolls_back_the_whole_batch(cairn_env, monkeypa
     root = cairn_env / "ackfail"
     root.mkdir()
     (root / "a.txt").write_text("original-a")
+    (root / "bystander.txt").write_text("bystander")  # keeps the root non-empty (scan-safety-nets D1)
     cid = await _make_collection(root, mode="worm")
     sm = get_sessionmaker()
 
@@ -1194,6 +1204,7 @@ async def test_each_detached_event_keeps_its_own_files_path(cairn_env):
     root.mkdir()
     for n in ("one.txt", "two.txt"):
         (root / n).write_text(n)
+    (root / "bystander.txt").write_text("bystander")  # keeps the root non-empty (scan-safety-nets D1)
     cid = await _make_collection(root, mode="worm")
     sm = get_sessionmaker()
 
@@ -1229,6 +1240,7 @@ async def test_an_existing_event_detail_is_never_overwritten(cairn_env):
     root = cairn_env / "detail"
     root.mkdir()
     (root / "keep.txt").write_text("keep")
+    (root / "bystander.txt").write_text("bystander")  # keeps the root non-empty (scan-safety-nets D1)
     cid = await _make_collection(root, mode="worm")
     sm = get_sessionmaker()
 
@@ -1272,6 +1284,7 @@ async def test_an_already_acknowledged_event_is_not_restamped(cairn_env):
     root = cairn_env / "restamp"
     root.mkdir()
     (root / "old.txt").write_text("old")
+    (root / "bystander.txt").write_text("bystander")  # keeps the root non-empty (scan-safety-nets D1)
     cid = await _make_collection(root, mode="worm")
     sm = get_sessionmaker()
 

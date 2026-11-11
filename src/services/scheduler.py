@@ -461,7 +461,7 @@ async def run_due_scans(
     catches silent bit-rot). A deep pass is a superset of a quick pass, so it *replaces* the quick
     pass that tick. At most one deep pass runs per tick — a long re-hash must not starve the other
     collections's freshness — so any further owed collections fall back to a quick pass and go deep on a
-    later tick. ``last_full_scan_at`` advances only after a deep pass completes successfully.
+    later tick. ``last_full_scan_at`` advances only after a deep pass ends ``ok``/``partial`` with a complete walk.
     """
     collections = await list_collections(session)
     cost = await collection_costs(session)
@@ -478,9 +478,17 @@ async def run_due_scans(
         if deep:
             deep_used = True
         try:
-            await scanner.scan_collection(session, collection, deep=deep)
+            summary = await scanner.scan_collection(session, collection, deep=deep)
             scanned += 1
-            if deep:
+            # A deep pass that did not cover the collection is still owed (add-scan-safety-nets
+            # D1): refused, failed, skipped/reclaimed, or unable to list a directory. A `partial`
+            # caused only by individual skipped files still counts.
+            if (
+                deep
+                and summary is not None
+                and summary.result in ("ok", "partial")
+                and not summary.walk_incomplete
+            ):
                 collection.last_full_scan_at = now_wall
                 await session.commit()
         except Exception:

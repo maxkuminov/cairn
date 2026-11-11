@@ -153,10 +153,17 @@ def _excluded(relpath: str, globs: list[str]) -> bool:
     return False
 
 
-def iter_relpaths(root: Path, globs: list[str]):
-    """Yield POSIX relpaths of files under root, pruning excluded dirs; no symlink following."""
+def iter_relpaths(root: Path, globs: list[str], walk_errors: list[OSError] | None = None):
+    """Yield POSIX relpaths of files under root, pruning excluded dirs; no symlink following.
+
+    ``os.walk`` silently skips a directory it cannot list unless given an ``onerror`` hook. A
+    skipped directory looks exactly like a deleted one to the missing sweep, so when
+    ``walk_errors`` is a list every listing error is appended to it and the caller decides what an
+    incomplete walk means (add-scan-safety-nets D1: no file is marked missing by such a pass).
+    """
     root = Path(root)
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    onerror = walk_errors.append if walk_errors is not None else None
+    for dirpath, dirnames, filenames in os.walk(root, onerror=onerror, followlinks=False):
         rel_dir = os.path.relpath(dirpath, root)
         rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
         # Prune excluded subdirectories in place.
@@ -194,6 +201,22 @@ class RunSummary:
     # would otherwise have recorded them `ok` (or left them `ok`/`new`): each carries an open
     # `modified`/`restored_changed` event. No event is written and no alert raised for them.
     reflagged: int = 0
+    # Files whose digest changed while size and mtime did not (possible corruption, design D2). Each
+    # is ALSO counted in `modified`, like `restored_changed`.
+    corrupted: int = 0
+    # Files found back at the contents on record before an unaccepted change (design D3): recorded
+    # `ok`, their change alerts system-acknowledged. Informational; never alerts.
+    reverted: int = 0
+    # Churn re-baselines converted into `modified` issues by the mass-change rule (design D4); 0
+    # when the rule did not fire. Each is ALSO counted in `modified`.
+    mass_change: int = 0
+    # True when at least one directory under the root could not be listed: the pass marked nothing
+    # missing, reconciled no moves, and is not a complete (deep) verification (design D1).
+    walk_incomplete: bool = False
+    # The refusal kind (REFUSAL_UNREACHABLE / REFUSAL_EMPTY) when the pass refused the root.
+    refused: str | None = None
+    # ...and its human sentence (the text `refusal_reason` returns from the run row).
+    refusal: str | None = None
     result: str = "ok"
     # Alarming events newly created THIS run — (kind, relpath), capped at ALARM_PATH_CAP. Only
     # `missing` (any mode), `restored_changed` (any mode) and `modified` (WORM) accumulate here;
@@ -204,11 +227,90 @@ class RunSummary:
 
 # Event kinds that record an unresolved CHANGE to a file's bytes. While one of them is open
 # (unacknowledged) on a file, the file is an issue whatever happens to it afterwards (design D12).
-UNRESOLVED_CHANGE_KINDS = ("modified", "restored_changed")
+UNRESOLVED_CHANGE_KINDS = ("modified", "restored_changed", "corrupted")
+
+# --- Root refusal and walk errors (add-scan-safety-nets D1) -------------------------------------
+#
+# A refused run stores `runs.error_sample` = a one-entry JSON list "<kind>: <human sentence>" and
+# `runs.errors` = 0; a pass with unreadable directories stores one "unreadable: <rendering>" entry
+# per directory (first in the sample), counted in `runs.errors`. The prefixes are a contract: the
+# alert rate limit and `refusal_reason` key on them.
+REFUSAL_UNREACHABLE = "unreachable"
+REFUSAL_EMPTY = "empty"
+WALK_UNREADABLE = "unreadable"
+REFUSAL_KINDS = (REFUSAL_UNREACHABLE, REFUSAL_EMPTY)
+# Alerts about a refused root / an unreadable folder are repeated at most this often per collection.
+SAFETY_ALERT_INTERVAL_SECONDS = 24 * 60 * 60
+# The informational `restored` event a return writes (design D3).
+RETURN_DETAIL = "returned to the contents on record before it changed"
+
+
+class ScanRefused(Exception):
+    """The pass refused its root (unreachable, or empty while files are tracked).
+
+    Raised inside the scan body before any file record or event was written; finalised as a failed
+    scan (``result='error'``) whose ``error_sample`` carries the reason.
+    """
+
+    def __init__(self, kind: str, sentence: str) -> None:
+        super().__init__(f"{kind}: {sentence}")
+        self.kind = kind
+        self.sentence = sentence
+
+
+def _bounded_entry(entry: str) -> str:
+    """Hold one free-text `error_sample` entry to the per-entry byte bound, ASCII-escaped."""
+    entry = entry.encode("ascii", errors="backslashreplace").decode("ascii")
+    if len(entry) <= RUN_ERROR_SAMPLE_ENTRY_BYTES:
+        return entry
+    return entry[: RUN_ERROR_SAMPLE_ENTRY_BYTES - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+
+
+def refusal_reason(run) -> str | None:
+    """The human sentence of a refused run (``None`` for any other run).
+
+    A refused run is one with ``result='error'`` whose ``error_sample`` is a one-entry list
+    beginning with a refusal prefix. Anything unparseable reads as "not a refusal".
+    """
+    if getattr(run, "result", None) != "error" or not getattr(run, "error_sample", None):
+        return None
+    try:
+        entries = json.loads(run.error_sample)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], str):
+        return None
+    for kind in REFUSAL_KINDS:
+        prefix = f"{kind}: "
+        if entries[0].startswith(prefix):
+            return entries[0][len(prefix) :]
+    return None
+
+
+def _change_detail(relpath: str, before: tuple, after: tuple, mass: int | None = None) -> str:
+    """JSON `detail` of a `modified`/`corrupted` event: path + contents before and after (D3)."""
+    out: dict = {
+        "path": relpath,
+        "from": {"sha256": before[0], "size": before[1], "mtime": before[2]},
+        "to": {"sha256": after[0], "size": after[1], "mtime": after[2]},
+    }
+    if mass is not None:
+        out["mass"] = mass
+    return json.dumps(out)
+
+
+def _keep_prior(row: FileEntry, sha: str | None, size: int | None, mtime: float | None) -> None:
+    """Record the contents before an unaccepted change — only if nothing is kept yet (D3)."""
+    if row.prior_sha256 is None and sha is not None:
+        row.prior_sha256, row.prior_size, row.prior_mtime = sha, size, mtime
+
+
+def _clear_prior(row: FileEntry) -> None:
+    row.prior_sha256 = row.prior_size = row.prior_mtime = None
 
 
 async def _unresolved_change_ids(session: AsyncSession, collection_id: int) -> set[int]:
-    """Ids of the collection's files that carry an open ``modified``/``restored_changed`` event.
+    """Ids of the collection's files carrying an open change alert (:data:`UNRESOLVED_CHANGE_KINDS`).
 
     Read once at the start of a scan pass (after its claim): no accept can run while the claim is
     held, so the set cannot go stale during the pass (design D12).
@@ -238,6 +340,10 @@ def _healthy_status(row: FileEntry, unresolved_ids: set[int], reflagged_ids: set
     if row.id is not None and row.id in unresolved_ids:
         reflagged_ids.add(row.id)
         return "modified"
+    # A healthy row never carries kept prior contents (add-scan-safety-nets D3). Every caller
+    # assigns the returned status to `row.status`, so the row is about to read `ok`.
+    if row.prior_sha256 is not None:
+        _clear_prior(row)
     return "ok"
 
 
@@ -362,12 +468,22 @@ async def _reconcile_moves(
 
 
 async def scan_collection(
-    session: AsyncSession, collection: Collection, *, deep: bool = False
+    session: AsyncSession,
+    collection: Collection,
+    *,
+    deep: bool = False,
+    allow_empty: bool = False,
 ) -> RunSummary:
     """Scan one collection, writing files/events and a runs row. Never raises on per-file errors.
 
     When ``deep`` is True every tracked, non-missing file is re-hashed regardless of its size and
-    mtime (catching silent bit-rot the fast-path skips); classification of the result is unchanged.
+    mtime (catching silent bit-rot the fast-path skips); a digest that changed while size and mtime
+    did not is reported as possible corruption (design D2).
+
+    The pass refuses a root that is not a directory, and a root over which the walk saw no file at
+    all while the collection tracks at least one non-``missing`` record — unless ``allow_empty`` is
+    given (the CLI's ``--allow-empty``; the scheduler and the panel never pass it). A refusal changes
+    no file record, writes no event, and finalises the run ``error`` with its reason (design D1).
     """
     root = Path(collection.root)
     globs = json.loads(collection.exclude_globs_json or "[]")
@@ -455,7 +571,21 @@ async def scan_collection(
         # with this set; `reflagged_ids` collects the rows the rule changed (counted once).
         unresolved_ids = await _unresolved_change_ids(session, collection_id)
         reflagged_ids: set[int] = set()
+        # Records the pass holds at its start, `missing` excluded: the root-refusal check and the
+        # mass-change share are both measured against this (design D1, D4).
+        tracked_at_start = sum(1 for r in existing.values() if r.status != "missing")
         seen: set[str] = set()
+        # Directory-listing errors from the walk (design D1). Any one makes the walk incomplete:
+        # no missing sweep, no move reconciliation, result `partial`.
+        walk_errors: list[OSError] = []
+        # Files the walk yielded at all (before any per-file skip) — "did the walk see any file".
+        walked_files = 0
+        # Ids of files found back at the contents kept before an unaccepted change (design D3).
+        # `_drain` system-acknowledges their open change alerts in the same transaction that commits
+        # the `ok` status, exactly as `restored_ids` does for `missing` alerts.
+        returned_ids: list[int] = []
+        # Silent churn re-baselines of this pass: (row, sha, size, mtime) it replaced (design D4).
+        churn_rebaselines: list[tuple[FileEntry, str | None, int, float | None]] = []
         added_buffer: list[FileEntry] = []
         # Ids of files restored in this batch (missing → ok). `_drain` system-acknowledges their open
         # `missing` events inside the same transaction that commits the restore (design D10).
@@ -482,7 +612,7 @@ async def scan_collection(
                 summary.alarming.append((kind, relpath))
 
         async def _drain() -> None:
-            nonlocal added_buffer, restored_ids
+            nonlocal added_buffer, restored_ids, returned_ids
             await session.flush()  # assign ids to freshly-added FileEntry rows
             for obj in added_buffer:
                 # `added` is informational, not a nag: born acknowledged (system ack, no user) so a
@@ -520,6 +650,21 @@ async def scan_collection(
                     )
                     .values(acknowledged_at=now, acknowledged_by=None)
                 )
+            # A return closes EVERY open change alert of the file (`modified`, `restored_changed`,
+            # `corrupted`) in the transaction that commits its `ok` status — never one without the
+            # other, or a healthy file would wear an open alert (or an alerted file read healthy).
+            for i in range(0, len(returned_ids), ACK_CHUNK):
+                chunk = returned_ids[i : i + ACK_CHUNK]
+                await session.execute(
+                    update(Event)
+                    .where(
+                        Event.file_id.in_(chunk),
+                        Event.kind.in_(UNRESOLVED_CHANGE_KINDS),
+                        Event.acknowledged_at.is_(None),
+                    )
+                    .values(acknowledged_at=now, acknowledged_by=None)
+                    .execution_options(synchronize_session=False)
+                )
             run.processed = processed  # persist live progress for the status badge
             # ...and the claim's liveness with it. A batch is the scan's unit of progress, so this is
             # the scan's heartbeat: without it a long scan looks abandoned to the startup reaper, which
@@ -542,9 +687,50 @@ async def scan_collection(
             # Cleared only once the commit has returned, so a rollback never drops an acknowledgement
             # that was never persisted.
             restored_ids = []
+            returned_ids = []
 
+        def _return_to_prior(row: FileEntry, sha: str, size: int, mtime: float) -> None:
+            """The file is back at the contents kept before its unaccepted change (design D3).
+
+            Called only on digest EQUALITY with ``row.prior_sha256`` — nothing weaker. The row
+            becomes ``ok``, the kept contents are discarded, its open change alerts are queued for
+            the system acknowledgement `_drain` issues in the same commit, and one informational
+            ``restored`` event (born acknowledged) records the return. No alarm.
+            """
+            row.size, row.mtime, row.sha256 = size, mtime, sha
+            row.last_checked = row.last_changed = now
+            row.status = "ok"
+            _clear_prior(row)
+            if perfile:
+                # The proof at this path commits to the changed bytes; these bytes get their own.
+                row.ots_state = "pending"
+            returned_ids.append(row.id)
+            # Out of the pass's open-alert set, so `_healthy_status` and the end-of-pass sweep
+            # (which re-reads the set after this commit) agree the file is healthy.
+            unresolved_ids.discard(row.id)
+            reflagged_ids.discard(row.id)
+            session.add(
+                Event(
+                    collection_id=collection.id,
+                    file_id=row.id,
+                    kind="restored",
+                    detected_at=now,
+                    acknowledged_at=now,
+                    acknowledged_by=None,
+                    detail=RETURN_DETAIL,
+                )
+            )
+            summary.reverted += 1
+
+        # The refusal's "<kind>: <sentence>", for `runs.error_sample` (design D1).
+        refusal_entry = ""
         try:
-            for relpath in iter_relpaths(root, globs):
+            # Design D1, before the walk: the root must be an existing directory. `os.path.isdir`
+            # treats every OSError as "no", which is the reading that destroys nothing.
+            if not os.path.isdir(root):
+                raise ScanRefused(REFUSAL_UNREACHABLE, f"the folder {root} is not reachable")
+            for relpath in iter_relpaths(root, globs, walk_errors):
+                walked_files += 1
                 if not _db_storable(relpath):
                     # Non-UTF-8 name: it cannot be tracked (SQLite TEXT can't bind a lone surrogate).
                     # Skip before any row is created so one bad name can't abort the scan. Not added to
@@ -610,7 +796,18 @@ async def scan_collection(
                         # without ever checking them (#21). Capture the prior digest first, hash, then
                         # classify from the comparison (design D6).
                         prior = row.sha256
+                        recorded_size, recorded_mtime = row.size, row.mtime
                         sha = await _hash(full)
+                        # Design D3, order of tests on reappearance: equals the recorded digest (the
+                        # `else` below, unchanged); equals the KEPT digest — the file was changed,
+                        # then went missing, and a copy of the original came back — a return;
+                        # otherwise it came back different. Digest equality only.
+                        returned = (
+                            prior is not None
+                            and sha != prior
+                            and row.prior_sha256 is not None
+                            and sha == row.prior_sha256
+                        )
                         # The index must keep describing the bytes on disk NOW (sprint-1's verify
                         # blame attribution reads `files.sha256` as the last-seen digest), so the
                         # recorded digest is still updated in every outcome. The fix is *compare
@@ -618,13 +815,23 @@ async def scan_collection(
                         row.sha256 = sha
                         row.size, row.mtime = size, mtime
                         row.last_checked = row.last_changed = now
-                        if prior is not None and sha != prior:
+                        if returned:
+                            _return_to_prior(row, sha, size, mtime)
+                        elif prior is not None and sha != prior:
                             # Something is back at the path, but it is not what left: a wrong backup
                             # snapshot, a truncated restore, or bytes planted while the real file was
                             # known-absent. It alarms in BOTH modes — a churn collection exempts
                             # ordinary edits, and a file that was absent and came back different is
                             # not an ordinary edit (design D4). Reusing `modified` would be silent
                             # there, which is why `restored_changed` exists.
+                            # Keep the contents from before the change (design D3) — only when the
+                            # file was healthy when it went missing (no open change alert): then the
+                            # digest recorded at that moment is the last-healthy one. If it carried
+                            # an unaccepted change, that digest is the unaccepted version and must
+                            # never become "prior" (it could later close the issue as a return); an
+                            # already-kept prior is left as it is by `_keep_prior` itself.
+                            if row.id not in unresolved_ids:
+                                _keep_prior(row, prior, recorded_size, recorded_mtime)
                             row.status = "modified"
                             if perfile:
                                 # The new bytes get their own proof; #15's preservation keeps the
@@ -682,30 +889,58 @@ async def scan_collection(
                         # Deep pass re-hashes every file; a normal pass only when size/mtime moved or
                         # no prior hash exists. Either way the sha comparison below classifies it.
                         sha = await _hash(full)
-                        if sha != row.sha256:
+                        if row.sha256 is None:
+                            # No digest was on record (a manifest import that never hashed): there
+                            # is nothing to compare against, so this is not a change, and certainly
+                            # not corruption (design D2). Record the digest; preserve the status.
+                            row.size, row.mtime, row.sha256 = size, mtime, sha
+                            row.last_checked = now
+                            summary.ok += 1
+                        elif row.prior_sha256 is not None and sha == row.prior_sha256:
+                            # Back at the contents kept before an unaccepted change (design D3).
+                            # Checked before every other classification: a return is decided by
+                            # digest equality with the kept digest and nothing else.
+                            _return_to_prior(row, sha, size, mtime)
+                        elif sha != row.sha256:
+                            before = (row.sha256, row.size, row.mtime)
+                            # Healthy before this change: no open change alert, status ok/new.
+                            was_healthy = row.id not in unresolved_ids and row.status in ("ok", "new")
+                            # Design D2: the digest moved while size AND mtime both equal the
+                            # recorded ones — bit-rot, or a write that bypassed the file system's
+                            # bookkeeping. Never the routine editing `churn` exempts.
+                            is_corruption = row.size == size and row.mtime == mtime
                             row.size, row.mtime, row.sha256 = size, mtime, sha
                             row.last_checked = row.last_changed = now
                             # Content changed: re-queue for a fresh stamp (each distinct content
                             # state gets its own proof). Applies to both worm and churn collections.
                             if perfile:
                                 row.ots_state = "pending"
-                            if collection.mode == "churn":
-                                # Change is expected: silently re-baseline, no nag — unless an
-                                # earlier alarm on this file is still open (design D12).
-                                row.status = _healthy_status(row, unresolved_ids, reflagged_ids)
-                                summary.ok += 1
-                            else:
+                            if is_corruption or collection.mode != "churn":
+                                kind = "corrupted" if is_corruption else "modified"
+                                if was_healthy:
+                                    _keep_prior(row, *before)
                                 row.status = "modified"
                                 session.add(
                                     Event(
                                         collection_id=collection.id,
                                         file_id=row.id,
-                                        kind="modified",
+                                        kind=kind,
                                         detected_at=now,
+                                        detail=_change_detail(relpath, before, (sha, size, mtime)),
                                     )
                                 )
                                 summary.modified += 1
-                                _record_alarm("modified", relpath)
+                                if is_corruption:
+                                    summary.corrupted += 1
+                                _record_alarm(kind, relpath)
+                            else:
+                                # Change is expected: silently re-baseline, no nag — unless an
+                                # earlier alarm on this file is still open (design D12).
+                                row.status = _healthy_status(row, unresolved_ids, reflagged_ids)
+                                summary.ok += 1
+                                if row.status == "ok" and was_healthy:
+                                    # Remembered for the mass-change ceiling (design D4).
+                                    churn_rebaselines.append((row, *before))
                         else:
                             # Only metadata moved; bytes unchanged. Preserve pending status.
                             row.size, row.mtime = size, mtime
@@ -725,6 +960,40 @@ async def scan_collection(
                 processed += 1
                 if processed % BATCH == 0:
                     await _drain()
+
+            # Design D1, after the walk. Unreadable directories first: they take precedence over
+            # the empty-root refusal (a walk that saw nothing because nothing could be listed is an
+            # unreadable folder, not an empty one). Each is counted among the run's errors and
+            # sampled FIRST, ahead of any per-file skip, so the alert rate limit can key on the
+            # sample's first entry.
+            if walk_errors:
+                summary.walk_incomplete = True
+                summary.errors += len(walk_errors)
+                walk_entries = []
+                for err in walk_errors[:RUN_ERROR_SAMPLE_MAX]:
+                    where = getattr(err, "filename", None)
+                    try:
+                        rel = os.path.relpath(os.fsdecode(where), root) if where else "?"
+                    except (TypeError, ValueError):
+                        rel = "?"
+                    walk_entries.append(_render_skip(WALK_UNREADABLE, rel))
+                error_entries[:0] = walk_entries
+                del error_entries[RUN_ERROR_SAMPLE_MAX:]
+                logging.getLogger("cairn.scanner").warning(
+                    "collection %s: %d director(y/ies) under the root could not be listed — this "
+                    "pass marks no file missing and reconciles no moves; run is partial",
+                    collection_id,
+                    len(walk_errors),
+                )
+            elif walked_files == 0 and tracked_at_start > 0 and not allow_empty:
+                # An empty mount point is the usual shape of a volume that did not mount, and it is
+                # indistinguishable from "everything was deleted": the reading that destroys nothing
+                # wins, and the rare deliberate case has an explicit override.
+                raise ScanRefused(
+                    REFUSAL_EMPTY,
+                    f"the folder {root} is empty but {tracked_at_start:,} files are tracked"
+                    " (if it was emptied on purpose, run: cairn scan --allow-empty)",
+                )
 
             # Flush the final added batch (assigns ids + writes their `added` events) so every new
             # row is correlatable before the move pass runs.
@@ -751,11 +1020,17 @@ async def scan_collection(
                 )
 
             # Files in the DB but no longer on disk → candidate deletions (skip ones already missing).
-            newly_missing = [
-                row
-                for relpath, row in existing.items()
-                if relpath not in seen and row.status != "missing"
-            ]
+            # An incomplete walk cannot tell "gone" from "could not be read", so it has none: no
+            # file is marked missing and no move is reconciled by this pass (design D1).
+            newly_missing = (
+                []
+                if summary.walk_incomplete
+                else [
+                    row
+                    for relpath, row in existing.items()
+                    if relpath not in seen and row.status != "missing"
+                ]
+            )
 
             # Move/rename reconciliation: a candidate-missing file whose content (sha256 + size)
             # uniquely matches one newly-added file is the same file relocated, not a deletion +
@@ -799,6 +1074,52 @@ async def scan_collection(
                         "collection %s: auto-baselined %d intact new file(s) to ok on deep pass",
                         collection.id,
                         summary.baselined,
+                    )
+
+            # Design D4, the mass-change ceiling (churn only — worm already reports every change).
+            # Evaluated once, on this pass's own silent re-baselines, before the D12 sweep so the
+            # events it writes are part of the set that sweep re-reads.
+            q = len(churn_rebaselines)
+            if q and collection.mode == "churn":
+                from ..config import get_settings
+
+                _settings = get_settings()
+                percent = _settings.mass_change_percent
+                if (
+                    percent > 0
+                    and q >= _settings.mass_change_min_files
+                    and q * 100 >= percent * tracked_at_start
+                ):
+                    for row, old_sha, old_size, old_mtime in churn_rebaselines:
+                        row.status = "modified"
+                        _keep_prior(row, old_sha, old_size, old_mtime)
+                        session.add(
+                            Event(
+                                collection_id=collection.id,
+                                file_id=row.id,
+                                kind="modified",
+                                detected_at=now,
+                                detail=_change_detail(
+                                    row.relpath,
+                                    (old_sha, old_size, old_mtime),
+                                    (row.sha256, row.size, row.mtime),
+                                    mass=q,
+                                ),
+                            )
+                        )
+                        _record_alarm("modified", row.relpath)
+                    summary.mass_change = q
+                    summary.modified += q
+                    summary.ok -= q
+                    logging.getLogger("cairn.scanner").warning(
+                        "collection %s: %d of %d tracked file(s) changed in one pass — over the "
+                        "mass-change ceiling (%d files and %d%%); every one is now `modified` with "
+                        "an open alert instead of being silently re-baselined",
+                        collection_id,
+                        q,
+                        tracked_at_start,
+                        _settings.mass_change_min_files,
+                        percent,
                     )
 
             # Design D12, the end layer: after every other classification step of the pass and in
@@ -878,6 +1199,29 @@ async def scan_collection(
                 logging.getLogger("cairn.scanner").exception(
                     "reloading collection %s after a reclaimed scan failed", collection_id
                 )
+        except ScanRefused as refusal:
+            # Design D1: a refused root. Nothing about any file was written (the refusal fires
+            # before the walk, or after a walk that saw no file and so had nothing to commit), and
+            # the run finalises `error` with the reason as the single `error_sample` entry. The
+            # rollback discards nothing but is what makes "nothing written" hold by construction.
+            logging.getLogger("cairn.scanner").warning(
+                "scan of collection %s REFUSED (%s): %s — no file record changed, no event "
+                "written; the collection's scan freshness is not refreshed",
+                collection_id,
+                refusal.kind,
+                refusal.sentence,
+            )
+            summary.result = "error"
+            summary.refused = refusal.kind
+            summary.refusal = refusal.sentence
+            refusal_entry = f"{refusal.kind}: {refusal.sentence}"
+            await session.rollback()
+            try:
+                await session.get(Collection, collection_id)
+            except Exception:  # pragma: no cover - the datastore is gone
+                logging.getLogger("cairn.scanner").exception(
+                    "reloading collection %s after a refused scan failed", collection_id
+                )
         except Exception:
             logging.getLogger("cairn.scanner").exception(
                 "scan failed for collection %s; finalizing run as error", collection_id
@@ -909,7 +1253,9 @@ async def scan_collection(
         # a lost one skips stamping entirely: the files stay `pending` and whoever holds the
         # collection now (or the next pass) stamps them.
         stamped_count = 0
-        if perfile and not lease_lost and not await collections.lease_held(run_id):
+        # A refused pass writes nothing about any file — its stamp tail included (design D1).
+        stamp_tail = perfile and summary.refused is None
+        if stamp_tail and not lease_lost and not await collections.lease_held(run_id):
             lease_lost = True
             logging.getLogger("cairn.scanner").warning(
                 "collection %s: the operation claim (run %s) was RECLAIMED before this scan's stamp "
@@ -917,7 +1263,7 @@ async def scan_collection(
                 collection_id,
                 run_id,
             )
-        if perfile and not lease_lost:
+        if stamp_tail and not lease_lost:
             try:
                 from . import proofs
 
@@ -967,7 +1313,11 @@ async def scan_collection(
         # else. Bounded by construction (the sample is already capped) and emitted once per run
         # rather than once per file. The existing un-storable-specific WARNING stays as it is: it
         # names its own cause and its own count.
-        error_sample = _build_error_sample(error_entries, summary.errors)
+        if summary.refused is not None:
+            # One entry, "<kind>: <sentence>"; `runs.errors` stays 0 (it counts skipped files).
+            error_sample = json.dumps([_bounded_entry(refusal_entry)])
+        else:
+            error_sample = _build_error_sample(error_entries, summary.errors)
         if summary.errors:
             logging.getLogger("cairn.scanner").warning(
                 "collection %s: run %s skipped %d file(s); result=%s. Diagnostic sample (renderings, "
@@ -1021,83 +1371,194 @@ async def scan_collection(
             await session.commit()
             summary.result = "error"
 
-    # Best-effort alert AFTER the commit: a newly-detected missing (any mode), a file that came
-    # back with different bytes (any mode) or a modified-WORM change fans out to the collection's
-    # enabled channels. Dispatch isolates per-channel failures and is itself wrapped here, so a
-    # notification error never affects the scan result.
+    # Best-effort alerts AFTER the commit. Dispatch isolates per-channel failures and each call is
+    # itself wrapped here, so a notification error never affects the scan result.
+    #
+    # 1. Newly detected alarming changes: a missing file (any mode), a file that came back with
+    #    different bytes (any mode), possible corruption (any mode), a WORM modification, or the
+    #    files of a churn mass change. A return to the kept contents never alarms.
     if summary.alarming:
         try:
-            from ..config import get_settings
-            from ..notify.base import Alert
-            from ..notify.dispatch import dispatch as notify_dispatch
-            from . import app_settings
-
             parts: list[str] = []
             if summary.missing:
                 parts.append(f"{summary.missing} missing")
-            # `summary.modified` already includes the restored-changed files (their status IS
-            # `modified`), so they are subtracted out and named separately rather than counted
-            # twice. With none of them the wording is byte-identical to before.
-            plain_modified = summary.modified - summary.restored_changed
+            # `summary.modified` already includes the restored-changed and possibly-corrupted
+            # files (their status IS `modified`), so they are subtracted out and named separately
+            # rather than counted twice. With none of them the wording is byte-identical to before.
+            plain_modified = summary.modified - summary.restored_changed - summary.corrupted
             if plain_modified > 0:
-                parts.append(f"{plain_modified} modified")
+                if summary.mass_change:
+                    parts.append(f"{plain_modified} modified — unusually many for one scan")
+                else:
+                    parts.append(f"{plain_modified} modified")
+            if summary.corrupted:
+                parts.append(f"{summary.corrupted} possibly corrupted")
             if summary.restored_changed:
                 parts.append(f"{summary.restored_changed} came back changed")
-
-            # The deep link is a convenience; being told at all is the product. So the two things
-            # on the way to it — resolving the effective settings, then building the URL — get
-            # SEPARATE guards, and neither may take the other down with it. The enclosing block
-            # protects the *scan*; these two protect the *alert*.
-            #
-            # Guard 1 — the settings overlay. What it returns is the alert's *transport* config,
-            # not just the link's address: a deployment that configures SMTP from the panel keeps
-            # host/user/password in `app_settings`, and the env-only fallback has no smtp_host at
-            # all. So the fallback is used only when the overlay itself fails; a successful overlay
-            # must survive anything that goes wrong afterwards, or a cosmetic link bug would
-            # downgrade the settings until SmtpNotifier raises "SMTP host is not configured" and
-            # the one channel actually in production silently sends nothing.
-            eff_settings = get_settings()
-            try:
-                # Rebound only on success, so a raise leaves the env-derived value standing.
-                eff_settings = await app_settings.effective_settings(session, eff_settings)
-            except Exception:
-                logging.getLogger("cairn.scanner").exception(
-                    "resolving effective settings failed for collection %s; "
-                    "falling back to environment settings",
-                    collection_id,
-                )
-
-            # Guard 2 — the link itself, around the synchronous builder only. A corrupt stored
-            # public_url or a builder bug costs a click, never the alert.
-            review_url: str | None = None
-            try:
-                from .panel_url import panel_link
-
-                review_url = panel_link(
-                    eff_settings.public_url, f"/collection/{collection_id}/review"
-                )
-            except Exception:
-                review_url = None
-                logging.getLogger("cairn.scanner").exception(
-                    "building the alert review link failed for collection %s; "
-                    "sending a link-free alert",
-                    collection_id,
-                )
-
-            alert = Alert(
-                collection_name=collection_name,
+            await _dispatch_alert(
+                session,
+                collection,
+                collection_id,
+                collection_name,
                 summary=", ".join(parts) or "changes detected",
                 paths=[rp for _kind, rp in summary.alarming],
                 detected_at=now,
-                url=review_url,
+                link_path=f"/collection/{collection_id}/review",
             )
-            await notify_dispatch(alert, collection, eff_settings)
+        except Exception:
+            logging.getLogger("cairn.scanner").exception(
+                "alert dispatch failed for collection %s", collection_id
+            )
+
+    # 2. A refused root, or a pass that could not list some directories (design D1/D5). Neither
+    #    carries file paths; each is repeated at most once per SAFETY_ALERT_INTERVAL_SECONDS per
+    #    collection — a rate limit, not a once-per-outage dedupe, because dispatch is best-effort
+    #    and a lost alert must be followed by another within a day.
+    safety: tuple[tuple[str, ...], str] | None = None
+    if summary.refused is not None:
+        safety = (
+            REFUSAL_KINDS,
+            f"scan refused, nothing was checked — {refusal_entry.split(': ', 1)[-1]}",
+        )
+    elif summary.walk_incomplete and not lease_lost:
+        n = len(walk_errors)
+        safety = (
+            (WALK_UNREADABLE,),
+            f"{n} folder{'s' if n != 1 else ''} could not be read — the files beneath "
+            f"{'them' if n != 1 else 'it'} are not being checked",
+        )
+    if safety is not None:
+        prefixes, text = safety
+        try:
+            due = True
+            try:
+                due = await _safety_alert_due(session, collection_id, run_id, prefixes, now)
+            except Exception:
+                # Unknown → send: an extra alert is the cheap error, a lost one is not.
+                logging.getLogger("cairn.scanner").exception(
+                    "checking the alert rate limit failed for collection %s; alerting anyway",
+                    collection_id,
+                )
+            if due:
+                await _dispatch_alert(
+                    session,
+                    collection,
+                    collection_id,
+                    collection_name,
+                    summary=text,
+                    paths=[],
+                    detected_at=now,
+                    link_path=f"/collection/{collection_id}",
+                )
+            else:
+                logging.getLogger("cairn.scanner").info(
+                    "collection %s: %s alert already attempted within the last 24 hours; "
+                    "not repeating it",
+                    collection_id,
+                    "/".join(prefixes),
+                )
         except Exception:
             logging.getLogger("cairn.scanner").exception(
                 "alert dispatch failed for collection %s", collection_id
             )
 
     return summary
+
+
+async def _safety_alert_due(
+    session: AsyncSession,
+    collection_id: int,
+    run_id: int,
+    prefixes: tuple[str, ...],
+    now: datetime,
+) -> bool:
+    """Whether a refused-root / unreadable-folder alert is due (design D1).
+
+    Not due when an EARLIER scan run of the same collection, started within the previous
+    :data:`SAFETY_ALERT_INTERVAL_SECONDS`, carries an ``error_sample`` whose first entry starts with
+    one of ``prefixes``. An unrelated earlier failure (any other sample) never suppresses it.
+    """
+    from datetime import timedelta
+
+    cutoff = now - timedelta(seconds=SAFETY_ALERT_INTERVAL_SECONDS)
+    # `error_sample` is `json.dumps` output, so a first entry "<prefix>: …" serialises as
+    # `["<prefix>: …`. The prefixes contain no LIKE wildcards.
+    earlier = await session.scalar(
+        select(func.count())
+        .select_from(Run)
+        .where(
+            Run.collection_id == collection_id,
+            Run.id != run_id,
+            Run.kind == "scan",
+            Run.started > cutoff,
+            or_(*[Run.error_sample.like(f'["{p}: %') for p in prefixes]),
+        )
+    )
+    return not earlier
+
+
+async def _dispatch_alert(
+    session: AsyncSession,
+    collection: Collection,
+    collection_id: int,
+    collection_name: str,
+    *,
+    summary: str,
+    paths: list[str],
+    detected_at: datetime,
+    link_path: str,
+) -> None:
+    """Build and dispatch one alert for a collection. Callers wrap this: it may raise."""
+    from ..config import get_settings
+    from ..notify.base import Alert
+    from ..notify.dispatch import dispatch as notify_dispatch
+    from . import app_settings
+
+    # The deep link is a convenience; being told at all is the product. So the two things on the
+    # way to it — resolving the effective settings, then building the URL — get SEPARATE guards, and
+    # neither may take the other down with it. The caller's block protects the *scan*; these two
+    # protect the *alert*.
+    #
+    # Guard 1 — the settings overlay. What it returns is the alert's *transport* config, not just
+    # the link's address: a deployment that configures SMTP from the panel keeps host/user/password
+    # in `app_settings`, and the env-only fallback has no smtp_host at all. So the fallback is used
+    # only when the overlay itself fails; a successful overlay must survive anything that goes
+    # wrong afterwards, or a cosmetic link bug would downgrade the settings until SmtpNotifier
+    # raises "SMTP host is not configured" and the one channel actually in production silently
+    # sends nothing.
+    eff_settings = get_settings()
+    try:
+        # Rebound only on success, so a raise leaves the env-derived value standing.
+        eff_settings = await app_settings.effective_settings(session, eff_settings)
+    except Exception:
+        logging.getLogger("cairn.scanner").exception(
+            "resolving effective settings failed for collection %s; "
+            "falling back to environment settings",
+            collection_id,
+        )
+
+    # Guard 2 — the link itself, around the synchronous builder only. A corrupt stored public_url
+    # or a builder bug costs a click, never the alert.
+    review_url: str | None = None
+    try:
+        from .panel_url import panel_link
+
+        review_url = panel_link(eff_settings.public_url, link_path)
+    except Exception:
+        review_url = None
+        logging.getLogger("cairn.scanner").exception(
+            "building the alert review link failed for collection %s; sending a link-free alert",
+            collection_id,
+        )
+
+    alert = Alert(
+        collection_name=collection_name,
+        summary=summary,
+        paths=paths,
+        detected_at=detected_at,
+        url=review_url,
+    )
+    await notify_dispatch(alert, collection, eff_settings)
 
 
 # The three file states an accept can act on. A scope naming anything else is a caller bug and
@@ -1238,6 +1699,9 @@ async def accept_collection(
             continue
         if f.status in ("new", "modified"):
             f.status = "ok"
+            # An accept makes the current contents the baseline; what was kept before the change
+            # is discarded, so a later return to it reads as a change (design D3).
+            _clear_prior(f)
             accepted += 1
         elif f.status == "missing":
             await session.delete(f)
@@ -1289,6 +1753,7 @@ async def accept_file(
         removed = 1
     else:
         file.status = "ok"
+        _clear_prior(file)  # design D3: an accept discards the kept contents
         accepted = 1
 
     for e in events:
@@ -1376,7 +1841,8 @@ async def accept_files(
                     FileEntry.collection_id == collection.id,
                     FileEntry.status.in_(("new", "modified")),
                 )
-                .values(status="ok")
+                # Design D3: an accept discards the contents kept before the change.
+                .values(status="ok", prior_sha256=None, prior_size=None, prior_mtime=None)
             )
             accepted += len(changed_ids)
 
