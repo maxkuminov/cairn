@@ -488,6 +488,11 @@ async def _record_scan_kwargs(monkeypatch):
 
     async def rec(session, collection, *, deep=False):
         calls.append((collection.id, deep))
+        # The scheduler advances `last_full_scan_at` only on a deep pass that ended ok/partial with
+        # a complete walk (add-scan-safety-nets D1), so the recorder reports a clean pass.
+        from src.services.scanner import RunSummary
+
+        return RunSummary(collection_id=collection.id)
 
     monkeypatch.setattr(scheduler.scanner, "scan_collection", rec)
     return calls

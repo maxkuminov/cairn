@@ -183,7 +183,8 @@ async def test_no_committed_batch_shows_the_file_healthy(cairn_env, monkeypatch,
     monkeypatch.setattr(
         scanner,
         "iter_relpaths",
-        lambda r, g: iter(sorted(real_iter(r, g), key=lambda p: (p != "a.txt", p))),
+        # `*a` forwards the walk-error sink the scanner passes (add-scan-safety-nets D1).
+        lambda r, g, *a: iter(sorted(real_iter(r, g, *a), key=lambda p: (p != "a.txt", p))),
     )
     monkeypatch.setattr(scanner, "BATCH", 2)
 
@@ -218,6 +219,7 @@ async def test_expected_edit_does_not_launder_an_earlier_alarm(cairn_env, alerts
     root = cairn_env / "churn"
     root.mkdir()
     (root / "p.jpg").write_text("photo")
+    (root / "bystander.txt").write_text("bystander")  # keeps the root non-empty (scan-safety-nets D1)
     cid = await seed_collection(root, ots_mode="none", mode="churn")
     await _scan(cid)
     (root / "p.jpg").unlink()

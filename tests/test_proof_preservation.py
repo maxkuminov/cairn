@@ -1102,6 +1102,9 @@ async def test_the_accept_restore_rescan_narrative_never_loses_the_original_proo
     root.mkdir()
     data = b"a 2023 tax document"
     (root / "tax.pdf").write_bytes(data)
+    # A second file, so the folder is never empty: a scan refuses an empty root while files are
+    # tracked (add-scan-safety-nets), and these tests are about one file going missing.
+    (root / "bystander.txt").write_bytes(b"always here")
     cid = await seed_collection(root)
 
     monkeypatch.setattr(ots, "_run_ots", _stamp_fake())

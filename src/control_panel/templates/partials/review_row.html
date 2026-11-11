@@ -29,6 +29,12 @@
         <span class="review-row__alarm">Came back different</span>
         <span class="review-row__sep">·</span>
         <span title="{{ it.found_full }}">found {{ it.found }}</span>
+      {% elif it.kind == 'corrupted' %}
+        {# The contents changed while the size and the date did not — never an ordinary edit. #}
+        <span class="review-row__alarm">Possible corruption</span>
+        <span>— contents changed, size and date did not</span>
+        <span class="review-row__sep">·</span>
+        <span title="{{ it.found_full }}">found {{ it.found }}</span>
       {% else %}
         <span>Contents changed</span>
         <span class="review-row__sep">·</span>
@@ -39,7 +45,7 @@
         <span class="review-row__sep">·</span>
         <span title="{{ it.written_full }}">file last written {{ it.written }}</span>
       {% endif %}
-      <span class="review-row__sep">·</span> <span>{{ it.size }}</span>
+      <span class="review-row__sep">·</span> <span>{{ it.size }}{% if it.was_size %} (was {{ it.was_size }}){% endif %}</span>
       {% if it.changes and it.changes > 1 %}
         <span class="review-row__sep">·</span>
         <span class="review-row__repeat">changed {{ it.changes }} times since {{ it.changes_since }}</span>

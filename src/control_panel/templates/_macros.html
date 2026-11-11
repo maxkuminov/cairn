@@ -177,7 +177,9 @@
     They say what is known and admit what is not; the next scan replaces them with a real count. -#}
 {%- if c.last_result == "partial" -%}
   <div class="run-health run-health--warn">
-    {%- if c.last_errors %}
+    {%- if c.last_walk_incomplete %}
+    {{ icon("alert", size=12, stroke=2) }} partial &mdash; some folders could not be read, so the files beneath them were not checked and nothing was marked missing ({{ "{:,}".format(c.last_errors) }} item{{ "" if c.last_errors == 1 else "s" }} skipped)
+    {%- elif c.last_errors %}
     {{ icon("alert", size=12, stroke=2) }} partial &mdash; {{ "{:,}".format(c.last_errors) }} file{{ "" if c.last_errors == 1 else "s" }} skipped
     {%- else %}
     {{ icon("alert", size=12, stroke=2) }} partial &mdash; files skipped (count not recorded)
@@ -204,7 +206,13 @@
 {%- if c.latest_run_result == "interrupted" -%}
   <div class="run-health run-health--muted">{{ icon("clock", size=12, stroke=2) }} a later scan was interrupted (app restart or reclaimed claim); it will re-run on the next cadence</div>
 {%- elif c.latest_run_result == "error" -%}
+  {#- A refused scan says why, in its own words (the reason is that run's, not an earlier scan's):
+      a collection whose folder is unreachable is quiet because nothing is being read. -#}
+  {%- if c.latest_run_reason %}
+  <div class="run-health run-health--danger">{{ icon("x", size=12, stroke=2) }} the latest scan could not run &mdash; {{ c.latest_run_reason }}. Nothing was marked missing; it will be tried again on the next cadence.</div>
+  {%- else %}
   <div class="run-health run-health--danger">{{ icon("x", size=12, stroke=2) }} a later scan failed &mdash; check the logs; it will re-run on the next cadence</div>
+  {%- endif %}
 {%- endif -%}
 {%- endmacro %}
 

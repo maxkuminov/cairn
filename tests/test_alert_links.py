@@ -146,6 +146,9 @@ async def test_stored_override_wins_for_the_alert_link(cairn_env, monkeypatch):
     root = cairn_env / "override"
     root.mkdir()
     (root / "drop.txt").write_text("bye")
+    # A second file keeps the folder from reading as empty (a scan refuses an empty root while
+    # files are tracked — add-scan-safety-nets); this test is about one file.
+    (root / "stays.txt").write_text("here")
     cid = await _make_alerting_collection(root)
     await _scan(cid)
 

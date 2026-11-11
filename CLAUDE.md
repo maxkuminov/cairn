@@ -549,6 +549,53 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > findings; scanner scope 3 rounds, one family: status writers not serialized with a scan),
 > verifier 0 blocking, 3 test agents (mutation-tested guard), sandbox pass on a copy of prod data.
 
+> Scan safety nets (add-scan-safety-nets, #64): four decisions a scan made wrongly. (1) **An
+> unreachable or empty root is refused, never read as "everything deleted"**: `scan_collection`
+> raises `ScanRefused` when the root is not a directory, or when the walk found no file Cairn can
+> *track* (a symlink or an un-storable name does not count) while non-`missing` records exist —
+> run `error`, the reason as the single entry of `runs.error_sample` (`"unreachable: …"` /
+> `"empty: …"`, read back by `scanner.refusal_reason`), no record changed, no event, stamp tail
+> skipped, freshness untouched; `cairn scan --allow-empty` is the deliberate override. **An
+> unreadable directory shields only the files beneath it** (`os.walk(onerror=…)` →
+> `unreadable_dirs`): they are not candidates for the missing sweep, everything else is judged as
+> usual, the run is `partial`; `RunSummary.walk_incomplete` is true only when a tracked file lies
+> beneath one (or the root itself could not be listed). A file that is listed but cannot be
+> examined (lstat/stat/hash failure) is `seen` (never missing) and `unexamined` (never
+> auto-graduated). (2) **Possible corruption is its own finding under both policies**: digest
+> changed while size AND mtime equal the recorded ones (or no mtime is on record) → event kind
+> **`corrupted`**, status `modified`, alarm — `churn` no longer absorbs it. (3) **A mass change is
+> not absorbed**: when the changes a `churn` pass re-baselined silently reach both
+> `CAIRN_MASS_CHANGE_MIN_FILES` (200) and `CAIRN_MASS_CHANGE_PERCENT` (25; 0 disables) of the
+> tracked files, all of them are converted to issues at the end of the pass. (4) **The contents on
+> record before an unaccepted change are kept** in `files.prior_sha256/prior_size/prior_mtime`
+> (set only when nothing is kept yet and the row leaves the healthy state; never overwritten;
+> cleared by every accept, by a return, and wherever a pass records a row healthy). **A file found
+> back at the kept digest closes its own issue** (`_return_to_prior`: `ok`, prior cleared, its
+> open change alerts system-acknowledged in the same commit, an informational `restored` event,
+> no alarm) — in the hash-compare branch and on reappearance (order: recorded → prior → came back
+> different). A row with a kept prior is **hashed on every pass**, so a metadata-preserving
+> restore closes on a quick scan. `modified`/`corrupted` events carry a JSON `detail`
+> (`path`, `from`, `to`, optional `mass`). Alerts: summary names possible corruption and a mass
+> change; a refused root and an incomplete pass each send their own path-less alert, at most once
+> per 24 h per collection, keyed on the **last attempt** (an `app_settings` row
+> `safety_alert_at:<cid>:<class>:<created>`, written only when a channel is enabled) — not on
+> earlier refused runs, which with hourly scans would have meant once per outage. Scheduler:
+> `last_full_scan_at` advances only for a deep pass that ended `ok`/`partial` with a complete
+> walk, and a deep pass that did not complete (or raised) backs off a day (`_DEEP_RETRY_AFTER`)
+> instead of taking the one deep slot every tick. Panel: review row labels possible corruption
+> and shows "(was <size>)"; the guidance says a changed file put back exactly as it was closes
+> itself; a failed scan states its reason (from that run, not an earlier one); Working's
+> description lists what it flags. **Migration `0013`**: three nullable `files` columns + the
+> `events` kind CHECK rebuilt for `corrupted` (2.3 s on 130k events; downgrade refuses while a
+> `corrupted` event exists). Test fixtures that delete a collection's only file now need a
+> bystander file (an empty root is refused). Accepted limitations (archived design): issues
+> already open at deploy have no kept contents; the mass rule is per pass; a file moved out of a
+> folder the same pass could not list reads as a deletion later; a single unreadable file does
+> not keep the deep pass owed. Gates: 2-round Codex spec review, adversarial implementation
+> review in two scopes plus verification rounds, independent verifier (3 blocking gaps found and
+> fixed, incl. the alert limit and the whole-collection shielding), migration and refusal
+> exercised on a copy of production data.
+
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
   Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`). This is the **compose** path,

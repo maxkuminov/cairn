@@ -234,19 +234,31 @@ One sentence of *shape* per step; the behavioural contract is
 2. **Keepalive** — a timer refreshes the claim's `heartbeat_at` from its own session for as long as
    the body runs, so a scan that spends longer than the abandonment interval inside *one* unit of
    work (hashing a multi-terabyte file) does not starve its own claim.
-3. **Walk & diff** — walk the root honouring the exclude globs, skip any relpath SQLite cannot
-   store as TEXT (reported, not tracked), and diff against `files` by relpath, **fast-pathing on
-   size + mtime** and hashing only what looks changed.
+3. **Walk & diff** — refuse the pass outright if the root is not a directory (run `error`, with
+   the reason; nothing is marked missing). Otherwise walk the root honouring the exclude globs,
+   skip any relpath SQLite cannot store as TEXT (reported, not tracked), and diff against `files`
+   by relpath, **fast-pathing on size + mtime** and hashing only what looks changed. A directory
+   that cannot be listed, or a file that is listed but cannot be examined, is recorded as skipped —
+   never as deleted.
 4. **Deep verify** — on a deep pass, re-hash *every* tracked file instead of fast-pathing; that is
    the only way silent bit-rot (bytes change, size + mtime do not) is ever seen.
 5. **Classify** — added / modified / unchanged, writing `events` and per-batch progress; WORM and
-   churn differ in what nags, not in what is detected.
-6. **Missing sweep** — anything tracked and not seen this pass becomes `missing`.
+   churn differ in what nags, not in what is detected. Two findings are never absorbed by a
+   policy: **possible corruption** (the digest changed while size and mtime did not — a `corrupted`
+   event under both policies) and a **mass change** (when the changes a churn pass would accept
+   silently reach both `CAIRN_MASS_CHANGE_MIN_FILES` and `CAIRN_MASS_CHANGE_PERCENT` of the
+   collection, they all become issues). A change keeps the contents it replaced (`files.prior_*`)
+   until it is accepted; a file found back at those contents closes its own issue.
+6. **Missing sweep** — anything tracked and not seen this pass becomes `missing` — but only when
+   the walk listed every directory and found at least one file Cairn can track. An empty root
+   while files are tracked is refused as a whole (`cairn scan --allow-empty` overrides), and a
+   pass with an unreadable directory marks nothing missing and ends `partial`.
 7. **Rename reconciliation** — a candidate-`missing` row whose `(sha256, size)` matches exactly one
    newly-`added` row (strict 1:1, zero-byte excluded) is the same file relocated: reconciled in
    place, with one informational `moved` event instead of a false alarm plus a wasted re-stamp.
 8. **Restore comparison** — a reappeared file's fresh digest is compared against the recorded one
    **before** that record is overwritten: same bytes → `restored` (informational, no re-stamp);
+   bytes kept from before an unaccepted change → the issue closes (a restore of the original);
    different bytes → `modified` plus an alarming `restored_changed` event carrying both digests.
    Either way the reappearance acknowledges its own still-open `missing` events, so no alert is
    left open that nothing can clear.

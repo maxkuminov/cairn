@@ -925,10 +925,13 @@ def test_review_recovery_copy_matches_what_a_changed_restore_actually_does(cairn
             in body
         )
         assert "instead of clearing the old one" not in body
-        # And the one promise the page may make about a restore is made for MISSING files only:
-        # an identical file coming back closes its own issue; a changed file put back does not.
+        # The promise about a restore is exact for both kinds: an identical MISSING file coming
+        # back closes its own alert; a CHANGED file closes its own issue only when put back exactly
+        # as it was before the change (the scan keeps that digest) — any other version is one more
+        # change (add-scan-safety-nets).
         assert "If it matches, the missing alert closes by itself" in body
-        assert "putting an earlier version back shows up as one more change" in body
+        assert "exactly as it was before the change" in body
+        assert "Any other version shows up as one more change." in body
 
 
 def test_dashboard_issue_count_links_to_review(cairn_env):

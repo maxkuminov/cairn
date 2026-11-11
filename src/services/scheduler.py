@@ -31,7 +31,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Literal
 
 from sqlalchemy import case, func, select, update
@@ -428,6 +428,12 @@ def due_collections(
     return sorted(due, key=lambda c: (*cost.get(c.id, (0, 0)), c.id))
 
 
+# How long a collection whose deep pass did not complete waits before its next deep attempt, and
+# when each such collection may try again (in memory: a restart simply retries once).
+DEEP_RETRY_BACKOFF_SECONDS = 86400
+_DEEP_RETRY_AFTER: dict[int, datetime] = {}
+
+
 def _deep_owed(collection: Collection, now_wall: datetime) -> bool:
     """True if a deep (full re-hash) verify pass is due for this collection.
 
@@ -461,7 +467,7 @@ async def run_due_scans(
     catches silent bit-rot). A deep pass is a superset of a quick pass, so it *replaces* the quick
     pass that tick. At most one deep pass runs per tick — a long re-hash must not starve the other
     collections's freshness — so any further owed collections fall back to a quick pass and go deep on a
-    later tick. ``last_full_scan_at`` advances only after a deep pass completes successfully.
+    later tick. ``last_full_scan_at`` advances only after a deep pass ends ``ok``/``partial`` with a complete walk.
     """
     collections = await list_collections(session)
     cost = await collection_costs(session)
@@ -474,17 +480,45 @@ async def run_due_scans(
         if await blocking_run(session, collection.id) is not None:
             log.info("skip scan for collection %s — operation already in progress", collection.id)
             continue
-        deep = (not deep_used) and _deep_owed(collection, now_wall)
+        retry_after = _DEEP_RETRY_AFTER.get(collection.id)
+        deep = (
+            (not deep_used)
+            and _deep_owed(collection, now_wall)
+            and (retry_after is None or now_wall >= retry_after)
+        )
         if deep:
             deep_used = True
         try:
-            await scanner.scan_collection(session, collection, deep=deep)
+            summary = await scanner.scan_collection(session, collection, deep=deep)
             scanned += 1
-            if deep:
+            # A deep pass that did not cover the collection is still owed (add-scan-safety-nets
+            # D1): refused, failed, skipped/reclaimed, or unable to list a directory. A `partial`
+            # caused only by individual skipped files still counts.
+            if (
+                deep
+                and summary is not None
+                and summary.result in ("ok", "partial")
+                and not summary.walk_incomplete
+            ):
                 collection.last_full_scan_at = now_wall
                 await session.commit()
+                _DEEP_RETRY_AFTER.pop(collection.id, None)
+            elif deep:
+                # Still owed — but not on every tick. A collection whose deep pass cannot complete
+                # (root unreachable, a folder that cannot be listed) would otherwise take the one
+                # deep slot each tick, starving every other collection's deep verify, and re-hash
+                # itself on every cadence. It gets quick scans meanwhile and a deep retry a day on.
+                _DEEP_RETRY_AFTER[collection.id] = now_wall + timedelta(
+                    seconds=DEEP_RETRY_BACKOFF_SECONDS
+                )
         except Exception:
             log.exception("scan failed for collection %s (%s)", collection.id, collection.name)
+            if deep:
+                # A deep pass that RAISED did not complete either: same one-day back-off, or a
+                # collection that fails every time would hold the single deep slot on every tick.
+                _DEEP_RETRY_AFTER[collection.id] = now_wall + timedelta(
+                    seconds=DEEP_RETRY_BACKOFF_SECONDS
+                )
         finally:
             next_due[collection.id] = now + collection.hash_cadence_seconds
     return scanned

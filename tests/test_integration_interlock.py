@@ -113,12 +113,15 @@ async def test_a_changed_restore_restamps_and_the_original_proof_survives(cairn_
     root.mkdir(parents=True, exist_ok=True)
     doc = root / "contract.pdf"
     doc.write_bytes(v1)
+    # A second file, so the folder is never empty: a scan refuses an empty root while files are
+    # tracked (add-scan-safety-nets), and these tests are about one file going missing.
+    (root / "bystander.txt").write_bytes(b"always here")
     cid = await seed_collection(root)
 
     monkeypatch.setattr(ots, "_run_ots", _stamp_fake())
 
-    # 1. First scan: the file is added and stamped for real.
-    assert (await _scan(cid)).added == 1
+    # 1. First scan: the file (and its bystander) is added and stamped for real.
+    assert (await _scan(cid)).added == 2
     canonical = proofs.proof_path(get_settings(), cid, "contract.pdf")
     fe = await _entry(cid, "contract.pdf")
     assert fe.ots_path == str(canonical) and fe.ots_digest == _sha(v1)
@@ -352,6 +355,9 @@ def test_the_cli_scan_line_names_a_file_that_came_back_changed(cairn_env, capsys
     root.mkdir(parents=True, exist_ok=True)
     doc = root / "doc.txt"
     doc.write_bytes(b"the original")
+    # A second file, so the folder is never empty: a scan refuses an empty root while files are
+    # tracked (add-scan-safety-nets), and these tests are about one file going missing.
+    (root / "bystander.txt").write_bytes(b"always here")
 
     monkeypatch.setattr(ots, "_run_ots", _stamp_fake())
 
