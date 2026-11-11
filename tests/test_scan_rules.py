@@ -251,6 +251,35 @@ async def test_an_open_change_alert_survives_a_rule_covered_edit(cairn_env, aler
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["worm", "churn"])
+async def test_an_open_restored_changed_alert_survives_a_rule_covered_edit(cairn_env, alerts, mode):
+    root, cid = await _collection(cairn_env, f"rc-{mode}", {"c/x.db": "one", "y": "y"}, mode=mode)
+    await _add_rule(cid, "c/")
+    (root / "c/x.db").unlink()
+    await _scan(cid)
+    (root / "c/x.db").write_text("came back different")
+    await _scan(cid)
+    row = await _file(cid, "c/x.db")
+    assert row.status == "modified"
+    (rc,) = await _events(cid, kind="restored_changed", file_id=row.id)
+    assert rc.acknowledged_at is None
+    kept = row.prior_sha256
+    assert kept == _sha("one")
+
+    _edit(root / "c/x.db", "and then edited again")
+    alerts.clear()
+    summary = await _scan(cid)
+
+    row = await _file(cid, "c/x.db")
+    assert row.status == "modified" and row.sha256 == _sha("and then edited again")
+    assert row.prior_sha256 == kept
+    assert [e.id for e in await _open_events(cid, row.id)] == [rc.id]
+    assert await _events(cid, kind="modified", file_id=row.id) == []
+    assert summary.mass_change == 0
+    assert alerts == []
+
+
+@pytest.mark.asyncio
 async def test_something_else_again_under_a_rule_stays_modified_quietly(cairn_env, alerts):
     """MODIFIED "Something else again is still a change": quiet under a rule, still `modified`."""
     root, cid = await _collection(cairn_env, "else-rule", {"a.txt": "original", "b": "b"})

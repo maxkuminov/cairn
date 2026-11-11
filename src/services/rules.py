@@ -35,8 +35,10 @@ MAX_PATTERN_BYTES = 512
 EFFECT_EDITS = "edits"
 ALARM_WINDOW_DAYS = 90
 
-# The only whitespace stripped from around a submitted pattern.
-_ASCII_WS = " \t\n\r\x0b\x0c"
+# The only whitespace stripped from around a submitted pattern: ASCII space and tab. Line breaks
+# and other control characters are refused on the RAW input, before any stripping, so that a
+# pattern pasted with a trailing newline is refused rather than silently altered.
+_ASCII_WS = " \t"
 # NUL and every character `str.splitlines` treats as a line boundary.
 _FORBIDDEN = frozenset("\x00\n\r\x0b\x0c\x1c\x1d\x1e\x85  ")
 _WILDCARDS = frozenset("*?/")
@@ -69,14 +71,14 @@ class RuleError(ValueError):
 
 
 def validate_pattern(pattern: str) -> str:
-    """Return the pattern to store (surrounding ASCII whitespace stripped) or raise RuleError."""
+    """Return the pattern to store (surrounding spaces/tabs stripped) or raise RuleError."""
     if not isinstance(pattern, str):
         raise RuleError("empty")
+    if any(ch in _FORBIDDEN for ch in pattern):
+        raise RuleError("control")
     p = pattern.strip(_ASCII_WS)
     if not p:
         raise RuleError("empty")
-    if any(ch in _FORBIDDEN for ch in p):
-        raise RuleError("control")
     if len(p.encode("utf-8", "surrogatepass")) > MAX_PATTERN_BYTES:
         raise RuleError("too_long")
     if p.startswith("/"):
@@ -100,46 +102,90 @@ def _segments(p: str) -> list[str]:
     return body.split("/")
 
 
+# --- compilation ----------------------------------------------------------------------------
+#
+# Every expression emitted here is built so that matching cannot backtrack super-linearly: a
+# stalled match would stall a scan and the panel. Two facts make that possible without changing
+# what matches.
+#
+# 1. A segment pattern can only ever end at the next `/` or at the end of the path, so once it has
+#    matched at a given start it has exactly one possible end. It is therefore wrapped in an atomic
+#    group with a boundary lookahead: nothing outside can make it retry.
+# 2. Inside a segment, `c0*c1*…*ck` (each ci a fixed-length run of literals and `?`) matches iff c0
+#    is a prefix, ck is a suffix and the middle chunks occur in order in between; placing each
+#    middle chunk at its LEFTMOST occurrence leaves the most room for the rest (the standard greedy
+#    glob argument), so each is an atomic lazy search. The same argument applies one level up to
+#    runs of whole segments between non-final `**` segments.
+#
+# Always used with `fullmatch`.
+
+_FOLDER = "[^/]+/"
+# A final `**` (or trailing `/`): one or more whole segments. `[^/]` also matches a line break.
+_REMAINDER = "[^/]+(?:/[^/]+)*"
+
+
+def _chunk_regex(chunk: str) -> str:
+    return "".join("[^/]" if ch == "?" else re.escape(ch) for ch in chunk)
+
+
 def _segment_regex(seg: str) -> str:
-    out: list[str] = []
-    for ch in seg:
-        if ch == "*":
-            out.append("[^/]*")
-        elif ch == "?":
-            out.append("[^/]")
-        else:
-            out.append(re.escape(ch))
-    return "".join(out)
+    """One concrete segment (no `/`, no `**`), atomic, ending at a segment boundary."""
+    if seg == "*":
+        return "[^/]+"
+    chunks = seg.split("*")
+    if len(chunks) == 1:
+        body = _chunk_regex(chunks[0])
+    else:
+        middle = "".join(f"(?>[^/]*?{_chunk_regex(c)})" for c in chunks[1:-1])
+        body = _chunk_regex(chunks[0]) + middle + "[^/]*" + _chunk_regex(chunks[-1])
+    return f"(?>{body}(?=/|\\Z))"
 
 
-_ANY_FOLDERS = "(?:[^/]+/)*"
-_ANY_FILE_BENEATH = "(?:[^/]+/)*[^/]+"
+def _run_regex(segs: list[str], trailing_slash: bool) -> str:
+    joined = "/".join(_segment_regex(s) for s in segs)
+    return joined + "/" if trailing_slash and segs else joined
 
 
 def compile_pattern(pattern: str) -> re.Pattern[str]:
     """Compile a pattern (validated here) to one regular expression, for ``fullmatch``."""
     p = validate_pattern(pattern)
     if "/" not in p:
-        # A file name, in any folder.
-        return re.compile(_ANY_FOLDERS + _segment_regex(p))
+        # A file name, in any folder: every folder is consumed possessively, so the name can only
+        # be tried against the last segment.
+        return re.compile(f"(?>(?:{_FOLDER})*)" + _segment_regex(p))
     segments = _segments(p)
     if p.endswith("/"):
         # A trailing slash is the same as a final `**`: every file beneath, at any depth.
         segments.append("**")
-    # Consecutive `**` segments mean exactly what one does; collapsing them keeps the expression
-    # from stacking redundant nested repetitions.
     collapsed: list[str] = []
-    for s in segments:
-        if s == "**" and collapsed and collapsed[-1] == "**":
+    for seg in segments:
+        if seg == "**" and collapsed and collapsed[-1] == "**":
             continue
-        collapsed.append(s)
-    parts: list[str] = []
-    last = len(collapsed) - 1
-    for i, s in enumerate(collapsed):
-        if s == "**":
-            parts.append(_ANY_FILE_BENEATH if i == last else _ANY_FOLDERS)
+        collapsed.append(seg)
+    final_star = collapsed[-1] == "**"
+    body = collapsed[:-1] if final_star else collapsed
+    # Split on the (now all non-final) `**` segments into runs of concrete segments.
+    runs: list[list[str]] = [[]]
+    for seg in body:
+        if seg == "**":
+            runs.append([])
         else:
-            parts.append(_segment_regex(s) + ("" if i == last else "/"))
+            runs[-1].append(seg)
+    parts: list[str] = []
+    last = len(runs) - 1
+    for i, run in enumerate(runs):
+        if i == 0:
+            # Anchored at the start. Followed by more (a `**` or the final remainder) → ends in `/`.
+            parts.append(_run_regex(run, trailing_slash=(last > 0 or final_star)))
+        elif i < last or final_star:
+            # Between two `**`s: leftmost placement, never retried.
+            parts.append(f"(?>(?:{_FOLDER})*?{_run_regex(run, trailing_slash=True)})")
+        else:
+            # The pattern's last element after a `**`: end-aligned. Linear, since all before it
+            # is atomic and the run itself has a fixed number of segments.
+            parts.append(f"(?:{_FOLDER})*" + _run_regex(run, trailing_slash=False))
+    if final_star:
+        parts.append(_REMAINDER)
     return re.compile("".join(parts))
 
 

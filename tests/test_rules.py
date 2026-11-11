@@ -9,6 +9,8 @@ Run from the repo root: ``PYTHONPATH=. pytest tests/test_rules.py``
 from __future__ import annotations
 
 import json
+import random
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -143,8 +145,9 @@ def test_matching_is_case_sensitive():
     assert not _m("NOTES.md", "notes.md")
 
 
-def test_surrounding_whitespace_is_stripped():
-    assert validate_pattern("  NOTES.md \t\n") == "NOTES.md"
+def test_surrounding_spaces_and_tabs_are_stripped():
+    assert validate_pattern("  NOTES.md \t") == "NOTES.md"
+    assert validate_pattern(" drafts/ ") == "drafts/"
     # Interior spaces are literal.
     assert validate_pattern("my notes.md") == "my notes.md"
     assert _m(" my notes.md ", "x/my notes.md")
@@ -186,6 +189,11 @@ def test_a_match_all_pattern_is_refused(pattern):
 )
 def test_a_malformed_pattern_is_refused(pattern, reason):
     assert _refused(pattern) == reason
+
+
+@pytest.mark.parametrize("pattern", ["drafts/\n", "\nx", "x\r", "x\x0b", "x\x0c", " x\n "])
+def test_a_line_break_is_refused_before_any_stripping(pattern):
+    assert _refused(pattern) == "control"
 
 
 def test_a_pattern_of_exactly_512_bytes_is_accepted():
@@ -441,3 +449,212 @@ async def test_reach_selects_columns_not_orm_rows(cairn_env):
         loaded = [o for o in s.identity_map.values() if isinstance(o, FileEntry)]
         assert loaded == []
         assert (await s.scalar(select(FileEntry.id).limit(1))) is not None
+
+
+# ================================================================================================
+# The compiled expression agrees with the grammar, and cannot backtrack super-linearly
+# ================================================================================================
+
+
+def _ref_segment(pat: str, name: str) -> bool:
+    """Reference: one segment pattern against one path segment, `*` any run, `?` one character."""
+    from functools import lru_cache
+
+    @lru_cache(maxsize=None)
+    def go(i: int, j: int) -> bool:
+        if i == len(pat):
+            return j == len(name)
+        if pat[i] == "*":
+            return go(i + 1, j) or (j < len(name) and go(i, j + 1))
+        if j == len(name):
+            return False
+        return (pat[i] == "?" or pat[i] == name[j]) and go(i + 1, j + 1)
+
+    return go(0, 0)
+
+
+def _ref_match(pattern: str, path: str) -> bool:
+    """Reference matcher written straight from the corpus-management grammar. No regex."""
+    from functools import lru_cache
+
+    parts = path.split("/")
+    if "/" not in pattern:
+        return _ref_segment(pattern, parts[-1])
+    if pattern.endswith("/"):
+        segs = pattern[:-1].split("/") + ["**"]
+    else:
+        segs = pattern.split("/")
+
+    @lru_cache(maxsize=None)
+    def go(i: int, j: int) -> bool:
+        if i == len(segs):
+            return j == len(parts)
+        if segs[i] == "**":
+            if i == len(segs) - 1:
+                return j < len(parts)  # last: every file beneath, one or more segments
+            return any(go(i + 1, k) for k in range(j, len(parts) + 1))  # zero or more folders
+        return j < len(parts) and _ref_segment(segs[i], parts[j]) and go(i + 1, j + 1)
+
+    return go(0, 0)
+
+
+@pytest.mark.parametrize(
+    "pattern, path, expected",
+    [
+        ("a/**/b", "a/b", True),
+        ("a/**/b", "a/x/y/b", True),
+        ("**/x", "x", True),
+        ("**/cache/**", "cache/a", True),
+        ("**/cache/**", "x/cache", False),
+        ("**/cache/**", "x/y/cache/b/c", True),
+        ("*a*b", "aXbYab", True),
+        ("*a*b", "ab", True),
+        ("*a*b", "ba", False),
+        ("*a*a", "aa", True),
+        ("*a*a", "a", False),
+        ("*a*a", "aXa", True),
+        ("a*", "a", True),
+        ("*.tar.*", "x.tar.gz", True),
+        ("*.tar.*", "x.tar", False),
+        ("a?*b", "aXb", True),
+        ("a?*b", "aXYZb", True),
+        ("a?*b", "ab", False),
+        ("a/*/b", "a/b", False),
+        ("a/*/b", "a/x/b", True),
+        ("x*y", "x\ny", True),
+        ("x\ty/", "x\ty/a\nb", True),
+        ("**/a/b/**/a/c", "a/b/a/b/a/c", True),
+        ("**/a/b/**/a/c", "a/b/a/c/a/b", False),
+        ("*ab*abc", "ababc", True),
+        ("*ab*abc", "abab", False),
+        ("a/**", "a", False),
+        ("a/", "a/x\ny", True),
+    ],
+)
+def test_specific_matches_agree_with_the_reference(pattern, path, expected):
+    assert _ref_match(pattern, path) is expected
+    assert _m(pattern, path) is expected
+
+
+def _gen_pattern(rng: random.Random) -> str:
+    segs = []
+    for _ in range(rng.randint(1, 4)):
+        if rng.random() < 0.2:
+            segs.append("**")
+        else:
+            segs.append("".join(rng.choice("ab.*?") for _ in range(rng.randint(1, 4))))
+    p = "/".join(segs)
+    if rng.random() < 0.15:
+        p += "/"
+    return p
+
+
+def _gen_path(rng: random.Random) -> str:
+    return "/".join(
+        "".join(rng.choice("ab.") for _ in range(rng.randint(1, 4)))
+        for _ in range(rng.randint(1, 5))
+    )
+
+
+def _instantiate(rng: random.Random, pattern: str) -> str:
+    """A path built from the pattern (so many pairs match), sometimes perturbed by one character."""
+    segs = (pattern[:-1].split("/") + ["**"]) if pattern.endswith("/") else pattern.split("/")
+    if "/" not in pattern:
+        segs = ["**", pattern]
+    out: list[str] = []
+    for seg in segs:
+        if seg == "**":
+            out.extend(_gen_path(rng).split("/")[: rng.randint(0, 3)])
+            continue
+        name = ""
+        for ch in seg:
+            if ch == "*":
+                name += "".join(rng.choice("ab.") for _ in range(rng.randint(0, 3)))
+            elif ch == "?":
+                name += rng.choice("ab.")
+            else:
+                name += ch
+        out.append(name or "a")
+    if not out:
+        out = ["a"]
+    path = "/".join(x for x in out if x) or "a"
+    if rng.random() < 0.4:
+        i = rng.randrange(len(path))
+        if path[i] != "/":
+            path = path[:i] + rng.choice("ab.") + path[i + 1 :]
+    return path
+
+
+def test_compiled_pattern_agrees_with_the_reference_matcher():
+    rng = random.Random(20261111)
+    compared = mismatches = 0
+    bad: list[tuple[str, str]] = []
+    while compared < 6000:
+        pattern = _gen_pattern(rng)
+        try:
+            rx = compile_pattern(pattern)
+        except RuleError:
+            continue
+        for k in range(10):
+            path = _gen_path(rng) if k < 3 else _instantiate(rng, pattern)
+            compared += 1
+            if (rx.fullmatch(path) is not None) != _ref_match(pattern, path):
+                mismatches += 1
+                bad.append((pattern, path))
+    assert mismatches == 0, bad[:10]
+
+
+def test_matching_time_is_bounded():
+    cases = [
+        ("a/" + "**/a/" * 18 + "Z", "a/" + "a/" * 26 + "Y"),
+        ("*a*/" * 20 + "X", ("a" * 30 + "/") * 20 + "Y"),
+        ("*a" * 40 + "b", "a" * 250),
+    ]
+    start = time.perf_counter()
+    for pattern, path in cases:
+        assert compile_pattern(pattern).fullmatch(path) is None
+        assert _ref_match(pattern, path) is False
+    # Only the compiled matches are timed against the bound.
+    t0 = time.perf_counter()
+    for pattern, path in cases:
+        compile_pattern(pattern).fullmatch(path)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.5, elapsed
+    assert time.perf_counter() - start < 30
+
+
+def test_a_lone_surrogate_in_a_path_does_not_raise():
+    rs = RuleSet(["*.txt", "bad*", "a/**"])
+    assert rs.matches("bad\udcff.txt")
+    assert not RuleSet(["x/"]).matches("bad\udcff.txt")
+    assert compile_pattern("**/q").fullmatch("d\udcff/q") is not None
+
+
+@pytest.mark.asyncio
+async def test_reach_counts_alarms_inside_the_ninety_day_window_only(cairn_env):
+    from src.models.db import Collection, Event, FileEntry
+    from src.services.rules import reach
+
+    root = cairn_env / "window"
+    root.mkdir()
+    cid = await seed_collection(root, ots_mode="none")
+    now = datetime.now(timezone.utc)
+    async with await _session() as s:
+        row = FileEntry(
+            collection_id=cid, relpath="w/NOTES.md", size=1, sha256="x", status="ok",
+            ots_state="none",
+        )
+        s.add(row)
+        await s.flush()
+        for days in (89, 91):
+            s.add(
+                Event(
+                    collection_id=cid, file_id=row.id, kind="modified",
+                    detected_at=now - timedelta(days=days),
+                    detail=json.dumps({"path": "w/NOTES.md", "from": {}, "to": {}}),
+                )
+            )
+        await s.commit()
+    async with await _session() as s:
+        r = await reach(s, await s.get(Collection, cid), "NOTES.md")
+    assert r["alarms_90d"] == 1

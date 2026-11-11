@@ -21,6 +21,15 @@ no other way:
   `a/**` and `a/` match the same files;
 - every other character matches only itself.
 
+Spaces and tabs around a submitted pattern are not part of it: they SHALL be removed before the
+pattern is validated and stored, and everything the system then says about the pattern — what it
+matches, what was stored — SHALL be about the pattern without them. No other character SHALL be
+removed or altered.
+
+Matching a path against a pattern SHALL take time bounded by a small multiple of the product of
+their lengths, whatever the pattern: a rule is evaluated inside a scan, and a pattern that could
+stall a match could stall the monitor.
+
 A rule's reach has to be predictable from reading it, because a rule is a standing instruction not
 to raise an alarm. The system SHALL therefore refuse to store a pattern that is empty, begins with
 `/`, contains an empty, `.` or `..` segment, contains a NUL or a line break, is longer than 512
@@ -88,6 +97,19 @@ what is flagged for a whole collection is what its policy is for.
 - **WHEN** a rule is submitted whose pattern is empty, begins with `/`, contains a `..` segment,
   an empty segment, a NUL or a line break, or exceeds 512 bytes
 - **THEN** it SHALL be refused, and no rule SHALL be stored
+
+#### Scenario: Surrounding spaces are removed and a line break is refused
+
+- **WHEN** a rule is submitted with the pattern ` drafts/ ` (spaces around it)
+- **THEN** the stored pattern SHALL be `drafts/`
+- **WHEN** a rule is submitted whose pattern ends in a line break
+- **THEN** it SHALL be refused, and no rule SHALL be stored
+
+#### Scenario: A pattern built to backtrack still matches quickly
+
+- **WHEN** a legal pattern made of many repeated wildcard segments is matched against a long path
+  it does not match
+- **THEN** the match SHALL complete in a fraction of a second
 
 #### Scenario: A duplicate or a hundred-and-first rule is refused
 

@@ -46,7 +46,12 @@ normalisation (a pattern matches the path as it is stored):
   (`**/cache/**`, `a/**/b`). `**` anywhere else — `a**b`, `**.md` — is **refused**: it has two
   readings. Every other character is literal; there are no character classes.
 
-Compiled once per scan to one regular expression per rule, segment by segment, full-match:
+Surrounding spaces and tabs are stripped before validation (and nothing else is — a line break
+is refused on the raw input). Compiled once per scan to one regular expression per rule, built
+from **atomic groups** so that no pattern can backtrack super-linearly (each segment, and each
+run of segments after a `**`, is matched at its leftmost placement and never retried — the
+standard greedy-glob argument; only the final run is end-aligned). The meaning, segment by
+segment, full-match:
 a `**` segment that is **not last** → `(?:[^/]+/)*` (zero or more folders); a `**` segment that
 **is last** → `(?:[^/]+/)*[^/]+` (any file beneath, at any depth — so `a/**` and `a/` mean the same
 thing); a trailing `/` → the same; within a segment `*` → `[^/]*`, `?` → `[^/]`, the rest escaped.
@@ -124,7 +129,12 @@ been shown, outside the accept guard. **Both ideas are cut** rather than patched
 ("changes expected"), and a rule resolves nothing. Round 2 confirmed the cut complete and found four text defects, fixed: the compile rule for a
 final `**` segment, an over-broad claim about statuses, the further-change scenario of the kept-
 contents requirement (now "raised where the collection would flag that change"), and "flagged
-again" on the rules page (now "follow the collection's policy"). Also folded in from round 1: `**` only as a whole segment,
+again" on the rules page (now "follow the collection's policy"). **Implementation review (Codex, adversarial, engine scope), round 1:** two MAJOR, both
+fixed — the line-break check ran after stripping, so `drafts/\n` was accepted; and a legal
+pattern of repeated `**/a/` segments took seconds to reject one path (now bounded by
+construction, and checked against an independent reference matcher over generated cases).
+
+Also folded in from round 1: `**` only as a whole segment,
 the trailing-slash reading stated, the ninety-day figure defined by event-time path and labelled
 for what it is, and the existing mass-change requirement modified explicitly.
 
