@@ -1,0 +1,75 @@
+{% import "_macros.html" as m %}
+{# The issues of ONE collection at ONE scope, grouped by folder (design D7). Shared by the
+   collection's review page and the fleet-wide `/review`. Expects `r` (the review model),
+   `row_from` ("" or "fleet") and `csrf_token`. Every count, row and fingerprint in `r` is a slice
+   of one population snapshot, so no two controls here can describe different states. #}
+{% set from_q = "?from=fleet" if row_from|default("") == "fleet" else "" %}
+<div class="card card--flush issues">
+  {% for g in r.groups %}
+    {% if r.flat %}
+      {# Every file is in one folder: a single list, not a group of one. The page-wide actions in
+         the toolbar are this list's bulk actions. #}
+      {# On the fleet page there is no page-wide toolbar, so the section's bulk actions (the whole
+         collection's — the same population as this single list) sit on the folder line. #}
+      {% if g.dir or row_from|default("") == "fleet" %}
+        <div class="issues__where">
+          <span class="mono">{{ (g.dir ~ "/") if g.dir else "" }}</span>
+          {% if row_from|default("") == "fleet" %}
+            <span class="issue-group__actions">
+              {{ m.bulk_accept("changes", r.accept_changes, r, r.collection_name, from_q, csrf_token) }}
+              {{ m.bulk_accept("deletions", r.accept_deletions, r, r.collection_name, from_q, csrf_token) }}
+            </span>
+          {% endif %}
+        </div>
+      {% endif %}
+      {% for it in g["items"] %}{% include "partials/review_row.html" %}{% endfor %}
+      {% if g.more > 0 %}
+        <div class="review-list__more">Showing {{ g.shown }} of {{ "{:,}".format(g.total) }} files —
+          the <a href="/collection/{{ r.collection_id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, lists them all.</div>
+      {% endif %}
+    {% else %}
+      <section class="issue-group">
+        <div class="issue-group__head">
+          <div class="issue-group__title">
+            <span class="issue-group__folder">{{ m.icon("folder", size=15, cls="text-3") }}</span>
+            <a class="issue-group__path mono" href="/collection/{{ r.collection_id }}/review?{{ g.query }}"
+               title="Open only {{ g.label }}">{{ g.label }}</a>
+            <span class="issue-group__counts">
+              {% if g.missing %}<span class="legend__stat">{{ m.dot("var(--danger)", size=7) }}{{ "{:,}".format(g.missing) }} missing</span>{% endif %}
+              {% if g.modified %}<span class="legend__stat">{{ m.dot("var(--warn)", size=7) }}{{ "{:,}".format(g.modified) }} changed</span>{% endif %}
+            </span>
+            {% if g.found %}<span class="issue-group__found">found {{ g.found }}</span>{% endif %}
+          </div>
+          <div class="issue-group__actions">
+            {{ m.bulk_accept("changes", g.accept_changes, r, g.label, from_q, csrf_token) }}
+            {{ m.bulk_accept("deletions", g.accept_deletions, r, g.label, from_q, csrf_token) }}
+          </div>
+        </div>
+        {% if g.shown == 0 %}
+          {# Nothing of this group fits in the page's row budget: say so and point at the group. #}
+          <div class="review-list__more">
+            {{ "This file is" if g.total == 1 else "These " ~ "{:,}".format(g.total) ~ " files are" }} not listed on this page —
+            <a href="/collection/{{ r.collection_id }}/review?{{ g.query }}">open {{ g.label }}</a> to see {{ "it" if g.total == 1 else "them" }}.
+          </div>
+        {% elif g.open %}
+          {% for it in g["items"] %}{% include "partials/review_row.html" %}{% endfor %}
+        {% else %}
+          <details class="issue-group__rows">
+            <summary>
+              {% if g.shown > 0 %}Show {{ g.shown if g.more == 0 else "the first " ~ g.shown }} file{{ "" if g.shown == 1 else "s" }}{% else %}Files not listed here{% endif %}
+              {% if g.more > 0 %}<span class="issue-group__more">· {{ "{:,}".format(g.more) }} more not shown</span>{% endif %}
+            </summary>
+            {% for it in g["items"] %}{% include "partials/review_row.html" %}{% endfor %}
+            {% if g.more > 0 %}
+              <div class="review-list__more">
+                {{ "{:,}".format(g.more) }} more file{{ "" if g.more == 1 else "s" }} in this folder {{ "is" if g.more == 1 else "are" }} not shown.
+                <a href="/collection/{{ r.collection_id }}/review?{{ g.query }}">Open {{ g.label }}</a> to see it grouped one level deeper, or use the
+                <a href="/collection/{{ r.collection_id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, for every file.
+              </div>
+            {% endif %}
+          </details>
+        {% endif %}
+      </section>
+    {% endif %}
+  {% endfor %}
+</div>

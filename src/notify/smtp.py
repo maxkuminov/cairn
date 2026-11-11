@@ -164,9 +164,9 @@ class SmtpNotifier:
             lines.append("(no file paths recorded)")
         lines.append("")
         if alert.url:
-            lines.append(f"Review and acknowledge: {alert.url}")
+            lines.append(f"Review and resolve: {alert.url}")
         else:
-            lines.append("Review and acknowledge in the Cairn panel.")
+            lines.append("Review and resolve in the Cairn panel.")
         return "\n".join(lines)
 
     def _html(self, alert: Alert, url: str) -> str:

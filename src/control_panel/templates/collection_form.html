@@ -50,13 +50,17 @@
         <label class="field">
           <div class="field__label-row"><span class="field__label">Change policy</span></div>
           <div class="seg seg--equal">
-            {% for k, lbl in [("worm", "WORM"), ("churn", "Churn")] %}
-              <label class="seg__btn {% if sel_mode == k %}is-active{% endif %}" data-seg="mode" data-val="{{ k }}">
-                <input type="radio" name="mode" value="{{ k }}" {% if sel_mode == k %}checked{% endif %} style="display:none" /> {{ lbl }}
+            {# The two policies in plain words (unify-issue-model D5). The stored values stay
+               `worm` / `churn`; they are never the label. #}
+            {% for pol in policies %}
+              <label class="seg__btn {% if sel_mode == pol.value %}is-active{% endif %}" data-seg="mode" data-val="{{ pol.value }}" title="{{ pol.flags }}">
+                <input type="radio" name="mode" value="{{ pol.value }}" {% if sel_mode == pol.value %}checked{% endif %} style="display:none" /> {{ pol.label }}
               </label>
             {% endfor %}
           </div>
-          <div class="field__hint">WORM treats any change as suspicious. Churn expects edits and only flags missing files.</div>
+          <div class="field__hint">
+            {% for pol in policies %}<div><strong>{{ pol.label }}</strong> — {{ pol.short | lower }}. {{ pol.flags }}</div>{% endfor %}
+          </div>
         </label>
         <label class="field">
           <div class="field__label-row"><span class="field__label">Scan cadence</span></div>
@@ -77,14 +81,6 @@
             {% endfor %}
           </select>
           <div class="field__hint">Full re-hash of every file to catch silent corruption (bit-rot) the quick scan misses by trusting size + mtime. Heavier — weekly is plenty for archives. Run <code>cairn bench</code> to estimate the cost.</div>
-        </label>
-        <label class="field">
-          <div class="field__label-row"><span class="field__label">Auto-baseline new files</span></div>
-          <select class="select" name="auto_baseline">
-            <option value="off" {% if not (ed and ed.auto_baseline_new) %}selected{% endif %}>Off — baseline new files manually</option>
-            <option value="on" {% if ed and ed.auto_baseline_new %}selected{% endif %}>On — graduate intact new files on each deep verify</option>
-          </select>
-          <div class="field__hint">When on, the deep-verify pass promotes new files that re-hash intact to "verified OK", so additions don't pile up needing a manual baseline. Modified and missing files are never auto-accepted.</div>
         </label>
       </div>
     </div>
@@ -120,7 +116,7 @@
         <label class="field">
           <div class="field__label-row"><span class="field__label">Exclude globs</span></div>
           <textarea class="textarea mono" name="excludes" rows="5" style="font-size:12px">{{ ed.excludes if ed else default_excludes }}</textarea>
-          <div class="field__hint">One pattern per line. Skip caches, temp files, and the Obsidian vault.</div>
+          <div class="field__hint">One pattern per line. Skip caches, temp files and anything that is not worth watching.</div>
         </label>
         {%- set email_on = ed.email_enabled if ed else true -%}
         <label class="field">

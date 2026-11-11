@@ -1038,3 +1038,117 @@
   .review-list__legend { flex-wrap: wrap; row-gap: 6px; }
   .review-list__legend .btn { flex-basis: 100%; }
 }
+
+/* ================= unify-issue-model: one issue model, folder-grouped review ================= */
+
+/* Quiet, kind-coloured accept controls. The record-removing one is red *text on an outline* —
+   distinguishable by colour and wording, never a filled button repeated down a column. */
+.btn--danger-outline { background: transparent; color: var(--danger); border: 1px solid color-mix(in oklch, var(--danger) 45%, var(--border)); }
+.btn--danger-outline:hover { background: var(--danger-soft); }
+
+/* A refusal / notice strip (the stale-form notice). */
+.notice { margin-bottom: 16px; display: flex; align-items: flex-start; gap: 10px; padding: 14px 16px; }
+.notice--warn { border-color: color-mix(in oklch, var(--warn) 35%, var(--border)); background: color-mix(in oklch, var(--warn-soft) 40%, var(--surface)); }
+.notice__icon { color: var(--warn); flex-shrink: 0; display: flex; }
+.notice__body { flex: 1; font-size: 13px; line-height: 1.55; color: var(--text-2); }
+
+/* "Showing only <folder>" */
+.scope-bar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 14px; padding: 9px 13px; font-size: 12.5px; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.scope-bar a { margin-left: auto; font-weight: 600; color: var(--accent); text-decoration: none; }
+.scope-bar a:hover { text-decoration: underline; }
+
+/* Page-wide actions + copy, directly above the files. */
+.review-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.review-toolbar__actions, .review-toolbar__copy { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bulk-accept { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; }
+.bulk-accept__hidden { font-size: 11.5px; color: var(--text-3); }
+
+/* The files, grouped by folder. */
+.issues { margin-bottom: 18px; }
+.issues__where { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 18px; font-size: 12px; color: var(--text-3); border-bottom: 1px solid var(--border); background: var(--surface-2); overflow-wrap: anywhere; }
+.issue-group { border-bottom: 1px solid var(--border); }
+.issue-group:last-child { border-bottom: none; }
+.issue-group__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 18px; background: var(--surface-2); }
+.issue-group__title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; font-size: 12.5px; }
+.issue-group__folder { display: inline-flex; }
+.issue-group__path { font-size: 13px; font-weight: 600; color: var(--text); text-decoration: none; overflow-wrap: anywhere; }
+.issue-group__path:hover { color: var(--accent); text-decoration: underline; }
+.issue-group__counts { display: inline-flex; gap: 12px; }
+.issue-group__found { color: var(--text-3); }
+.issue-group__actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.issue-group .review-row:first-of-type { border-top: 1px solid var(--border); }
+.issue-group__rows > summary { cursor: pointer; padding: 9px 18px; font-size: 12.5px; font-weight: 600; color: var(--accent); border-top: 1px solid var(--border); list-style-position: inside; }
+.issue-group__rows > summary:hover { background: var(--surface-2); }
+.issue-group__more { font-weight: 500; color: var(--text-3); }
+.review-row__alarm { color: var(--danger); font-weight: 650; }
+.review-row__repeat { color: var(--warn); font-weight: 600; }
+/* Both digests of a file that came back different, in full: wraps, never clips. */
+.review-row__detail { margin-top: 5px; font-size: 11px; line-height: 1.5; color: var(--text-2); white-space: normal; overflow-wrap: anywhere; word-break: break-all; }
+
+/* What the actions do / how to recover — AFTER the list. */
+.guide { padding: 18px 20px; margin-bottom: 20px; scroll-margin-top: 80px; }
+.guide__grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 26px; }
+.guide__title { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; color: var(--text); margin-bottom: 10px; }
+.guide__terms { margin: 0; font-size: 12.5px; line-height: 1.6; }
+.guide__terms dt { font-weight: 650; color: var(--text); }
+.guide__terms dd { margin: 2px 0 11px; color: var(--text-2); }
+.guide__text { font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+.guide__list { margin: 9px 0 0; padding-left: 18px; font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+.guide__list li { margin-bottom: 5px; }
+
+/* Fleet review: one section per collection. */
+.fleet-section { margin-bottom: 22px; }
+.fleet-section__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.fleet-section__title { display: flex; align-items: center; gap: 11px; flex-wrap: wrap; font-size: 12.5px; }
+.fleet-section__title h2 { font-size: 17px; margin: 0; }
+.fleet-section__title h2 a { color: inherit; text-decoration: none; }
+.fleet-section__title h2 a:hover { color: var(--accent); }
+
+/* Dashboard: needs-you. */
+.needs { margin-bottom: 20px; }
+.needs__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 16px 20px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--danger-soft) 38%, var(--surface)); }
+.needs__title { display: inline-flex; align-items: center; gap: 8px; font-size: 16px; margin: 0; color: var(--danger); }
+.needs__sub { margin-top: 3px; font-size: 13px; color: var(--text-2); }
+.needs__sub strong { color: var(--text); }
+.needs__row { display: flex; align-items: center; gap: 14px; padding: 13px 20px; border-bottom: 1px solid var(--border); text-decoration: none; color: inherit; }
+.needs__row:last-child { border-bottom: none; }
+.needs__row:hover { background: var(--surface-2); }
+.needs__main { flex: 1; min-width: 0; }
+.needs__name { display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 14px; color: var(--text); }
+.needs__facts { display: flex; align-items: center; gap: 13px; flex-wrap: wrap; margin-top: 4px; font-size: 12.5px; }
+.needs__when { color: var(--text-3); }
+.needs__folders { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 5px; font-size: 11.5px; color: var(--text-3); overflow-wrap: anywhere; }
+.needs__folders em { font-style: normal; color: var(--text-2); font-weight: 600; }
+.needs__cta { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; font-size: 13px; font-weight: 600; color: var(--danger); white-space: nowrap; }
+.needs--clear, .needs--empty { display: flex; align-items: center; gap: 10px; padding: 12px 16px; font-size: 13.5px; color: var(--text-2); border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); }
+.needs--clear { border-color: color-mix(in oklch, var(--ok) 35%, var(--border)); background: color-mix(in oklch, var(--ok-soft) 45%, var(--surface)); }
+.needs--clear .needs__clear-icon { color: var(--ok); display: flex; }
+.needs--empty .needs__clear-icon { color: var(--text-3); display: flex; }
+.needs--clear strong, .needs--empty strong { color: var(--text); }
+
+/* Dashboard: collection cards two-up, recent activity. */
+.collection-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 10px; align-items: start; }
+.activity__row { display: grid; grid-template-columns: 92px minmax(120px, 230px) minmax(0, 1fr); gap: 14px; align-items: baseline; padding: 10px 18px; border-bottom: 1px solid var(--border); font-size: 13px; text-decoration: none; color: inherit; }
+.activity__row:last-child { border-bottom: none; }
+.activity__row:hover { background: var(--surface-2); }
+.activity__day { color: var(--text-3); font-size: 12px; }
+.activity__collection { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity__parts { display: flex; gap: 6px 14px; flex-wrap: wrap; color: var(--text-2); font-size: 12.5px; }
+.activity__part--alarm { color: var(--danger); font-weight: 600; }
+.meta-cell__note { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+
+@media (max-width: 1100px) {
+  .collection-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 768px) {
+  .guide__grid { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .review-toolbar { align-items: stretch; }
+  .review-toolbar__actions, .review-toolbar__copy { width: 100%; }
+  .issue-group__head { padding: 11px 14px; }
+  .issue-group__actions { width: 100%; }
+  .bulk-accept .btn { white-space: normal; text-align: left; }
+  .needs__row { align-items: flex-start; }
+  .activity__row { grid-template-columns: 78px minmax(0, 1fr); }
+  .activity__parts { grid-column: 1 / -1; }
+  .scope-bar a { margin-left: 0; width: 100%; }
+}

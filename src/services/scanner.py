@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.db import Collection, Event, FileEntry, Run
@@ -190,12 +190,55 @@ class RunSummary:
     errors: int = 0
     # Intact `new` files promoted to `ok` by the deep pass (auto_baseline_new). Informational only.
     baselined: int = 0
+    # Existing files the unresolved-change rule (design D12) recorded `modified` where the pass
+    # would otherwise have recorded them `ok` (or left them `ok`/`new`): each carries an open
+    # `modified`/`restored_changed` event. No event is written and no alert raised for them.
+    reflagged: int = 0
     result: str = "ok"
     # Alarming events newly created THIS run — (kind, relpath), capped at ALARM_PATH_CAP. Only
     # `missing` (any mode), `restored_changed` (any mode) and `modified` (WORM) accumulate here;
     # `added`, `restored`, `moved` and churn re-baselines do not. The post-commit dispatch hook
     # turns a non-empty list into a single batched alert.
     alarming: list[tuple[str, str]] = field(default_factory=list)
+
+
+# Event kinds that record an unresolved CHANGE to a file's bytes. While one of them is open
+# (unacknowledged) on a file, the file is an issue whatever happens to it afterwards (design D12).
+UNRESOLVED_CHANGE_KINDS = ("modified", "restored_changed")
+
+
+async def _unresolved_change_ids(session: AsyncSession, collection_id: int) -> set[int]:
+    """Ids of the collection's files that carry an open ``modified``/``restored_changed`` event.
+
+    Read once at the start of a scan pass (after its claim): no accept can run while the claim is
+    held, so the set cannot go stale during the pass (design D12).
+    """
+    return set(
+        await session.scalars(
+            select(Event.file_id)
+            .where(
+                Event.collection_id == collection_id,
+                Event.kind.in_(UNRESOLVED_CHANGE_KINDS),
+                Event.acknowledged_at.is_(None),
+                Event.file_id.is_not(None),
+            )
+            .distinct()
+        )
+    )
+
+
+def _healthy_status(row: FileEntry, unresolved_ids: set[int], reflagged_ids: set[int]) -> str:
+    """The status a pass records for an EXISTING row it would otherwise record healthy (``ok``).
+
+    ``modified`` if the row carries an open change alert (its id is in ``unresolved_ids``), else
+    ``ok``. A re-flagged row's id is added to ``reflagged_ids`` so the scan can count it once. This
+    is the one place the at-the-write layer of design D12 lives; every branch that sets an existing
+    row ``ok`` goes through it, so no batch a scan commits ever holds such a file as healthy.
+    """
+    if row.id is not None and row.id in unresolved_ids:
+        reflagged_ids.add(row.id)
+        return "modified"
+    return "ok"
 
 
 async def _reconcile_moves(
@@ -205,6 +248,8 @@ async def _reconcile_moves(
     newly_missing: list[FileEntry],
     now: datetime,
     summary: RunSummary,
+    unresolved_ids: set[int] | None = None,
+    reflagged_ids: set[int] | None = None,
 ) -> set[int]:
     """Content-address moved/renamed files within one scan; return reconciled missing-row ids.
 
@@ -283,7 +328,13 @@ async def _reconcile_moves(
     for m, old_rel, new_rel, new_mtime in captured:
         m.relpath = new_rel
         m.mtime = new_mtime  # adopt the new file's mtime so the next fast-path scan skips re-hash
-        m.status = "ok"
+        # Healthy unless the file carries an unresolved change alert (design D12): a changed file
+        # that is then renamed is still changed.
+        m.status = _healthy_status(
+            m,
+            unresolved_ids if unresolved_ids is not None else set(),
+            reflagged_ids if reflagged_ids is not None else set(),
+        )
         m.last_checked = now
         # Preserve first_seen / sha256 / ots_path / ots_state / ots_stamped_at / ots_digest —
         # identity, proof, provenance and notarization history follow the file to its new path. The
@@ -399,6 +450,11 @@ async def scan_collection(
                 select(FileEntry).where(FileEntry.collection_id == collection.id)
             )
         }
+        # Design D12: the files carrying an open change alert, read once under the claim. Every
+        # branch below that would record an existing row healthy routes through `_healthy_status`
+        # with this set; `reflagged_ids` collects the rows the rule changed (counted once).
+        unresolved_ids = await _unresolved_change_ids(session, collection_id)
+        reflagged_ids: set[int] = set()
         seen: set[str] = set()
         added_buffer: list[FileEntry] = []
         # Ids of files restored in this batch (missing → ok). `_drain` system-acknowledges their open
@@ -595,7 +651,9 @@ async def scan_collection(
                             # informational (a missing file came back, the benign direction): born
                             # acknowledged like `added`, so it stays in the feed without nagging.
                             # `ots_state` is untouched — the stored proof still commits to these bytes.
-                            row.status = "ok"
+                            # Matching the bytes on record does not resolve an earlier, unaccepted
+                            # change to them (design D12): such a row comes back `modified`.
+                            row.status = _healthy_status(row, unresolved_ids, reflagged_ids)
                             session.add(
                                 Event(
                                     collection_id=collection.id,
@@ -632,8 +690,9 @@ async def scan_collection(
                             if perfile:
                                 row.ots_state = "pending"
                             if collection.mode == "churn":
-                                # Change is expected: silently re-baseline, no nag.
-                                row.status = "ok"
+                                # Change is expected: silently re-baseline, no nag — unless an
+                                # earlier alarm on this file is still open (design D12).
+                                row.status = _healthy_status(row, unresolved_ids, reflagged_ids)
                                 summary.ok += 1
                             else:
                                 row.status = "modified"
@@ -702,7 +761,14 @@ async def scan_collection(
             # uniquely matches one newly-added file is the same file relocated, not a deletion +
             # addition. Reconcile it in place (preserves identity/proof) and emit one `moved` event.
             reconciled_ids = await _reconcile_moves(
-                session, collection, new_rows, newly_missing, now, summary
+                session,
+                collection,
+                new_rows,
+                newly_missing,
+                now,
+                summary,
+                unresolved_ids,
+                reflagged_ids,
             )
 
             # Genuine deletions: every candidate not reconciled as a move becomes `missing` + alarms.
@@ -725,14 +791,34 @@ async def scan_collection(
             if deep and collection.auto_baseline_new:
                 for relpath, row in existing.items():
                     if row.status == "new" and relpath in seen:
-                        row.status = "ok"
-                        summary.baselined += 1
+                        row.status = _healthy_status(row, unresolved_ids, reflagged_ids)
+                        if row.status == "ok":
+                            summary.baselined += 1
                 if summary.baselined:
                     logging.getLogger("cairn.scanner").info(
                         "collection %s: auto-baselined %d intact new file(s) to ok on deep pass",
                         collection.id,
                         summary.baselined,
                     )
+
+            # Design D12, the end layer: after every other classification step of the pass and in
+            # the same transaction as its final batch, no held row carrying an open change alert
+            # may read `ok`/`new`. On the ORM objects, never a bulk UPDATE — a later flush of a
+            # stale in-memory status would overwrite it. Catches paths nobody routed through
+            # `_healthy_status` and rows left `ok` by earlier versions. `missing` is never touched.
+            if unresolved_ids:
+                for row in existing.values():
+                    if row.id in unresolved_ids and row.status in ("ok", "new"):
+                        row.status = "modified"
+                        reflagged_ids.add(row.id)
+            summary.reflagged = len(reflagged_ids)
+            if summary.reflagged:
+                logging.getLogger("cairn.scanner").info(
+                    "collection %s: kept %d file(s) `modified` that carry an open, unaccepted "
+                    "change alert (no new event, no alert)",
+                    collection_id,
+                    summary.reflagged,
+                )
 
             await session.commit()
             summary.result = "partial" if summary.errors else "ok"
@@ -1180,3 +1266,117 @@ async def accept_file(
 
     await session.commit()
     return {"accepted": accepted, "removed": removed, "events_ack": len(events)}
+
+
+# Ids per statement in `accept_files` — comfortably under SQLite's bound-parameter ceiling (999)
+# with room for the statement's own collection/status parameters. A module constant so a test can
+# drive the chunking.
+ACCEPT_FILES_CHUNK = 500
+
+
+async def accept_files(
+    session: AsyncSession,
+    collection: Collection,
+    file_ids,
+    user_id: int | None,
+) -> dict[str, int]:
+    """Accept an explicit set of file records of ONE collection (design D6).
+
+    For callers that have already established exactly which records the operator authorised (the
+    panel's folder-scoped bulk verbs hand over the ids their fingerprint recount just hashed). Per
+    record, the consequence :func:`accept_file` applies: ``new``/``modified`` → ``ok`` with its open
+    events acknowledged; ``missing`` → its events detached (path carried into ``detail``) and
+    acknowledged by :func:`_detach_ack_backfill` *before* the row is deleted. Nothing else in the
+    collection is touched — no other record, no other open event.
+
+    The id set is a claim, not a trust boundary: every statement re-asserts ``collection_id`` and the
+    status it expects, so an id of another collection, an ``ok`` row or an id that no longer exists
+    is simply not acted on. Ids are de-duplicated and chunked (:data:`ACCEPT_FILES_CHUNK`) so the
+    set's size is not limited by SQLite's bound-parameter ceiling. Everything happens in ONE
+    transaction with one ``commit()`` at the end (the panel caller already holds the write lock).
+    ``events_ack`` counts only events this call acknowledged; an already-acknowledged event keeps its
+    original timestamp and acknowledger.
+    """
+    now = _utcnow()
+    ids = sorted({int(i) for i in file_ids})
+    accepted = removed = events_ack = 0
+
+    for i in range(0, len(ids), ACCEPT_FILES_CHUNK):
+        chunk = ids[i : i + ACCEPT_FILES_CHUNK]
+
+        # Re-assert collection + status, reading this chunk's two populations before mutating.
+        changed_ids = list(
+            await session.scalars(
+                select(FileEntry.id).where(
+                    FileEntry.id.in_(chunk),
+                    FileEntry.collection_id == collection.id,
+                    FileEntry.status.in_(("new", "modified")),
+                )
+            )
+        )
+        missing_ids = list(
+            await session.scalars(
+                select(FileEntry.id).where(
+                    FileEntry.id.in_(chunk),
+                    FileEntry.collection_id == collection.id,
+                    FileEntry.status == "missing",
+                )
+            )
+        )
+
+        if changed_ids:
+            open_changed = (
+                Event.collection_id == collection.id,
+                Event.file_id.in_(changed_ids),
+                Event.acknowledged_at.is_(None),
+            )
+            events_ack += (
+                await session.scalar(select(func.count()).select_from(Event).where(*open_changed))
+            ) or 0
+            await session.execute(
+                update(Event)
+                .where(*open_changed)
+                .values(acknowledged_at=now, acknowledged_by=user_id)
+            )
+            await session.execute(
+                update(FileEntry)
+                .where(
+                    FileEntry.id.in_(changed_ids),
+                    FileEntry.collection_id == collection.id,
+                    FileEntry.status.in_(("new", "modified")),
+                )
+                .values(status="ok")
+            )
+            accepted += len(changed_ids)
+
+        if missing_ids:
+            events_ack += (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(Event)
+                    .where(
+                        Event.collection_id == collection.id,
+                        Event.file_id.in_(missing_ids),
+                        Event.acknowledged_at.is_(None),
+                    )
+                )
+            ) or 0
+            # Detach + backfill + ack BEFORE the delete, or ON DELETE CASCADE takes the history.
+            await session.execute(
+                _detach_ack_backfill(
+                    (Event.collection_id == collection.id) & Event.file_id.in_(missing_ids),
+                    now,
+                    user_id,
+                )
+            )
+            await session.execute(
+                delete(FileEntry).where(
+                    FileEntry.id.in_(missing_ids),
+                    FileEntry.collection_id == collection.id,
+                    FileEntry.status == "missing",
+                )
+            )
+            removed += len(missing_ids)
+
+    await session.commit()
+    return {"accepted": accepted, "removed": removed, "events_ack": events_ack}

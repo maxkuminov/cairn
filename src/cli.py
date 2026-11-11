@@ -18,6 +18,10 @@ from . import __version__
 PLANNED = ("status",)
 
 
+# The panel's plain names for the two change policies, accepted wherever the stored names are
+# (unify-issue-model D5). The stored values stay `worm` / `churn`.
+_POLICY_ALIASES = {"locked": "worm", "working": "churn"}
+
 def _run(coro) -> int:
     return asyncio.run(coro)
 
@@ -71,7 +75,7 @@ def _cmd_add_collection(args: argparse.Namespace) -> int:
                 user_id=uid,
                 name=args.name,
                 root=args.root,
-                mode=args.mode,
+                mode=_POLICY_ALIASES.get(args.mode, args.mode),
                 ots_mode=args.ots_mode,
                 hash_cadence_seconds=args.cadence,
                 verify_cadence_seconds=args.verify_cadence,
@@ -944,7 +948,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_add.add_argument("--name", required=True)
     p_add.add_argument("--root", required=True, help="Directory to watch")
-    p_add.add_argument("--mode", choices=("worm", "churn"), default="worm")
+    p_add.add_argument(
+        "--mode",
+        choices=("locked", "working", "worm", "churn"),
+        default="worm",
+        help=(
+            "change policy: 'locked' (nothing should change; every change and deletion is "
+            "flagged) or 'working' (edits are normal; deletions are flagged). 'worm' and 'churn' "
+            "are the stored names for the same two policies."
+        ),
+    )
     p_add.add_argument("--ots-mode", dest="ots_mode", choices=("none", "perfile"), default="none")
     p_add.add_argument("--cadence", type=int, default=900, help="Scan cadence seconds")
     p_add.add_argument(
