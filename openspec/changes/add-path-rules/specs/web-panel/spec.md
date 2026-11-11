@@ -92,7 +92,8 @@ page and its submission SHALL be scoped to the current user's own collections.
 The panel SHALL provide a page listing a collection's rules, each with its pattern and how many
 tracked files it matches now, and SHALL let the operator remove a rule after a confirmation. The
 page SHALL offer the same form for adding a rule directly. It SHALL say that removing a rule
-changes nothing about files already recorded and that later changes will be flagged again. A rule
+changes nothing about files already recorded and that later changes to the files it matched follow
+the collection's policy. A rule
 that currently matches no tracked file SHALL say so — a rule that matches nothing is either stale
 or mistyped. The collection's own page SHALL state how many rules it has and link to the list. A
 removal SHALL name the rule by its pattern, never by its position, so that a list that changed

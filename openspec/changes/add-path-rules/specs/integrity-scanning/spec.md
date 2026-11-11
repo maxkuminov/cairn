@@ -173,3 +173,104 @@ to deletions, which are already reported file by file.
 - **THEN** every one of those files SHALL be recorded `modified` with an unacknowledged `modified`
   event, and the scan SHALL count them as a mass change
 
+### Requirement: The contents on record before an unaccepted change are kept
+
+When a scan finds that a healthy file has changed and records it `modified`, it SHALL keep the
+digest, size and modification time that were on record before the change, alongside the new ones,
+until the change is accepted. Further changes to a file that is already `modified` SHALL NOT
+replace what was kept: they are further unaccepted changes away from the same last-healthy state.
+Where a missing file reappears with different bytes and nothing is yet kept for it — it was
+healthy when it went missing — what is kept SHALL be the digest recorded when it went missing.
+Where something is already kept, it SHALL be left as it is: the digest recorded when the file went
+missing is then itself an unaccepted change, and adopting it as "the contents before the change"
+would let that unaccepted version close the issue later as a return. Every accept of the file SHALL discard what was kept, and a healthy file
+SHALL never carry any.
+
+Each `modified` and `corrupted` event SHALL record what the file was and what it became — digest,
+size and modification time on both sides — together with the file's path, so that the event still
+says what it was about after the file's record has been removed.
+
+**A file that returns to the kept contents closes its own issue.** Whenever a scan holds a digest
+for a file that equals the kept one — because a changed file was put back, or because a file that
+had changed and then gone missing was restored from a copy of the original — the scan SHALL record
+the file `ok` with what it found, discard what was kept, acknowledge every open change alert of
+that file as a system acknowledgement in the same committed transaction, and write one
+informational event saying the file returned to the contents on record before it changed. It SHALL
+raise no alarm. A file for which contents are kept SHALL be re-read by **every** pass, quick or
+deep, whether or not its size or modification time moved: a restore that preserves metadata puts
+the original bytes back under the very size and time already on record — for a corrupted file they
+never differed — and a pass that trusted them would never see that the issue had closed itself.
+Equality of digests is the only test: a matching size or name SHALL NOT be treated
+as a return. On reappearance the order of tests SHALL be: equals the recorded digest (the file is
+back as it was last seen); equals the kept digest (the file is back as it was before it changed);
+otherwise it came back different. A record with no digest on record has nothing to be compared
+with and nothing kept; its reappearance is governed, unchanged, by the existing requirement "A
+file that reappears with different bytes is not reported as restored".
+
+#### Scenario: A change keeps what it replaced
+
+- **WHEN** a healthy file in a `worm` collection changes and is scanned
+- **THEN** the file SHALL be `modified`, its record SHALL hold both the new digest and the digest,
+  size and modification time it had before, and its `modified` event SHALL record both sides and
+  the path
+
+#### Scenario: A second change does not replace what was kept
+
+- **WHEN** a `modified` file changes again before it is accepted
+- **THEN** the kept digest SHALL still be the one from before the first change
+
+#### Scenario: Putting the original back closes the issue
+
+- **WHEN** a `modified` file is restored to exactly the bytes it had before it changed, and scanned
+- **THEN** the file SHALL be `ok`, nothing SHALL be kept for it any more, its open change alerts
+  SHALL be acknowledged with no acknowledging user, an informational event SHALL record the return,
+  and no alert SHALL be dispatched
+
+#### Scenario: A restore that preserves the file's size and date closes on a quick scan
+
+- **WHEN** a file found possibly corrupted is replaced by its original bytes with its original
+  size and modification time, and a quick (non-deep) scan runs
+- **THEN** the file SHALL be `ok` after that scan, and its `corrupted` event SHALL be acknowledged
+
+#### Scenario: A changed file that was deleted and restored from the original closes too
+
+- **WHEN** a file is found changed and not accepted, then found missing, then found again with the
+  bytes it had before it changed
+- **THEN** the file SHALL be `ok`, its `modified` and `missing` alerts SHALL be acknowledged, and no
+  `restored_changed` event SHALL be written
+
+#### Scenario: Coming back as the changed version is still unresolved
+
+- **WHEN** a file is found changed and not accepted, then found missing, then found again with the
+  changed bytes
+- **THEN** the file SHALL be `modified`, and what was kept SHALL still be the digest from before the
+  change
+
+#### Scenario: A changed file that vanished and came back as a third version keeps the original
+
+- **WHEN** a file is found changed and not accepted, then found missing, then found again with
+  bytes matching neither the changed version nor the original, and is later put back as the
+  changed version
+- **THEN** the file SHALL stay `modified` throughout, what is kept SHALL still be the digest from
+  before the first change, and only a return to that digest SHALL close the issue
+
+#### Scenario: Something else again is still a change
+
+- **WHEN** a `modified` file changes to bytes that match neither the recorded digest nor the kept
+  one
+- **THEN** it SHALL stay `modified`, what was kept SHALL be unchanged, and a further alert SHALL be
+  raised where the collection would flag that change — not where its policy, or a path rule, makes
+  an ordinary change quiet, in which case the file simply stays `modified` with its existing alert
+  open
+
+#### Scenario: Accepting discards what was kept
+
+- **WHEN** a `modified` file is accepted — on its own, as part of a set, or with its collection
+- **THEN** its record SHALL hold no kept contents, and a later return to the old bytes SHALL be
+  reported as a change
+
+#### Scenario: Same size is not a return
+
+- **WHEN** a `modified` file changes to different bytes that happen to have the size it had before
+  the first change
+- **THEN** the file SHALL NOT be recorded `ok`

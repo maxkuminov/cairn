@@ -46,9 +46,11 @@ normalisation (a pattern matches the path as it is stored):
   (`**/cache/**`, `a/**/b`). `**` anywhere else — `a**b`, `**.md` — is **refused**: it has two
   readings. Every other character is literal; there are no character classes.
 
-Compiled once per scan to one regular expression per rule, segment by segment (`**` segment →
-`(?:[^/]+/)*`, trailing `/` → `(?:[^/]+/)*[^/]+`, `*` → `[^/]*`, `?` → `[^/]`, the rest escaped),
-full-match.
+Compiled once per scan to one regular expression per rule, segment by segment, full-match:
+a `**` segment that is **not last** → `(?:[^/]+/)*` (zero or more folders); a `**` segment that
+**is last** → `(?:[^/]+/)*[^/]+` (any file beneath, at any depth — so `a/**` and `a/` mean the same
+thing); a trailing `/` → the same; within a segment `*` → `[^/]*`, `?` → `[^/]`, the rest escaped.
+`**/cache/**` therefore matches `cache/a`, `x/cache/a` and `x/y/cache/b/c`, and not `cache`.
 
 **Refused at creation:** empty; leading `/`; a `.` or `..` segment; an empty segment (`a//b`); a
 NUL or a line break; longer than 512 bytes; `**` that is not a whole segment or appears in a name;
@@ -71,8 +73,11 @@ re-baseline is, goes through the same helper that keeps a file with an open chan
 
 Nothing else consults the rules: not the missing sweep (a deletion is flagged as before), not the
 reappearance branch (a file that comes back different is flagged), not the corruption check, not
-any accept. A rule cannot remove a record, acknowledge an alert or change a status that a scan
-without the rule would not also have left healthy.
+any accept. A rule cannot remove a record or acknowledge an alert, and the only status it
+changes is the one it exists to change: a healthy file with an ordinary change stays healthy. A
+file that is already an issue stays one — a rule-covered edit to a `modified` file is quiet (no
+further alert) but leaves it `modified` with its alerts open and its kept contents untouched,
+which is exactly what an edit to such a file in a `churn` collection does today.
 
 ### D4 — Reach, shown before creation
 
@@ -116,7 +121,10 @@ Retiring at scan time discards the digest a reappearance must be compared agains
 wide ceiling does not protect a subfolder that is temporarily gone; a record with unresolved
 findings could be retired; and resolving at creation mutated a population the operator had not
 been shown, outside the accept guard. **Both ideas are cut** rather than patched: one effect
-("changes expected"), and a rule resolves nothing. Also folded in: `**` only as a whole segment,
+("changes expected"), and a rule resolves nothing. Round 2 confirmed the cut complete and found four text defects, fixed: the compile rule for a
+final `**` segment, an over-broad claim about statuses, the further-change scenario of the kept-
+contents requirement (now "raised where the collection would flag that change"), and "flagged
+again" on the rules page (now "follow the collection's policy"). Also folded in from round 1: `**` only as a whole segment,
 the trailing-slash reading stated, the ninety-day figure defined by event-time path and labelled
 for what it is, and the existing mass-change requirement modified explicitly.
 

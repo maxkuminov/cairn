@@ -16,7 +16,9 @@ no other way:
   itself being anchored at the collection root like any other path pattern;
 - within a segment, `*` matches any run of characters and `?` exactly one character, and neither
   matches `/`;
-- a segment that is exactly `**` matches any number of whole segments, including none;
+- a segment that is exactly `**` matches any number of whole folders, including none, when it is
+  not the last segment; as the **last** segment it matches every file beneath, at any depth, so
+  `a/**` and `a/` match the same files;
 - every other character matches only itself.
 
 A rule's reach has to be predictable from reading it, because a rule is a standing instruction not
@@ -58,7 +60,8 @@ what is flagged for a whole collection is what its policy is for.
 #### Scenario: A double-star segment spans folders
 
 - **WHEN** a collection has the rule pattern `**/cache/**`
-- **THEN** it SHALL match `cache/a`, `x/cache/a` and `x/y/cache/b/c`
+- **THEN** it SHALL match `cache/a`, `x/cache/a` and `x/y/cache/b/c`, and SHALL NOT match a file
+  named `cache`
 
 #### Scenario: Wildcards do not cross a separator
 
