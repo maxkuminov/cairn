@@ -187,11 +187,19 @@ does not rescan the population per row.
 ### D8 — Row facts
 
 Per row: the kind in words; when it was found; the file's own modification time (changed files —
-the fact that answers "was that me?"); size; for a missing file when it was last seen; a "proof
+the fact that answers "was that me?"); size; a "proof
 kept" marker for notarized files; and, for a file with more than one recorded change, "changed N
 times since <date>". A file whose open event is `restored_changed` is labelled "Came back
 different" and shows that event's recorded detail (both digests) in full, wrapping — the surface
 that requirement moves to now that the event feed is gone.
+
+A missing file's row does **not** say when the file was "last seen": the record's `last_checked` is
+rewritten by the very scan that finds the file missing, so the old "last seen" line was showing the
+finding time under another name. The time the row states is when the file was found missing.
+
+A file stays "came back different" for as long as that event is open, even when a later ordinary
+change has opened a newer event on the same file: accepting the row closes both, so the digest
+record is shown until then.
 
 The modification time rides the population read (one more column). The change count and the event
 detail are display-only reads keyed by the rendered rows' ids; they name no verb and enter no
@@ -259,6 +267,28 @@ unchanged (amber triangle for changed, red minus-circle for missing).
   rather than rewritten; removed-route tests assert 404/405.
 - **Open tabs across the deploy** → their fingerprints no longer match (header changed) and their
   acknowledge buttons 404; both fail closed.
+
+## Accepted limitations
+
+Found during implementation and test review; none crosses the guard, each is recorded rather than
+polished.
+
+- **A folder whose name contains a CR or LF cannot use its group's bulk action.** A browser
+  normalises a newline in the hidden `dir` field to CRLF on submit, so the scope never reproduces
+  and the action is always refused ("Your action was NOT applied"). It fails closed; the per-file
+  actions and the parent folder's bulk action still work.
+- **A blank `deep` field means "whole subtree".** The framework substitutes the default for an empty
+  form value before the scope is parsed, so it is not refused as malformed. It is still bound: it
+  validates only the subtree fingerprint.
+- **A fingerprint for an empty population is accepted as a no-op.** No page mints one (an action
+  over nothing is never rendered); a hand-built one mutates nothing.
+- **The needs-you header's "N missing · M changed" split is read separately from its total** (the
+  total is the sidebar badge's number, as required). Under a concurrent scan the two can differ for
+  one render; neither authorises anything.
+- **The collection card's status-bar label still says "modified"** where the legend beside it says
+  "changed" — the label's wording is pinned by an existing requirement and left alone.
+- **Until the first scan after deploy**, a record left `ok` with an open change alert by an earlier
+  version is not listed (D12 heals it on that scan).
 
 ## Migration Plan
 

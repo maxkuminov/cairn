@@ -110,7 +110,8 @@
 
   {% include "partials/review_groups.html" %}
 
-  {% if r.truncated %}
+  {# Grouped pages only: a single list states its own truncation, and has no folder to open. #}
+  {% if r.truncated and not r.flat %}
     <div class="review-list__more" id="review-truncated">Showing {{ "{:,}".format(r.shown) }} of {{ "{:,}".format(r.total) }} files on this page — open a folder above to see it in full, or the
       <a href="/collection/{{ c.id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, for every file.</div>
   {% endif %}

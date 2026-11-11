@@ -23,8 +23,12 @@
         </div>
       {% endif %}
       {% for it in g["items"] %}{% include "partials/review_row.html" %}{% endfor %}
-      {% if g.more > 0 %}
-        <div class="review-list__more">Showing {{ g.shown }} of {{ "{:,}".format(g.total) }} files —
+      {# Not at zero rows: a page that lists none of them says so itself (the fleet page's budget
+         notice) — "Showing 0 of N" describes a listing that does not exist. #}
+      {# ...and not on the fleet page, where the section's own footer states the truncation: one
+         statement per section, and one element with this id per document. #}
+      {% if g.more > 0 and g.shown > 0 and row_from|default("") != "fleet" %}
+        <div class="review-list__more" id="review-truncated">Showing {{ g.shown }} of {{ "{:,}".format(g.total) }} files —
           the <a href="/collection/{{ r.collection_id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, lists them all.</div>
       {% endif %}
     {% else %}
@@ -41,8 +45,11 @@
             {% if g.found %}<span class="issue-group__found">found {{ g.found }}</span>{% endif %}
           </div>
           <div class="issue-group__actions">
-            {{ m.bulk_accept("changes", g.accept_changes, r, g.label, from_q, csrf_token) }}
-            {{ m.bulk_accept("deletions", g.accept_deletions, r, g.label, from_q, csrf_token) }}
+            {# On the fleet page two collections can both have a `shared/`: the confirm names the
+               collection as well as the folder. #}
+            {% set g_where = (g.label ~ " — " ~ r.collection_name) if row_from|default("") == "fleet" else g.label %}
+            {{ m.bulk_accept("changes", g.accept_changes, r, g_where, from_q, csrf_token) }}
+            {{ m.bulk_accept("deletions", g.accept_deletions, r, g_where, from_q, csrf_token) }}
           </div>
         </div>
         {% if g.shown == 0 %}
@@ -53,6 +60,11 @@
           </div>
         {% elif g.open %}
           {% for it in g["items"] %}{% include "partials/review_row.html" %}{% endfor %}
+          {# A small group cut short by the page's row budget still says so itself. #}
+          {% if g.more > 0 %}
+            <div class="review-list__more">{{ "{:,}".format(g.more) }} more file{{ "" if g.more == 1 else "s" }} in this folder {{ "is" if g.more == 1 else "are" }} not shown on this page —
+              <a href="/collection/{{ r.collection_id }}/review?{{ g.query }}">open {{ g.label }}</a>.</div>
+          {% endif %}
         {% else %}
           <details class="issue-group__rows">
             <summary>
@@ -63,7 +75,9 @@
             {% if g.more > 0 %}
               <div class="review-list__more">
                 {{ "{:,}".format(g.more) }} more file{{ "" if g.more == 1 else "s" }} in this folder {{ "is" if g.more == 1 else "are" }} not shown.
-                <a href="/collection/{{ r.collection_id }}/review?{{ g.query }}">Open {{ g.label }}</a> to see it grouped one level deeper, or use the
+                {# A group of the files directly in a folder has nothing deeper to group by: opening
+                   it shows the same list, so only the file browser can list the rest. #}
+                {% if g.deep %}<a href="/collection/{{ r.collection_id }}/review?{{ g.query }}">Open {{ g.label }}</a> to see it grouped one level deeper, or use the{% else %}Use the{% endif %}
                 <a href="/collection/{{ r.collection_id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, for every file.
               </div>
             {% endif %}

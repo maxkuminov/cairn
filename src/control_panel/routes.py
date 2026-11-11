@@ -661,9 +661,10 @@ async def _recent_activity(
         buckets.setdefault((day_s or "", cid), {})[kind] = int(n)
     today = datetime.now().astimezone().date()
     lines = []
-    for (day_s, cid), kinds in sorted(
-        buckets.items(), key=lambda kv: (kv[0][0], names.get(kv[0][1], "")), reverse=True
-    ):
+    # Newest day first; within a day, collections by name (two stable sorts).
+    ordered = sorted(buckets.items(), key=lambda kv: names.get(kv[0][1], ""))
+    ordered.sort(key=lambda kv: kv[0][0], reverse=True)
+    for (day_s, cid), kinds in ordered:
         try:
             label = _day_label(date.fromisoformat(day_s), today)
         except ValueError:
@@ -1390,10 +1391,13 @@ class _PopIndex:
             if e.file_id is not None:
                 self.events_by_file.setdefault(e.file_id, []).append(e)
 
-    def newest_event(self, file_id: int) -> _PopEvent | None:
-        """The file's newest open event — highest id is the newest generation."""
-        events = self.events_by_file.get(file_id)
-        return events[-1] if events else None
+    def newest_event(self, file_id: int, kind: str | None = None) -> _PopEvent | None:
+        """The file's newest open event (of ``kind``, if given) — highest id is the newest."""
+        events = self.events_by_file.get(file_id) or ()
+        for event in reversed(events):
+            if kind is None or event.kind == kind:
+                return event
+        return None
 
 
 async def _read_population(
@@ -1862,9 +1866,14 @@ def _row(
     written = (
         datetime.fromtimestamp(f.mtime, tz=timezone.utc) if f.mtime is not None else None
     )
+    # A file that came back different stays that alarm for as long as that event is open — even
+    # when a LATER ordinary change has opened a newer event on top of it. Its detail line is the
+    # only surviving record of the digest the file had before it came back, and accepting the row
+    # closes that event too, so it must never be accepted without having been shown.
+    came_back = index.newest_event(f.id, "restored_changed") if f.status != "missing" else None
     if f.status == "missing":
         kind = "missing"
-    elif event is not None and event.kind == "restored_changed":
+    elif came_back is not None:
         kind = "came_back"
     else:
         kind = "changed"
@@ -1878,12 +1887,11 @@ def _row(
         "size": humanize_size(f.size),
         "found": humanize_delta(found),
         "found_full": _stamp_utc(found),
-        "last_seen": humanize_delta(f.last_checked),
-        "last_seen_full": _stamp_utc(f.last_checked),
         "written": humanize_delta(written) if written is not None else None,
         "written_full": _stamp_utc(written),
         "notarized": f.ots_state in ("incomplete", "complete"),
-        "event_id": event.id if event is not None else None,
+        # The event whose recorded detail the row shows (the came-back-different one, if any).
+        "event_id": (came_back or event).id if (came_back or event) is not None else None,
         "changes": 0,
         "changes_since": None,
         "detail": None,
@@ -1991,7 +1999,8 @@ def _review_model(
     shown_missing = shown_modified = 0
     for gscope, members in partition:
         ordered = sorted(members, key=lambda f: (0 if f.status == "missing" else 1, f.relpath))
-        take = min(len(ordered), REVIEW_GROUP_ROW_LIMIT, budget)
+        # A group is capped so one folder cannot use the whole page; a single list IS the page.
+        take = min(len(ordered), budget) if flat else min(len(ordered), REVIEW_GROUP_ROW_LIMIT, budget)
         budget -= take
         rows = [_row(f, collection, pop, index, gscope.dir) for f in ordered[:take]]
         rows_all.extend(rows)

@@ -954,7 +954,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="worm",
         help=(
             "change policy: 'locked' (nothing should change; every change and deletion is "
-            "flagged) or 'working' (edits are normal; deletions are flagged). 'worm' and 'churn' "
+            "flagged) or 'working' (edits are normal and are not flagged; deletions are, and so is "
+            "a file that comes back different after going missing). 'worm' and 'churn' "
             "are the stored names for the same two policies."
         ),
     )

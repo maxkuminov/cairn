@@ -26,9 +26,10 @@
     <div>
       <div class="guide__title">{{ m.icon("download", size=15, stroke=1.9) }} To get files back instead</div>
       <div class="guide__text">
-        Cairn watches your files read-only — it never restores them itself. Copy the affected paths
-        with <strong>Copy paths</strong>, restore them with your own backup tool (restic, Borg,
-        rsync, Time Machine, a cloud sync…), then run <strong>Scan now</strong> on the collection.
+        Cairn watches your files read-only — it never restores them itself.
+        {% if copy_control|default(true) %}Copy the affected paths with <strong>Copy paths</strong>,{% else %}Open the collection's own review page to copy the affected paths,{% endif %}
+        restore them with your own backup tool (restic, Borg, rsync, Time Machine, a cloud sync…),
+        then run <strong>Scan now</strong> on the collection.
       </div>
       <ul class="guide__list">
         <li>A <strong>missing</strong> file that comes back is re-read and compared against the

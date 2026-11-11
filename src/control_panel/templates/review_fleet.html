@@ -88,6 +88,8 @@
       {% endif %}
     </section>
   {% endfor %}
+  {# This page has no copy control: the guidance must not name one it does not render. #}
+  {% set copy_control = false %}
   {% include "partials/review_help.html" %}
 {% endif %}
 {% endblock %}

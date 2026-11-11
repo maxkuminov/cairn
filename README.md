@@ -28,9 +28,11 @@ running. Honest caveats before you rely on it:
 
 ## What it does
 
-- **Monitors collections** — configured file sets, each with its own policy (WORM vs churn,
-  scan cadence, exclude globs, optional weekly deep re-hash for bit-rot). Detects added /
-  modified / **missing** / moved files and nags until you acknowledge.
+- **Monitors collections** — configured file sets, each with its own policy (**Locked**: nothing
+  should change, or **Working**: edits are normal; scan cadence, exclude globs, optional weekly deep
+  re-hash for bit-rot). Detects added / changed / **missing** / moved files. A changed or missing
+  file is an *issue* that stays open until you accept it (**Accept change** / **Accept deletion**)
+  or restore the file.
 - **Notarizes** — stamps file hashes to Bitcoin via OpenTimestamps, runs a daily `upgrade`
   pass to complete proofs, and stores file + `.ots` together for export.
 - **Verifies** — a page where anyone can check a file + `.ots` against the blockchain (via a
@@ -78,7 +80,7 @@ turn on timestamping only where proof-of-date matters.
 | Collection detail | What changed (review) |
 |---|---|
 | [![Collection detail](docs/screenshots/collection-detail.png)](docs/screenshots/collection-detail.png) | [![Review changed/missing files](docs/screenshots/review.png)](docs/screenshots/review.png) |
-| Per-collection status, policy, notarization state, and a folder tree. | Every missing/modified file, with recovery guidance and one-click acknowledge. |
+| Per-collection status, policy, notarization state, and a folder tree. | Every changed or missing file, grouped by folder, with one action to resolve each and recovery guidance. |
 
 | Verify a proof | How it works |
 |---|---|

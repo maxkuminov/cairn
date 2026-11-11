@@ -66,7 +66,7 @@
 {% macro status_badge(status, size="md") -%}
 {%- set meta = {
   "ok": ("OK", "ok", "checkCircle"),
-  "modified": ("Modified", "warn", "alert"),
+  "modified": ("Changed", "warn", "alert"),
   "missing": ("Missing", "danger", "minusCircle"),
   "new": ("New", "accent", "plus"),
   "added": ("Added", "accent", "plus"),
@@ -234,10 +234,10 @@
     <input type="hidden" name="return_deep" value="{{ '1' if r.scope_deep else '0' }}" />
     {% if kind == 'changes' -%}
       <button class="btn btn--sm btn--warn-outline" type="submit"
-              title="These are the files now. Cairn recorded the new contents when it found each change; accepting clears the issues and these changes are not reported again.">Accept {{ "{:,}".format(n) }} change{{ s }}</button>
+              title="{% if n == 1 %}This is the file now. Cairn recorded the new contents when it found the change; accepting clears the issue and this change is not reported again.{% else %}These are the files now. Cairn recorded the new contents when it found each change; accepting clears the issues and these changes are not reported again.{% endif %}">Accept {{ "{:,}".format(n) }} change{{ s }}</button>
     {%- else -%}
       <button class="btn btn--sm btn--danger-outline" type="submit"
-              title="Cairn forgets these files: their records, first-seen dates and the links to their timestamp proofs are removed. Nothing on disk is deleted and the proof files stay in the proof store.">Accept {{ "{:,}".format(n) }} deletion{{ s }}</button>
+              title="{% if n == 1 %}Cairn forgets this file: its record, first-seen date and the link to its timestamp proof are removed. Nothing on disk is deleted and the proof file stays in the proof store.{% else %}Cairn forgets these files: their records, first-seen dates and the links to their timestamp proofs are removed. Nothing on disk is deleted and the proof files stay in the proof store.{% endif %}">Accept {{ "{:,}".format(n) }} deletion{{ s }}</button>
     {%- endif %}
     {% if a.hidden %}<span class="bulk-accept__hidden">includes {{ "{:,}".format(a.hidden) }} not shown here</span>{% endif %}
   </form>
