@@ -1017,6 +1017,9 @@ async def _scan_a_changed_restore(root, *, mode: str = "worm") -> tuple[int, str
     original, impostor = "the real deed", "a different document entirely"
     root.mkdir(parents=True, exist_ok=True)
     (root / "deed.pdf").write_text(original)
+    # A second file keeps the folder from reading as empty (a scan refuses an empty root while
+    # files are tracked — add-scan-safety-nets); this test is about one file.
+    (root / "bystander.txt").write_text("always here")
     # `ots_mode="none"`: this is about the rendered row, and a `perfile` collection would send the
     # post-scan stamp pass at a calendar.
     cid = await seed_collection(root, ots_mode="none", mode=mode)
@@ -1728,18 +1731,21 @@ def test_recovery_guidance_names_both_outcomes_of_a_rescan(cairn_env):
     assert text.count("returns to healthy") == text.count("with the recorded contents returns to healthy")
 
 
-def test_recovery_guidance_does_not_promise_that_reverting_a_change_clears_it(cairn_env):
-    """Scenario "Recovery guidance does not promise that reverting a change clears it", and
+def test_recovery_guidance_states_the_exact_condition_for_a_changed_file(cairn_env):
+    """Scenario "Recovery guidance states the exact condition for a changed file", and
     "The forbidden reassurances are not rendered"."""
     help_html, body = _guidance(cairn_env)
     text = _text(help_html)
 
-    # What the scan actually does with a restored earlier version: one more change, to accept.
+    # What the scan actually does since it keeps the contents a change replaced: a changed file
+    # put back EXACTLY as it was closes its own issue; any other version is one more change.
     assert (
-        "A changed file is compared against the newest contents Cairn recorded, so putting an "
-        "earlier version back shows up as one more change, which you then accept."
+        "A changed file closes its own issue too — but only if it is put back exactly as it was "
+        "before the change (Cairn keeps that fingerprint until you accept). Any other version "
+        "shows up as one more change."
     ) in text
-    assert "No earlier version is kept on record to compare against." in text
+    assert "No earlier version is kept on record to compare against." not in text
+    # ...and it does not widen that into "an earlier version clears it".
     assert not re.search(
         r"(earlier|previous|original|older) version[^.]*"
         r"(clears|closes|resolves|returns? (it )?to (a )?healthy|healthy again)",

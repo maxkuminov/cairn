@@ -32,7 +32,9 @@ running. Honest caveats before you rely on it:
   should change, or **Working**: edits are normal; scan cadence, exclude globs, optional weekly deep
   re-hash for bit-rot). Detects added / changed / **missing** / moved files. A changed or missing
   file is an *issue* that stays open until you accept it (**Accept change** / **Accept deletion**)
-  or restore the file.
+  or put the file back as it was. Neither policy absorbs possible corruption (contents changed,
+  size and date did not) or an unusually large change in one scan, and a folder that is
+  unreachable or comes up empty is reported as such — never as every file deleted.
 - **Notarizes** — stamps file hashes to Bitcoin via OpenTimestamps, runs a daily `upgrade`
   pass to complete proofs, and stores file + `.ots` together for export.
 - **Verifies** — a page where anyone can check a file + `.ots` against the blockchain (via a

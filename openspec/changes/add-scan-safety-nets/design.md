@@ -208,6 +208,17 @@ incomplete coverage — is now one stated rule: a file is marked missing only by
 listed every directory, that found at least one trackable file, and that did not list that file's
 name.
 
+**Interpretations settled during implementation.** "Healthy before a change" means status `ok` or
+`new` **with no open change alert**; a row already `modified`, or one whose alerts were
+acknowledged without an accept under the old panel, never has a prior set. A record with no digest
+on record that is hashed for the first time just records the digest — no event, under either
+policy (previously `worm` raised a `modified` alarm for it). Wherever a pass records an existing
+row healthy (`_healthy_status` returning `ok`) it also clears any prior the row carried, so "a
+healthy row never carries a prior" holds on every path, not only the accepts. A refused pass skips
+the stamp tail as well, so it really does change no file record. Counts: corrupted and
+mass-converted files are included in `runs.modified` (the convention `restored_changed` already
+follows) and named separately in the alert text.
+
 ## Risks / Trade-offs
 
 - **A legitimately emptied collection now needs the CLI flag** → stated in the refusal reason.

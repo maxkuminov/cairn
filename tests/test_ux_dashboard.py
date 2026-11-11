@@ -1275,7 +1275,7 @@ def _pure_population(**overrides):
         "files": [_PopFile(
             id=SUBJECT_ID, relpath=f"a/{SUBJECT}", status="missing", sha256="a" * 64,
             first_seen=NOW, size=10, last_checked=NOW, last_changed=None, ots_state="complete",
-            mtime=None,
+            mtime=None, prior_size=None,
         )],
         "open_events": [_PopEvent(id=1, kind="missing", detected_at=NOW, file_id=SUBJECT_ID)],
         "total_files": 1,
@@ -1778,6 +1778,9 @@ async def _scan_a_changed_restore(root, *, mode: str) -> int:
 
     root.mkdir(parents=True, exist_ok=True)
     (root / "deed.pdf").write_text("the real deed")
+    # A second file keeps the folder from reading as empty (a scan refuses an empty root while
+    # files are tracked — add-scan-safety-nets); this test is about one file.
+    (root / "bystander.txt").write_text("always here")
     # `ots_mode="none"`: the status pill is the subject, and `perfile` would send the post-scan
     # stamp pass at a calendar.
     cid = await seed_collection(root, ots_mode="none", mode=mode)
