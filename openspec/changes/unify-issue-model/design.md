@@ -227,9 +227,15 @@ follow-on history view (everything else).
 
 ### D12 — The scan keeps an unresolved change listed
 
-See D1. Implemented at the end of `scan_collection`'s main pass, in the same transaction as the
-final batch, on the ORM rows the scan holds (not a bulk `UPDATE` — a later flush of a stale
-in-memory status would overwrite it). `RunSummary` counts the re-flagged files and the scan logs
+See D1. Two layers. **At the write:** the scan reads, once at its start, the ids of the
+collection's files that carry an open `modified` / `restored_changed` event (a small set; no accept
+can run during a scan, so it cannot go stale), and every place the pass would set an existing row
+`ok` — matching reappearance, move reconciliation, the `churn` re-baseline, auto-baseline — goes
+through one helper that returns `modified` for an id in that set. Batches commit every 500 files,
+so this is what keeps every *committed* state honest, including the state an aborted scan leaves.
+**At the end:** one sweep over the held ORM rows in the same transaction as the final batch (not a
+bulk `UPDATE` — a later flush of a stale in-memory status would overwrite it), for paths nobody
+listed and for rows left by earlier versions. `RunSummary` counts the re-flagged files and the scan logs
 one INFO line when the count is non-zero. It never touches a file that is `missing` (already an
 issue) and never a file with no open change event.
 

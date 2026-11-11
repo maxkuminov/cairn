@@ -55,10 +55,15 @@ its change alert is still open would read as healthy.
 Two existing paths return such a file to `ok`: a changed file that goes missing and reappears with
 the bytes on record (the reappearance check compares against the changed contents, and closes only
 the `missing` events), and a changed file that is then moved or renamed (move reconciliation sets
-the surviving record healthy). The scan SHALL therefore re-establish the rule once, after every
-other classification step of the pass — the missing sweep, move reconciliation and automatic
-graduation of new files — and in the same transaction as the pass's final batch, so that no step
-of the same scan can undo it and no reader can observe the file as healthy in between.
+the surviving record healthy). A scan commits its work in batches, so the rule SHALL hold in
+**every batch a scan commits**, not only at its end: wherever a pass would record an existing file
+healthy — a reappearance that matches, a move, an expected edit under the `churn` policy, the
+automatic graduation of a new file — it SHALL record `modified` instead when that file carries an
+open change alert, so that no committed state of the scan shows the file as healthy and an aborted
+scan leaves nothing healthy behind it. The scan SHALL additionally re-establish the rule over the
+whole collection once, after every other classification step of the pass and in the same
+transaction as its final batch, so that a path nobody thought of cannot undo it and records left
+by earlier versions are corrected.
 
 Re-flagging a file SHALL NOT write an event and SHALL NOT raise an alert: the alert was sent when
 the change was found. It SHALL NOT alter the file's recorded digest, size, proof state or
@@ -79,6 +84,19 @@ earlier versions, on the first scan that sees them.
   that the next scan reconciles it as a move
 - **THEN** after that scan the surviving record SHALL have status `modified`, and no additional
   alert SHALL have been raised for it
+
+#### Scenario: No committed batch shows the file healthy
+
+- **WHEN** a changed, unaccepted file that went missing reappears with the bytes on record during
+  a scan that commits more than one batch, and the datastore is read after the batch containing
+  that file is committed and before the scan finishes
+- **THEN** the file's status SHALL already be `modified`
+
+#### Scenario: An expected edit does not launder an earlier alarm
+
+- **WHEN** a file in a `churn` collection carries an open `restored_changed` event and is then
+  edited, so that the next scan re-baselines the edit
+- **THEN** the file's status SHALL remain `modified`
 
 #### Scenario: Re-flagging raises no alert and writes no event
 

@@ -27,7 +27,9 @@ capability), so that removing the event count removes no unresolved change from 
 
 A file that is merely new SHALL NOT be presented as outstanding work: no surface SHALL describe it
 as waiting for a baseline, and no surface SHALL offer an action to baseline it. A new file is
-watched and notarized from the scan that found it.
+watched from the scan that found it; whether it is notarized depends on the collection's
+notarization mode and is reported by the file's own proof state, so no surface SHALL describe new
+files as notarized on the strength of being new.
 
 #### Scenario: Every count of outstanding work agrees
 
