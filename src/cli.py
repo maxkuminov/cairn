@@ -181,7 +181,9 @@ def _cmd_accept(args: argparse.Namespace) -> int:
     async def run() -> int:
         from .database import get_sessionmaker
         from sqlalchemy import text
+        from sqlalchemy.exc import OperationalError
 
+        from .models.db import Collection
         from .services.collections import (
             active_run,
             blocking_run,
@@ -200,20 +202,31 @@ def _cmd_accept(args: argparse.Namespace) -> int:
                 collections = [collection]
             else:
                 collections = await list_collections(session)
+            # Identity captured up front, as plain values: a refusal rolls the session back, which
+            # expires every ORM object in it, so nothing after the first refusal may read a
+            # collection attribute off an object loaded before it.
+            targets = [(c.id, c.name) for c in collections]
             refused = 0
-            for collection in collections:
+            for cid, name in targets:
                 # Never accept under a running operation (the panel refuses too): a scan holds the
                 # rows it read when it started and would write over what this accept changes — a
                 # change it had just found could end up recorded healthy. Checked once before
                 # taking SQLite's writer lock (this may reclaim an abandoned claim, which writes
                 # from another connection) and once under it, where no claim can commit any more.
-                name, cid = collection.name, collection.id
                 busy = await blocking_run(session, cid) is not None
                 if not busy:
-                    await session.execute(
-                        text("UPDATE collections SET name = name WHERE id = :id"), {"id": cid}
-                    )
-                    busy = await active_run(session, cid) is not None
+                    try:
+                        await session.execute(
+                            text("UPDATE collections SET name = name WHERE id = :id"), {"id": cid}
+                        )
+                    except OperationalError as exc:
+                        # Someone else holds the writer lock past the busy timeout — an operation
+                        # mid-commit. That is "busy", not a crash. Anything else propagates.
+                        if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                            raise
+                        busy = True
+                    else:
+                        busy = await active_run(session, cid) is not None
                 if busy:
                     await session.rollback()
                     refused += 1
@@ -223,13 +236,17 @@ def _cmd_accept(args: argparse.Namespace) -> int:
                         file=sys.stderr,
                     )
                     continue
+                collection = await session.get(Collection, cid)
+                if collection is None:  # deleted since it was listed
+                    await session.rollback()
+                    continue
                 r = await accept_collection(session, collection, uid)
                 print(
                     f"[{name}] accepted={r['accepted']} removed_missing={r['removed']} "
                     f"events_acknowledged={r['events_ack']}"
                 )
         # Like `cairn scan`: non-zero only when nothing at all could be done.
-        return 1 if collections and refused == len(collections) else 0
+        return 1 if targets and refused == len(targets) else 0
 
     return _run(run())
 

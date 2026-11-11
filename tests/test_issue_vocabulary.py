@@ -903,3 +903,44 @@ def test_the_panel_accept_rechecks_for_an_operation_under_the_write_lock(cairn_e
             return await s.scalar(select(FileEntry.status).where(FileEntry.id == fid))
 
     assert asyncio.run(status()) == "modified"
+
+
+def test_cli_accept_continues_past_a_busy_collection(cairn_env, capsys):
+    """Review round 3: a refusal rolls the session back; the next collection must still be
+    accepted (and the command exits 0, because something could be done)."""
+    import asyncio
+
+    from sqlalchemy import select
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry
+    from src.services import scanner
+    from tests.conftest import seed_collection
+
+    busy_cid, busy_fid = asyncio.run(_seed_running_scan(cairn_env, "abusy"))
+
+    async def seed_free():
+        root = cairn_env / "zfree"
+        root.mkdir()
+        (root / "a.txt").write_text("one")
+        cid = await seed_collection(root, ots_mode="none", mode="worm")
+        async with get_sessionmaker()() as s:
+            collection = await s.get(Collection, cid)
+            await scanner.scan_collection(s, collection)
+            (root / "a.txt").write_text("two, longer")
+            await scanner.scan_collection(s, collection)
+        return cid
+
+    free_cid = asyncio.run(seed_free())
+
+    assert _cli(["accept"]) == 0
+    captured = capsys.readouterr()
+    assert "[abusy] refused" in captured.err
+    assert "[zfree] accepted=1" in captured.out
+
+    async def statuses():
+        async with get_sessionmaker()() as s:
+            rows = await s.execute(select(FileEntry.collection_id, FileEntry.status))
+            return dict(rows.all())
+
+    assert asyncio.run(statuses()) == {busy_cid: "modified", free_cid: "ok"}

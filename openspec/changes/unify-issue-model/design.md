@@ -281,6 +281,20 @@ unchanged (amber triangle for changed, red minus-circle for missing).
 - **Open tabs across the deploy** → their fingerprints no longer match (header changed) and their
   acknowledge buttons 404; both fail closed.
 
+## Review record
+
+Spec: two Codex rounds (round 1: an unresolved change could vanish, two over-claims, a widening
+scope link, undisclosed rows; round 2: the rule must hold in every committed batch). Implementation:
+the accept guard and folder scope passed adversarial review with no findings. The scanner scope took
+three rounds, all one family — writers of `files.status` that are not serialized with a scan
+(`import-manifest`, then `cairn accept`): round 1 fixed the importer and the stale read, round 2
+moved the fix to the source (accept never runs under an operation; the scan states its rule against
+the database), round 3 was verification only and found two defects in the new CLI refusal itself
+(objects expired by the rollback; lock contention raising), fixed with a test. Declined from the
+verifier's non-blocking list: the help card names "Accept deletion" on a changed-only page (it is a
+general guide, and the control exists one page away); the learn page does not restate what each
+policy flags.
+
 ## Accepted limitations
 
 Found during implementation and test review; none crosses the guard, each is recorded rather than
