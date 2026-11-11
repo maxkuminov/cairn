@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Rules — {{ c.name }} · Cairn{% endblock %}
+{% block content %}
+{# A collection's path rules (add-path-rules): each with what it matches NOW, and the control that
+   removes it. A removal names the rule by its pattern, never its position. #}
+<div class="page-header">
+  <div>
+    <a class="back-link" href="/collection/{{ c.id }}">{{ m.icon("arrowLeft", size=15) }} {{ c.name }}</a>
+    <h1>Rules</h1>
+    <div class="page-header__sub">
+      Files in <strong>{{ c.name }}</strong> whose changes are expected. Policy: <strong>{{ c.policy.label }}</strong> — {{ c.policy.flags }}
+    </div>
+  </div>
+</div>
+
+{% if gone == "1" %}
+  <div class="card notice notice--ok" id="rule-gone" role="status">
+    <span class="notice__icon">{{ m.icon("checkCircle", size=16, stroke=2) }}</span>
+    <div class="notice__body"><strong>Rule removed.</strong> No file record changed. Later changes to the files it matched follow the collection's policy.</div>
+  </div>
+{% elif gone == "0" %}
+  <div class="card notice notice--warn" id="rule-gone" role="status">
+    <span class="notice__icon">{{ m.icon("info", size=16, stroke=2) }}</span>
+    <div class="notice__body"><strong>Nothing was removed</strong> — that rule was no longer in the list. The list below is current.</div>
+  </div>
+{% endif %}
+
+{% if not c.rules_have_effect %}
+  <div class="card notice notice--warn" id="rule-policy-note">
+    <span class="notice__icon">{{ m.icon("info", size=16, stroke=2) }}</span>
+    <div class="notice__body">
+      <strong>{{ c.name }} is a Working collection</strong> — ordinary edits are already not flagged
+      anywhere in it, so {{ "these rules change" if rules else "a rule changes" }} nothing here. Rules only matter while the collection's policy is Locked.
+    </div>
+  </div>
+{% endif %}
+
+<div class="card card--flush" id="rule-list" style="margin-bottom:18px">
+  {% if rules %}
+    {% for r in rules %}
+      <div class="rule-row" id="rule-{{ loop.index }}">
+        <div class="rule-row__body">
+          <div class="rule-row__pattern mono">{{ r.pattern }}</div>
+          <div class="rule-row__meta">
+            {% if not r.recognised %}
+              <span class="rule-row__warn">Not recognised — this entry is ignored and matches nothing</span>
+            {% elif r.tracked == 0 %}
+              <span class="rule-row__warn">{{ m.icon("alert", size=12, stroke=2) }} Currently matches no files — stale, or mistyped</span>
+            {% else %}
+              <span>Changes expected · matches <strong>{{ "{:,}".format(r.tracked) }}</strong> of {{ "{:,}".format(total) }} tracked file{{ "" if total == 1 else "s" }}</span>
+            {% endif %}
+            {% if r.created %}<span class="review-row__sep">·</span> <span>added {{ r.created }}</span>{% endif %}
+          </div>
+        </div>
+        <form method="post" action="/collection/{{ c.id }}/rules/delete" style="margin:0"
+              data-pattern="{{ r.pattern }}"
+              onsubmit="return confirm('Remove the rule ' + this.dataset.pattern + '?\n\nNo file record changes. From the next scan, changes to the files it matched follow the collection\'s policy again.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <input type="hidden" name="pattern" value="{{ r.pattern }}" />
+          <button class="btn btn--sm btn--ghost" type="submit">Remove</button>
+        </form>
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="empty-state" id="rule-none">
+      <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px">No rules</div>
+      <div>Every file in this collection follows its policy. Add a rule below, or from a changed file on the
+        <a href="/collection/{{ c.id }}/review">review page</a> with <strong>Stop flagging this…</strong></div>
+    </div>
+  {% endif %}
+</div>
+
+<div class="card rule-own" id="rule-own">
+  <div class="section-label">Add a rule</div>
+  {% if rules|length >= max_rules %}
+    <div class="field__hint">This collection has {{ max_rules }} rules, the most it can hold. Remove one to add another.</div>
+  {% else %}
+    {# A GET into the rule page: it shows what the pattern matches before anything is stored. #}
+    <form method="get" action="/collection/{{ c.id }}/rules/new" class="rule-own__form">
+      <input class="input mono" type="text" name="pattern" id="rule-pattern"
+             placeholder="e.g. NOTES.md   or   exports/   or   clients/*/draft-*.docx"
+             maxlength="512" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Pattern" />
+      <button class="btn" type="submit">See what it matches</button>
+    </form>
+  {% endif %}
+  {% include "partials/rule_syntax.html" %}
+</div>
+
+{% include "partials/rule_facts.html" %}
+{% endblock %}

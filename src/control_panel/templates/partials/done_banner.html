@@ -1,0 +1,23 @@
+{% import "_macros.html" as m %}
+{# The one-shot confirmation a review page shows after an action went through (set by the route
+   that performed it, shown once, then cleared). `done.kind` is one of three fixed words and
+   `done.count` a number — the cookie it comes from can produce nothing else. `c` (optional) is the
+   collection the page is about. #}
+{% if done %}
+  <div class="card notice notice--ok" id="done-banner" role="status">
+    <span class="notice__icon">{{ m.icon("checkCircle", size=16, stroke=2) }}</span>
+    <div class="notice__body">
+      {% if done.kind == "changes" %}Accepted <strong>{{ "{:,}".format(done.count) }}</strong> change{{ "" if done.count == 1 else "s" }}.
+      {% elif done.kind == "rule" %}
+        {# A rule resolves nothing. The sentence a hurried reader keeps must be that one. #}
+        <strong>Rule added.</strong> It applies from the next scan.
+        {% if done.count %}
+          <strong>{{ "{:,}".format(done.count) }}</strong> changed file{{ "" if done.count == 1 else "s" }} listed here match{{ "es" if done.count == 1 else "" }} it and {{ "is" if done.count == 1 else "are" }} still listed — a rule does not accept anything; use <strong>Accept change</strong> for {{ "it" if done.count == 1 else "them" }}.
+        {% else %}
+          No changed file listed here matches it.
+        {% endif %}
+        {% if c is defined and c %}<a href="/collection/{{ c.id }}/rules">See this collection's rules</a>{% endif %}
+      {% else %}Accepted <strong>{{ "{:,}".format(done.count) }}</strong> deletion{{ "" if done.count == 1 else "s" }} — {{ "its record was" if done.count == 1 else "their records were" }} removed; nothing on disk was touched.{% endif %}
+    </div>
+  </div>
+{% endif %}

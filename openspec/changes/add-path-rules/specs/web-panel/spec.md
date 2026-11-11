@@ -2,11 +2,12 @@
 
 ### Requirement: A rule is created from a changed file, with its reach shown first
 
-Every changed file listed on a review view SHALL offer a link to say that changes to it are
-expected. The link SHALL open a page that starts from that file and proposes patterns for it —
+Every file listed on a review view as an ordinary change SHALL offer a link to say that changes to
+it are expected. The link SHALL open a page that starts from that file and proposes patterns for it —
 files of that name in any folder, everything in its folder, and that file alone — together with a
-field for a pattern of the operator's own. A missing file's row SHALL NOT offer the link: no rule
-covers a deletion.
+field for a pattern of the operator's own. A missing file's row SHALL NOT offer the link, and neither SHALL the row of a
+file flagged for possible corruption or for coming back different: no rule covers any of those, and
+a control that suggested otherwise beside such a finding would invite the wrong answer to it.
 
 The page SHALL say what a rule does and what it never does: that ordinary changes to matching
 files stop being flagged from the next scan; that deletions, possible corruption, a file that
@@ -37,11 +38,29 @@ page and its submission SHALL be scoped to the current user's own collections.
 - **THEN** the changed file's row SHALL offer a link that opens the rule page for it, and the
   missing file's row SHALL NOT
 
+#### Scenario: A finding no rule covers does not offer the link
+
+- **WHEN** a review view lists a file flagged for possible corruption, or one that came back
+  different
+- **THEN** its row SHALL NOT offer the link
+
 #### Scenario: The rule page proposes patterns for a file
 
 - **WHEN** the rule page is opened for the changed file `clients/acme/NOTES.md`
 - **THEN** it SHALL propose the file name in any folder, the folder `clients/acme/`, and the file
   alone, and SHALL offer a free pattern field
+
+#### Scenario: A pattern of the operator's own is checked before it is stored
+
+- **WHEN** the operator types a pattern and asks what it matches
+- **THEN** the page SHALL state that pattern's reach, or the reason it is refused, and nothing
+  SHALL have been stored
+
+#### Scenario: A rule in a collection whose policy already expects edits says so
+
+- **WHEN** the rule page or the rules page is opened for a collection whose policy does not flag
+  ordinary edits
+- **THEN** it SHALL say that a rule changes nothing there while that policy stands
 
 #### Scenario: Each proposal states its reach
 
