@@ -32,12 +32,19 @@ def cairn_env(tmp_path, monkeypatch):
     database.reset_engine()
     database.ensure_dirs()
     database.run_migrations()
-    # Process-wide scheduler state keyed by collection id (the deep-pass backoff): every test gets
-    # a fresh database whose ids start at 1 again, so it must not carry over.
+    return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _reset_scheduler_state():
+    """Process-wide scheduler state keyed by collection id (the deep-pass backoff): every test
+    gets a fresh database whose ids start at 1 again, so it must not carry over. Autouse, because
+    some test modules define their own `cairn_env`."""
     from src.services import scheduler
 
     scheduler._DEEP_RETRY_AFTER.clear()
-    return tmp_path
+    yield
+    scheduler._DEEP_RETRY_AFTER.clear()
 
 
 async def seed_collection(

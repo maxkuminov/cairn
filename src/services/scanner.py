@@ -500,6 +500,10 @@ async def scan_collection(
     # A logging call on a refusal/failure path must never be the thing that crashes the scan, so
     # nothing after the claim reads identity off the ORM object.
     collection_id = collection.id
+    # When this collection row was created: part of the alert-attempt key, so a new collection
+    # that reuses a deleted one's id does not inherit its alert limit.
+    collection_created = collection.created_at
+    collection_alert_json = collection.alert_json
     collection_name = collection.name
     summary = RunSummary(collection_id=collection_id)
     perfile = collection.ots_mode == "perfile"
@@ -1024,7 +1028,8 @@ async def scan_collection(
                     except (TypeError, ValueError):
                         rel = "?"
                     rel = rel.replace(os.sep, "/")
-                    if rel in ("?", ".") or rel.startswith(".."):
+                    # Only a real parent reference — a directory may legitimately be NAMED `..x`.
+                    if rel in ("?", ".", "..") or rel.startswith("../"):
                         # The root itself, or a directory we cannot place: nothing under the root
                         # can be vouched for.
                         unreadable_all = True
@@ -1504,7 +1509,8 @@ async def scan_collection(
         try:
             due = True
             try:
-                due = await _safety_alert_due(session, collection_id, run_id, prefixes, now)
+                marker = _safety_alert_key(collection_id, collection_created, prefixes)
+                due = await _safety_alert_due(session, marker, now)
             except Exception:
                 # Unknown → send: an extra alert is the cheap error, a lost one is not.
                 logging.getLogger("cairn.scanner").exception(
@@ -1513,14 +1519,17 @@ async def scan_collection(
                 )
             if due:
                 # Marked BEFORE dispatch: the limit is on attempts, and an attempt that raises
-                # must still count, or a broken channel would be retried on every scan.
-                try:
-                    await _safety_alert_mark(session, collection_id, prefixes, now)
-                except Exception:
-                    await session.rollback()
-                    logging.getLogger("cairn.scanner").exception(
-                        "recording the alert attempt failed for collection %s", collection_id
-                    )
+                # must still count, or a broken channel would be retried on every scan. Marked
+                # only when a channel is enabled, though: with none there is no attempt to limit,
+                # and a marker would silence the first alert after one is switched on.
+                if _any_channel_enabled(collection_alert_json):
+                    try:
+                        await _safety_alert_mark(session, marker, now)
+                    except Exception:
+                        await session.rollback()
+                        logging.getLogger("cairn.scanner").exception(
+                            "recording the alert attempt failed for collection %s", collection_id
+                        )
                 await _dispatch_alert(
                     session,
                     collection,
@@ -1546,19 +1555,31 @@ async def scan_collection(
     return summary
 
 
-def _safety_alert_key(collection_id: int, prefixes: tuple[str, ...]) -> str:
-    """Where the time of the last refusal / unreadable-folder alert ATTEMPT is kept."""
+def _safety_alert_key(
+    collection_id: int, created_at: datetime | None, prefixes: tuple[str, ...]
+) -> str:
+    """Where the time of the last refusal / unreadable-folder alert ATTEMPT is kept.
+
+    The collection's creation time is part of the key: `collections.id` is a rowid, and a new
+    collection that reuses a deleted one's id must not inherit its alert limit.
+    """
     klass = "unreadable" if prefixes == (WALK_UNREADABLE,) else "refusal"
-    return f"safety_alert_at:{collection_id}:{klass}"
+    born = int(created_at.timestamp()) if created_at is not None else 0
+    return f"safety_alert_at:{collection_id}:{klass}:{born}"
 
 
-async def _safety_alert_due(
-    session: AsyncSession,
-    collection_id: int,
-    run_id: int,
-    prefixes: tuple[str, ...],
-    now: datetime,
-) -> bool:
+def _any_channel_enabled(alert_json: str | None) -> bool:
+    """True when the collection routes alerts to at least one enabled channel."""
+    try:
+        routing = json.loads(alert_json or "{}")
+    except ValueError:
+        return False
+    if not isinstance(routing, dict):
+        return False
+    return any(isinstance(v, dict) and v.get("enabled") for v in routing.values())
+
+
+async def _safety_alert_due(session: AsyncSession, marker: str, now: datetime) -> bool:
     """Whether a refused-root / unreadable-folder alert is due (design D1).
 
     Not due when such an alert was last ATTEMPTED for this collection within
@@ -1570,11 +1591,7 @@ async def _safety_alert_due(
     """
     from ..models.db import AppSetting
 
-    last = await session.scalar(
-        select(AppSetting.value).where(
-            AppSetting.key == _safety_alert_key(collection_id, prefixes)
-        )
-    )
+    last = await session.scalar(select(AppSetting.value).where(AppSetting.key == marker))
     if not last:
         return True
     try:
@@ -1586,16 +1603,13 @@ async def _safety_alert_due(
     return (now - attempted).total_seconds() >= SAFETY_ALERT_INTERVAL_SECONDS
 
 
-async def _safety_alert_mark(
-    session: AsyncSession, collection_id: int, prefixes: tuple[str, ...], now: datetime
-) -> None:
+async def _safety_alert_mark(session: AsyncSession, marker: str, now: datetime) -> None:
     """Record that a refusal / unreadable-folder alert was attempted now."""
     from ..models.db import AppSetting
 
-    key = _safety_alert_key(collection_id, prefixes)
-    row = await session.get(AppSetting, key)
+    row = await session.get(AppSetting, marker)
     if row is None:
-        session.add(AppSetting(key=key, value=now.isoformat()))
+        session.add(AppSetting(key=marker, value=now.isoformat()))
     else:
         row.value = now.isoformat()
     await session.commit()

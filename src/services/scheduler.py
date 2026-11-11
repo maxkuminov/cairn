@@ -513,6 +513,12 @@ async def run_due_scans(
                 )
         except Exception:
             log.exception("scan failed for collection %s (%s)", collection.id, collection.name)
+            if deep:
+                # A deep pass that RAISED did not complete either: same one-day back-off, or a
+                # collection that fails every time would hold the single deep slot on every tick.
+                _DEEP_RETRY_AFTER[collection.id] = now_wall + timedelta(
+                    seconds=DEEP_RETRY_BACKOFF_SECONDS
+                )
         finally:
             next_due[collection.id] = now + collection.hash_cadence_seconds
     return scanned

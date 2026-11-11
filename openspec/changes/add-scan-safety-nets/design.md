@@ -252,6 +252,16 @@ this version is deployed have no kept contents (the columns did not exist when t
 so putting such a file back does not close it — it is accepted as before. The guidance text is
 true for every change found from this version on.
 
+A last verification round on those fixes (Codex) found five items; four folded in: a deep pass
+that *raised* backs off like one that was refused; the alert-attempt marker is written only when a
+channel is enabled (otherwise switching a channel on mid-outage would stay silent for a day); the
+marker key includes the collection's creation time (a reused collection id does not inherit a
+limit); a directory legitimately named `..x` is not mistaken for the parent. **Declined:** leaving
+the deep pass owed whenever a single tracked file's bytes could not be read. Such a file is
+reported on the collection as skipped, is never treated as verified or graduated, and is re-read
+by every later deep pass; keeping the whole collection owed would re-hash everything daily (the
+back-off interval) for as long as one file stays unreadable.
+
 ## Risks / Trade-offs
 
 - **A legitimately emptied collection now needs the CLI flag** → stated in the refusal reason.

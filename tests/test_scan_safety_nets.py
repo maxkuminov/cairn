@@ -156,9 +156,21 @@ async def _collection(cairn_env, name: str, files: dict[str, str], *, mode: str 
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(data)
     cid = await seed_collection(root, ots_mode="none", mode=mode)
+    # An enabled channel (dispatch itself is captured by the `alerts` fixture): the safety-alert
+    # rate limit only records an attempt when there is a channel to attempt.
+    await _set_alert_json(cid, '{"email": {"enabled": true, "to": ["operator@example.com"]}}')
     first = await _scan(cid)
     assert first.result == "ok"
     return root, cid
+
+
+async def _set_alert_json(cid: int, value: str) -> None:
+    from src.database import get_sessionmaker
+    from src.models.db import Collection
+
+    async with get_sessionmaker()() as s:
+        (await s.get(Collection, cid)).alert_json = value
+        await s.commit()
 
 
 @pytest.fixture
@@ -1577,3 +1589,88 @@ async def test_a_deep_pass_that_did_not_complete_is_retried_a_day_later_not_ever
     async with get_sessionmaker()() as s:
         assert (await s.get(Collection, broken)).last_full_scan_at is None
         assert (await s.get(Collection, healthy)).last_full_scan_at is not None
+
+
+@needs_permissions
+@pytest.mark.asyncio
+async def test_a_directory_named_with_leading_dots_is_not_mistaken_for_the_parent(
+    cairn_env, unlistable, alerts
+):
+    """`..backup` is a legal directory name, not a path out of the root: an unreadable one shields
+    only itself, and a deletion elsewhere is still found."""
+    root, cid = await _collection(cairn_env, "dots", {"a.txt": "a", "b.txt": "b"})
+    (root / "..backup").mkdir()
+    unlistable(root / "..backup")
+    (root / "b.txt").unlink()
+
+    summary = await _scan(cid)
+
+    assert summary.missing == 1 and summary.walk_incomplete is False
+    assert (await _file(cid, "b.txt")).status == "missing"
+
+
+@pytest.mark.asyncio
+async def test_no_attempt_is_recorded_while_no_channel_is_enabled(cairn_env, alerts):
+    """With no channel there is nothing to rate-limit: the outage alert must go out on the first
+    scan after a channel is switched on, not a day later."""
+    import shutil
+
+    from sqlalchemy import func
+
+    from src.database import get_sessionmaker
+    from src.models.db import AppSetting
+
+    root, cid = await _collection(cairn_env, "nochannel", {"a.txt": "a"})
+    await _set_alert_json(cid, "{}")
+    shutil.rmtree(root)
+    alerts.clear()
+
+    await _scan(cid)  # refused; no channel
+    async with get_sessionmaker()() as s:
+        markers = await s.scalar(
+            select(func.count()).select_from(AppSetting).where(
+                AppSetting.key.like("safety_alert_at:%")
+            )
+        )
+    assert markers == 0
+
+    await _set_alert_json(cid, '{"email": {"enabled": true, "to": ["operator@example.com"]}}')
+    before = len(alerts)
+    await _scan(cid)  # an hour later, say: still refused, channel now on
+    assert len(alerts) - before == 1
+    await _scan(cid)
+    assert len(alerts) - before == 1  # ...and now it is limited
+
+
+@pytest.mark.asyncio
+async def test_a_deep_pass_that_raised_backs_off_too(cairn_env, monkeypatch):
+    import time as _time
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection
+    from src.services import scheduler
+    from src.services.scanner import RunSummary
+
+    _root_a, broken = await _collection(cairn_env, "araise", {"a.txt": "a"})
+    _root_b, healthy = await _collection(cairn_env, "bfine", {"b.txt": "b"})
+    async with get_sessionmaker()() as s:
+        for c in await s.scalars(select(Collection)):
+            c.verify_cadence_seconds = 604800
+            c.last_full_scan_at = None
+        await s.commit()
+
+    calls: list[tuple[int, bool]] = []
+
+    async def fake_scan(session, collection, *, deep=False):
+        calls.append((collection.id, deep))
+        if collection.id == broken and deep:
+            raise RuntimeError("boom")
+        return RunSummary(collection_id=collection.id)
+
+    monkeypatch.setattr(scheduler.scanner, "scan_collection", fake_scan)
+    for _tick in range(2):
+        async with get_sessionmaker()() as s:
+            await scheduler.run_due_scans(s, {}, _time.monotonic())
+
+    deep_calls = [cid for cid, deep in calls if deep]
+    assert deep_calls.count(broken) == 1 and deep_calls.count(healthy) == 1
