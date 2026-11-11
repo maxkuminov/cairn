@@ -14,15 +14,17 @@ import hmac
 import json
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, literal, null, select, text, union_all, update
+from sqlalchemy import func, literal, null, select, text, union_all
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -199,12 +201,12 @@ async def _ots_counts(session: AsyncSession, collection_id: int) -> dict[str, in
 
 
 async def _alert_badge_count(session: AsyncSession, collection_ids: list[int]) -> int:
-    """The sidebar alert badge's number: files that are missing **or** modified (design D3).
+    """The number of open issues: files that are missing **or** modified.
 
-    One definition for four render sites (``base.html`` and the three OOB-swap partials), fed by
-    three call sites (``_base_context``, ``_event_feed``, ``ack_event``). The badge used to count
-    ``missing`` only while the dashboard tile beside it counted ``missing + modified``, so the two
-    disagreed; three independent inline queries is how that drifted.
+    THE definition of "outstanding work" (unify-issue-model D1). The sidebar badge and the
+    dashboard's needs-you total both come from here, through ``_base_context``, so they cannot
+    disagree; nothing else in the panel counts work waiting for the operator, and in particular
+    nothing counts unacknowledged events.
     """
     if not collection_ids:
         return 0
@@ -219,26 +221,10 @@ async def _alert_badge_count(session: AsyncSession, collection_ids: list[int]) -
     return int(n or 0)
 
 
-async def _open_event_count(session: AsyncSession, collection_id: int) -> int:
-    """Count of a collection's unacknowledged events — the population ``accept_collection`` clears.
-
-    Used by the collection view (the D7 render gate) and by the D14 fingerprint header, so the gate
-    and the guard can never disagree about what "no open events" means.
-    """
-    n = await session.scalar(
-        select(func.count())
-        .select_from(Event)
-        .where(Event.collection_id == collection_id, Event.acknowledged_at.is_(None))
-    )
-    return int(n or 0)
-
-
 def _collection_status(counts: dict[str, int]) -> str:
-    # `new` (added) files are informational and born-acknowledged (streamline-event-acknowledgement):
-    # a newly-tracked, unmodified file is the happy path, not something to warn about. Only an
-    # alarming WORM `modified` raises "attention"; a `missing` file raises "alert". A collection whose
-    # only non-ok files are `new` reads "All clear" (a scan never promotes new→ok; baseline via accept
-    # to move them into the "Verified OK" count, but it is not required for the collection to be healthy).
+    # `new` files are informational: a newly-tracked, unmodified file is the happy path, not work
+    # for the operator. Only a `modified` file raises "attention"; a `missing` file raises "alert".
+    # A collection whose only non-ok files are `new` reads "All clear".
     # A collection with no files at all is not healthy — it is watching nothing. Its `counts` dict
     # sums to zero exactly in that case, so no extra argument is needed (design D5 / #31). A root
     # that is a typo or a failed bind mount scans `ok` forever; reporting it green is the failure.
@@ -257,10 +243,52 @@ def _collection_status(counts: dict[str, int]) -> str:
 # `folder` is already in the icon set and is not spoken for by another status.
 _STATUS_META = {
     "ok": ("All clear", "var(--ok)", "checkCircle", "ok"),
-    "attention": ("Attention", "var(--warn)", "alert", "warn"),
-    "alert": ("Alert", "var(--danger)", "minusCircle", "danger"),
+    "attention": ("Changed", "var(--warn)", "alert", "warn"),
+    "alert": ("Missing", "var(--danger)", "minusCircle", "danger"),
     "empty": ("No files indexed", "var(--text-3)", "folder", "muted"),
 }
+
+
+def _status_label(status: str, counts: dict[str, int]) -> str:
+    """What the status pill says: the fact, not a grade (design D11).
+
+    "Attention" and "Alert" left the operator to guess which kind of problem a collection had;
+    the pill now states how many files changed and how many are missing.
+    """
+    if status == "alert":
+        label = f"{counts['missing']:,} missing"
+        if counts["modified"] > 0:
+            label += f" · {counts['modified']:,} changed"
+        return label
+    if status == "attention":
+        return f"{counts['modified']:,} changed"
+    return _STATUS_META[status][0]
+
+
+# The two change policies in the operator's words (design D5). The stored values stay
+# `worm` / `churn`; no template prints them. `flags` is the accurate statement of what each
+# policy raises: Working is NOT "deletions only" — a file that comes back different after going
+# missing is flagged under both.
+_POLICY = {
+    "worm": {
+        "label": "Locked",
+        "short": "Nothing here should change",
+        "flags": "Every change and every deletion is flagged.",
+    },
+    "churn": {
+        "label": "Working",
+        "short": "Edits are normal",
+        "flags": (
+            "Ordinary edits are not flagged — nor, yet, is a change of contents that a deep "
+            "verify finds with the size and date untouched. Deletions are flagged, and so is a "
+            "file that comes back different after going missing."
+        ),
+    },
+}
+
+
+def _policy_view(mode: str) -> dict[str, str]:
+    return {"value": mode, **_POLICY.get(mode, _POLICY["worm"])}
 
 # --- live operation status (scan / stamp / upgrade) -----------------------------------------
 
@@ -294,13 +322,14 @@ def _op_view(run: Run) -> dict[str, Any]:
 async def _op_status_c(session: AsyncSession, collection: Collection) -> dict[str, Any]:
     """Build the ``c`` context for ``partials/op_status.html``: resting status + any running op."""
     counts = await _collection_counts(session, collection.id)
-    meta = _STATUS_META[_collection_status(counts)]
+    status = _collection_status(counts)
+    meta = _STATUS_META[status]
     run = await collections_svc.active_run(session, collection.id)
     return {
         "id": collection.id,
         "status_kind": meta[3],
         "status_icon": meta[2],
-        "status_label": meta[0],
+        "status_label": _status_label(status, counts),
         "op": _op_view(run) if run else None,
     }
 
@@ -428,13 +457,13 @@ async def _collection_view(session: AsyncSession, collection: Collection) -> dic
     # out of step with the four counts the way four separate conditions can. `stampable > 0` is what
     # keeps a zero-file collection from reporting a green completeness claim (#31).
     all_confirmed = complete_active == stampable and stampable > 0
-    open_events = await _open_event_count(session, collection.id)
     return {
         "id": collection.id,
         "name": collection.name,
         "op": _op_view(active) if active else None,
         "root": collection.root,
         "mode": collection.mode,
+        "policy": _policy_view(collection.mode),
         "ots": collection.ots_mode,
         "cadence": _cadence_label(collection.hash_cadence_seconds),
         "cadence_seconds": collection.hash_cadence_seconds,
@@ -448,15 +477,12 @@ async def _collection_view(session: AsyncSession, collection: Collection) -> dic
         "not_stamped": ots["none_active"],
         "pending_line": _pending_line(ots["pending_active"], ots["incomplete_active"]),
         "is_empty": total_files == 0,
-        # The collection's unacknowledged-event count: the D7 render gate for "Baseline new files"
-        # and (recomputed under the write lock) part of the D14 fingerprint header.
-        "open_events": open_events,
         "file_count": total_files,
         "file_count_h": humanize_count(total_files),
         "size_bytes": int(total_size or 0),
         "size": humanize_size(total_size),
         "status": status,
-        "status_label": meta[0],
+        "status_label": _status_label(status, counts),
         "status_color": meta[1],
         "status_icon": meta[2],
         "status_kind": meta[3],
@@ -601,71 +627,120 @@ async def health_pill(
 
 # --- dashboard ------------------------------------------------------------------------------
 
-
-async def _event_view(session: AsyncSession, event: Event) -> dict[str, Any]:
-    relpath = "—"
-    if event.file_id is not None:
-        fe = await session.get(FileEntry, event.file_id)
-        if fe is not None:
-            relpath = fe.relpath
-    collection = await session.get(Collection, event.collection_id)
-    stamped = False
-    if event.file_id is not None:
-        fe = await session.get(FileEntry, event.file_id)
-        stamped = bool(fe and fe.ots_state in ("incomplete", "complete"))
-    return {
-        "id": event.id,
-        "kind": event.kind,
-        "relpath": relpath,
-        # Free-text context. `moved` carries "old → new path"; `restored_changed` carries the
-        # recorded and observed digests in full; a `restored` event whose bytes could not be
-        # compared (no digest was on record) says so here.
-        "detail": event.detail,
-        "collection_name": collection.name if collection else "—",
-        "at": humanize_delta(event.detected_at),
-        "acked": event.acknowledged_at is not None,
-        "stamped": stamped,
-    }
+# Recent activity is a SUMMARY of the event log, not a feed of it (design D10): one line per day
+# and collection. It is read-only by construction — it renders no control — and it includes the
+# informational kinds, so a healthy system never shows an empty summary.
+ACTIVITY_DAYS = 30
+ACTIVITY_LINES = 12
+# (event kind, singular, plural, alarming) in the order a line states them: what needs attention
+# first. `restored_changed` is named for what it is — never folded into "restored".
+_ACTIVITY_KINDS: tuple[tuple[str, str, str, bool], ...] = (
+    ("restored_changed", "came back different", "came back different", True),
+    ("missing", "missing", "missing", True),
+    ("modified", "changed", "changed", True),
+    ("added", "added", "added", False),
+    ("moved", "moved", "moved", False),
+    ("restored", "restored", "restored", False),
+)
 
 
-async def _event_feed(session: AsyncSession, collection_ids: list[int]) -> dict[str, Any]:
-    """Recent-events feed + live counts for the dashboard and its htmx refreshes.
+async def _recent_activity(
+    session: AsyncSession, collections: list[Collection]
+) -> list[dict[str, Any]]:
+    """The event log of the last ``ACTIVITY_DAYS`` days, aggregated by local day and collection."""
+    names = {c.id: c.name for c in collections}
+    if not names:
+        return []
+    since = datetime.now(timezone.utc) - timedelta(days=ACTIVITY_DAYS)
+    day = func.date(Event.detected_at, "localtime")
+    result = await session.execute(
+        select(day, Event.collection_id, Event.kind, func.count())
+        .where(Event.collection_id.in_(list(names)), Event.detected_at >= since)
+        .group_by(day, Event.collection_id, Event.kind)
+    )
+    buckets: dict[tuple[str, int], dict[str, int]] = {}
+    for day_s, cid, kind, n in result.all():
+        buckets.setdefault((day_s or "", cid), {})[kind] = int(n)
+    today = datetime.now().astimezone().date()
+    lines = []
+    # Newest day first; within a day, collections by name (two stable sorts).
+    ordered = sorted(buckets.items(), key=lambda kv: names.get(kv[0][1], ""))
+    ordered.sort(key=lambda kv: kv[0][0], reverse=True)
+    for (day_s, cid), kinds in ordered:
+        try:
+            label = _day_label(date.fromisoformat(day_s), today)
+        except ValueError:
+            label = day_s or "unknown"
+        parts = [
+            {"text": f"{kinds[k]:,} {sing if kinds[k] == 1 else plur}", "alarm": alarm}
+            for k, sing, plur, alarm in _ACTIVITY_KINDS
+            if kinds.get(k)
+        ]
+        if not parts:
+            continue
+        lines.append(
+            {
+                "day": label[:1].upper() + label[1:],
+                "collection_id": cid,
+                "collection": names.get(cid, "—"),
+                "parts": parts,
+            }
+        )
+        if len(lines) >= ACTIVITY_LINES:
+            break
+    return lines
 
-    ``open_events`` (the "unreviewed" pill) and ``alert_count`` (the sidebar badge) are real
-    COUNT queries over ALL of the user's events/files, not just the 20 rendered rows, so both stay
-    accurate past the feed cap. Auto-acknowledged ``added``/``restored`` events render in the feed
-    but never count toward ``open_events``. The badge comes from :func:`_alert_badge_count` so it
-    counts the same population as the dashboard tile beside it (design D3).
+
+async def _needs_you(
+    session: AsyncSession, collections: list[Collection], views: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The collections with changed or missing files, most deserving first (design D10).
+
+    One population read per AFFECTED collection (the cheap status counts already in ``views``
+    decide which), ordered exactly like the fleet review page. It carries links only — no form —
+    so it mints no fingerprints and nothing here can authorise an action.
     """
-    events: list[Event] = []
-    open_events = 0
-    alert_count = await _alert_badge_count(session, collection_ids)
-    if collection_ids:
-        events = list(
-            await session.scalars(
-                select(Event)
-                .where(Event.collection_id.in_(collection_ids))
-                # Unreviewed first, newest-first within each group (#25 / design D4). ORDER, never
-                # a WHERE: `added`/`restored`/`moved` are born acknowledged, so an open-only feed
-                # renders "No events recorded yet." on a healthy system — #12's rejected fix 2. The
-                # `guard-proof-and-restore-integrity` live pass caught the sharp end of the old
-                # pure-recency order: the dashboard offered "Mark all 8 reviewed" above a feed
-                # showing none of those 8, every one pushed off the bottom by newer informational
-                # rows. The events the bulk verb names now lead the list it sits above.
-                .order_by(Event.acknowledged_at.is_(None).desc(), Event.detected_at.desc())
-                .limit(20)
-            )
+    by_id = {c.id: c for c in collections}
+    entries = []
+    for v in views:
+        if v["issues"] <= 0:
+            continue
+        c = by_id[v["id"]]
+        pop = await _read_population(session, c)
+        if not pop.files:
+            continue  # resolved between the two reads
+        index = _PopIndex(pop)
+        found = {f.id: _found_at(f, index) for f in pop.files}
+        newest = max((d for d in found.values() if d is not None), default=None)
+        missing = sum(1 for f in pop.files if f.status == "missing")
+        groups = _group_scopes(pop.files, _ROOT_SCOPE)
+        groups.sort(key=lambda g: (-len(g[1]), g[0].dir))
+        folders = []
+        if len(groups) > 1:
+            folders = [
+                {"label": _group_label(g, _ROOT_SCOPE), "count": len(members)}
+                for g, members in groups[:2]
+            ]
+        elif groups:
+            common = groups[0][0].dir
+            if common:
+                folders = [{"label": common + "/", "count": len(groups[0][1])}]
+        entries.append(
+            {
+                "id": c.id,
+                "name": c.name,
+                "policy": _policy_view(c.mode),
+                "missing": missing,
+                "modified": len(pop.files) - missing,
+                "total": len(pop.files),
+                "found": humanize_delta(newest),
+                "folders": folders,
+                "more_folders": max(0, len(groups) - len(folders)) if len(groups) > 1 else 0,
+                "_key": _severity_key(c, newest),
+            }
         )
-        open_events = await session.scalar(
-            select(func.count())
-            .select_from(Event)
-            .where(Event.collection_id.in_(collection_ids), Event.acknowledged_at.is_(None))
-        )
-    return {
-        "events": [await _event_view(session, e) for e in events],
-        "open_events": int(open_events or 0),
-        "alert_count": alert_count,
-    }
+    entries.sort(key=lambda e: e.pop("_key"))
+    return entries
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -680,10 +755,6 @@ async def dashboard(
 
     total_files = sum(v["file_count"] for v in views)
     total_size = sum(v["size_bytes"] for v in views)
-    total_missing = sum(v["counts"]["missing"] for v in views)
-    total_modified = sum(v["counts"]["modified"] for v in views)
-    total_new = sum(v["counts"]["new"] for v in views)
-    total_issues = total_missing + total_modified
 
     # Fleet-wide proof coverage is computed strictly over `perfile` collections — numerator AND
     # denominator (design D5 / task 3.7). Tripwire collections stamp nothing and their stamp route
@@ -716,24 +787,10 @@ async def dashboard(
         parts.append(scope_note)
         anchored_sub = " · ".join(parts)
 
-    # The biggest, reddest number on the panel used to be an inert <div> (#18). It becomes a link to
-    # the page that can act on it, and the rule is: land the operator where the number's whole
-    # population can be worked. Exactly one affected collection -> that collection's review page;
-    # several -> `/review`, the fleet-wide review page (#27), which lists every one of the files
-    # this tile counts. (#18 had to point the many-collections case at `/collections` because
-    # `/review` was a 404; it exists now, so the placeholder goes.)
-    affected = [v for v in views if v["issues"] > 0]
-    issues_href = None
-    if total_issues > 0:
-        issues_href = (
-            f"/collection/{affected[0]['id']}/review" if len(affected) == 1 else "/review"
-        )
+    needs = await _needs_you(session, collections, views)
+    activity = await _recent_activity(session, collections)
 
     collection_ids = [c.id for c in collections]
-    feed = await _event_feed(session, collection_ids)
-    event_views = feed["events"]
-    open_events = feed["open_events"]
-
     last_run = None
     if collection_ids:
         last_run = await session.scalar(
@@ -748,17 +805,12 @@ async def dashboard(
         c = await session.get(Collection, last_run.collection_id)
         last_collection = c.name if c else ""
         # The tile summarises the newest finished run of ANY kind, so it must say what it found
-        # (design D14). It used to label every one of them "<collection> scan" with no result: a
-        # `stamp` pass, last night's `upgrade`, a `partial` scan that skipped files, a failed scan
-        # and a run reclaimed by the reaper all rendered identically to a clean scan — the tile
-        # asserting a check that either never happened or did not complete. Kept generic rather
-        # than narrowed to completed scans: a fleet whose only recent activity is the nightly
-        # upgrade would otherwise read "no scans yet", and the per-collection scan story already
-        # lives on the cards below. Plain text, deliberately not Slice B's `run_health_note` macro.
+        # (design D14 of add-fleet-review-and-run-health): a `stamp` pass, last night's `upgrade`,
+        # a `partial` scan that skipped files, a failed scan and a run reclaimed by the reaper must
+        # not render identically to a clean scan.
         kind = last_run.kind or "scan"
         last_activity_sub = f"{last_collection} {kind}" if last_collection else f"last {kind}"
-        # `interrupted` is worded neutrally and NEVER as a fault (design D7): since the operation
-        # claim landed it is what a reclaimed abandoned claim writes — i.e. what restarting the app
+        # `interrupted` is worded neutrally and NEVER as a fault: it is what restarting the app
         # mid-scan produces, an ordinary outcome, not an integrity event.
         _RESULT_WORDS = {"partial": "partial", "error": "failed", "interrupted": "interrupted"}
         if last_run.result != "ok":
@@ -770,17 +822,17 @@ async def dashboard(
     ctx.update(
         {
             "collections": views,
-            "events": event_views,
-            "open_events": open_events,
+            "needs": needs,
+            # The SAME number the sidebar badge shows, from the same definition
+            # (`_alert_badge_count`, already in the base context) — never a second sum.
+            "needs_total": ctx["alert_count"],
+            "needs_missing": sum(v["counts"]["missing"] for v in views),
+            "needs_modified": sum(v["counts"]["modified"] for v in views),
+            "any_files": total_files > 0,
+            "activity": activity,
             "tiles": {
                 "files": humanize_count(total_files),
-                "files_sub": f"{len(views)} collections · {humanize_size(total_size)}",
-                "issues": total_issues,
-                "issues_sub": f"{total_missing} missing · {total_modified} modified",
-                "issues_color": "var(--danger)" if total_issues > 0 else "var(--ok)",
-                "issues_href": issues_href,
-                "new": total_new,
-                "new_sub": "watched, not yet baselined",
+                "files_sub": f"{len(views)} collection{'' if len(views) == 1 else 's'} · {humanize_size(total_size)}",
                 "anchored": humanize_count(total_anchored),
                 "anchored_sub": anchored_sub,
                 "last_activity": humanize_delta(last_run.finished) if last_run else "—",
@@ -789,150 +841,6 @@ async def dashboard(
         }
     )
     return templates.TemplateResponse(request, "dashboard.html", ctx)
-
-
-@router.post("/events/{event_id}/ack", response_class=HTMLResponse, dependencies=[Depends(verify_csrf)])
-async def ack_event(
-    event_id: int,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-    user: User = Depends(current_user),
-    view: str = Query("dashboard"),
-):
-    event = await session.get(Event, event_id)
-    if event is None:
-        raise HTTPException(status_code=404, detail="event not found")
-    collection = await session.get(Collection, event.collection_id)
-    if collection is None or collection.user_id != user.id:
-        raise HTTPException(status_code=404, detail="event not found")
-    if event.acknowledged_at is None:
-        event.acknowledged_at = datetime.now(timezone.utc)
-        event.acknowledged_by = user.id
-        await session.commit()
-
-    # Recompute the global open-count + missing badge for the OOB swaps shared by both views.
-    collections = await collections_svc.list_collections(session, user_id=user.id)
-    collection_ids = [c.id for c in collections]
-    open_events = 0
-    alert_count = await _alert_badge_count(session, collection_ids)
-    if collection_ids:
-        open_events = await session.scalar(
-            select(func.count())
-            .select_from(Event)
-            .where(Event.collection_id.in_(collection_ids), Event.acknowledged_at.is_(None))
-        )
-
-    if view in ("review", "fleet"):
-        # Acknowledged from a review surface: swap that row in place and refresh the collection's
-        # "unreviewed" pill plus the global sidebar badge. `fleet` is the same response with the
-        # OOB pill id parameterized — the fleet page carries one pill PER collection, so the
-        # collection page's single hardcoded `#review-open-pill` would refresh whichever group
-        # happened to render first (design D10). Everything else, including the post-ack
-        # single-snapshot re-mint below, is identical; only the ids and the row's return
-        # destination differ.
-        # The swapped-in row carries its own accept form again, so marking a file reviewed does not
-        # quietly cost it the control beside it — and BOTH halves of that row come from ONE post-ack
-        # `_read_population`, exactly as the page's own render does (design D2/D9): the state it
-        # DISPLAYS (its status, so the verb its control names, and its open-event state) and the
-        # fingerprint that control AUTHORIZES are slices of the same snapshot.
-        #
-        # Rendering the row from a `session.get` and minting the fingerprint from a later read is
-        # two snapshots: sessions are `expire_on_commit=False` and sqlite3 runs in legacy
-        # transaction mode, so a scan committing `modified -> missing` between them left the row
-        # showing "Adopt this change" while its fingerprint described the now-`missing` record — an
-        # unchanged submit would then validate and DELETE the tracking record, the named-verb
-        # violation this change exists to remove, performed inside the guard's own re-mint.
-        item = None
-        if event.file_id is not None:
-            narrowed = _narrow(
-                await _read_population(session, collection, "review", file_id=event.file_id),
-                "accept-file",
-                _FP_FORMS["accept-file"][1],
-                file_id=event.file_id,
-            )
-            if narrowed.files:
-                # A population's events are open by definition (the read selects
-                # `acknowledged_at IS NULL`), and the event just acknowledged is no longer among
-                # them — so a survivor here is a LATER alert on the same row, and the row correctly
-                # re-offers Mark reviewed for it. Highest id = newest (the list is id-ordered);
-                # ordering on `detected_at` would compare against whatever the row happens to
-                # carry, which is not what identifies the generation.
-                open_ev = narrowed.open_events[-1] if narrowed.open_events else None
-                item = _review_item(
-                    narrowed.files[0],
-                    collection.root,
-                    # Falling back to the just-acknowledged event keeps the row's "detected" time;
-                    # it is acknowledged, so it can never make the row claim an open alert.
-                    open_ev or event,
-                    fp=_population_fingerprint(collection, narrowed),
-                )
-            else:
-                # The same read says the row is in no actionable population any more — restored to
-                # `ok`, or its record already accepted away. Render it (if it still exists) with NO
-                # fingerprint: a row that is shown no verb must not carry an authorization for one,
-                # and the endpoint fails closed on an empty field.
-                fe = await session.get(FileEntry, event.file_id)
-                if fe is not None:
-                    item = _review_item(fe, collection.root, event)
-        review_open = await session.scalar(
-            select(func.count())
-            .select_from(Event)
-            .where(Event.collection_id == collection.id, Event.acknowledged_at.is_(None))
-        )
-        fleet = view == "fleet"
-        return templates.TemplateResponse(
-            request,
-            "partials/review_ack_row.html",
-            {
-                "it": item,
-                "c": {"id": collection.id},
-                "csrf_token": generate_csrf_token(request),
-                # Scoped to THIS collection either way — the fleet page's group pill counts the
-                # same population the collection page's pill does.
-                "review_open": int(review_open or 0),
-                "pill_id": f"review-open-pill-{collection.id}" if fleet else "review-open-pill",
-                # The swapped-in row keeps the surface it was swapped into: its accept must come
-                # back to the fleet page, not deposit the operator on a collection page they never
-                # navigated to. Both values are literals chosen here, never operator input.
-                "row_from": "fleet" if fleet else "",
-                "row_view": "fleet" if fleet else "review",
-                "alert_count": alert_count,
-            },
-        )
-
-    view_ctx = await _event_view(session, event)
-    return templates.TemplateResponse(
-        request,
-        "partials/event_ack.html",
-        {"e": view_ctx, "open_events": int(open_events or 0), "alert_count": alert_count},
-    )
-
-
-@router.post("/events/ack-all", response_class=HTMLResponse, dependencies=[Depends(verify_csrf)])
-async def ack_all_events(
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-    user: User = Depends(current_user),
-):
-    """Bulk-acknowledge every open event in the current user's collections, then re-render the feed.
-
-    Ack-only (sets ``acknowledged_at``/``by``) — it never re-baselines files; that stays with
-    ``accept``. Scoped by the user's collection ids so it can never touch another user's events.
-    """
-    collections = await collections_svc.list_collections(session, user_id=user.id)
-    collection_ids = [c.id for c in collections]
-    if collection_ids:
-        await session.execute(
-            update(Event)
-            .where(Event.collection_id.in_(collection_ids), Event.acknowledged_at.is_(None))
-            .values(acknowledged_at=datetime.now(timezone.utc), acknowledged_by=user.id)
-        )
-        await session.commit()
-
-    feed = await _event_feed(session, collection_ids)
-    return templates.TemplateResponse(
-        request, "partials/events_feed.html", {**feed, "user": user}
-    )
 
 
 @router.get("/collections", response_class=HTMLResponse)
@@ -1009,6 +917,7 @@ def _collection_form_ctx(existing: dict[str, Any] | None) -> dict[str, Any]:
         "cadence_options": CADENCE_OPTIONS,
         "verify_cadence_options": VERIFY_CADENCE_OPTIONS,
         "default_excludes": "**/.thumbnails/**\n**/*.tmp",
+        "policies": [_policy_view("worm"), _policy_view("churn")],
     }
 
 
@@ -1081,37 +990,6 @@ async def collection_detail(
         sort=collections_svc.DEFAULT_SORT,
         direction=collections_svc.DEFAULT_DIRECTION,
     )
-    # The D14 hidden field is minted only in the one state that renders the baseline form (D7).
-    # `cview`'s three numbers are a cheap *pre*-filter — they only decide whether it is worth
-    # reading the population at all, so an ordinary detail render of a large collection never
-    # materializes its `new` set. The gate that actually decides to render the form, and the
-    # fingerprint that form carries, both come from the SAME single-statement read: publishing a
-    # form for one snapshot while hashing another is the whole failure mode D14 guards against —
-    # and so does the count its confirm names (below), so the form cannot state a number its own
-    # fingerprint does not cover.
-    show_baseline = False
-    population_fp = ""
-    if cview["issues"] == 0 and cview["open_events"] == 0 and cview["counts"]["new"] > 0:
-        pop = await _read_population(session, collection, "baseline-new")
-        # `_narrow` is a pass-through for this form (the read scope IS its file term, and its event
-        # term is the collection's whole open set — design D2's explicit exception), but it is what
-        # stamps the FORM scope into the population, so mint and recount go through one code path.
-        baseline = _narrow(pop, "baseline-new", _FP_FORMS["baseline-new"][1])
-        show_baseline = (
-            bool(baseline.files) and baseline.issues == 0 and not baseline.open_events
-        )
-        if show_baseline:
-            population_fp = _population_fingerprint(collection, baseline)
-            # ...and so does the number the confirm names, exactly as the review page takes its
-            # button labels from its own read. `cview`'s `new` count is an EARLIER, separate
-            # statement: a scan committing a second `new` file between the two left the operator
-            # confirming "Baseline 1 new file" while the fingerprint beside it covered both — an
-            # unchanged submit then validated and baselined a file the confirmation never named.
-            # The claim the ACTION makes is displayed and hashed from one read (copy first: the
-            # dict is `_collection_counts`' own). The tiles around it stay pure display off
-            # `cview`, and none of them reads `counts.new`.
-            cview["counts"] = dict(cview["counts"])
-            cview["counts"]["new"] = len(baseline.files)
     ctx = await _base_context(request, session, user, "collection")
     ctx.update(
         {
@@ -1122,8 +1000,6 @@ async def collection_detail(
             "q": "",
             "filter": status_filter,
             "view": view_mode,
-            "show_baseline": show_baseline,
-            "population_fp": population_fp,
             "page": 0,
             "page_size": PAGE_SIZE,
             "sort": collections_svc.DEFAULT_SORT,
@@ -1298,63 +1174,48 @@ async def collection_scan(
 
 
 # --- accept-family population fingerprint (design D14) ---------------------------------------
-# `accept_collection` is one unscoped verb that rewrites baselines, DELETEs `missing` rows and
-# acknowledges every open event on the collection. Both routes that call it render a page first and
-# act at submit time, and the scheduler can complete a scan in between — so the button labelled
-# "Baseline 40 new files" can become a deletion of `missing` rows the operator never saw. Neither a
-# render-time visibility rule nor a submit-time recount closes that: the recount is a separate
-# statement from the accept, and the same scan can claim, run and commit in the gap.
+# Accepting is irreversible: it sets a changed file healthy, or DELETEs a missing file's record.
+# Every route that does it renders a page first and acts at submit time, and the scheduler can
+# complete a scan in between — so a button labelled "Accept 40 deletions" can become the removal of
+# records the operator never saw. Neither a render-time visibility rule nor a submit-time recount
+# closes that: the recount is a separate statement from the accept, and the same scan can claim,
+# run and commit in the gap.
 #
-# The fix is one mechanism used identically by both routes: each form carries a hidden SHA-256 of a
-# canonical description of the population it claims to act on, and the POST recomputes it INSIDE the
-# same write transaction as the accept's own reads and writes. SQLite's single-writer serialization
-# is what makes the check-and-act atomic.
+# The fix is one mechanism used identically by every accept route: each form carries a hidden
+# SHA-256 of a canonical description of the population it claims to act on, and the POST recomputes
+# it INSIDE the same write transaction as the accept's own reads and writes. SQLite's single-writer
+# serialization is what makes the check-and-act atomic.
 
-# US separates fields, RS separates records. The byte-length prefix on `relpath` is what makes the
-# encoding injective: a filename may legally contain any byte but `/` and NUL — US and RS included —
-# so without the length two different populations could be made to hash equal. Framing by length
-# removes that by construction rather than by escaping.
+# US separates fields, RS separates records. The byte-length prefix on `relpath` (and on a folder
+# scope's `dir`) is what makes the encoding injective: a name may legally contain any byte but `/`
+# and NUL — US and RS included — so without the length two different populations could be made to
+# hash equal. Framing by length removes that by construction rather than by escaping.
 _FP_US = "\x1f"
 _FP_RS = "\x1e"
 # GS/FS do the same framing one level down, inside the header's open-event component: GS between
-# event records, FS between an event's fields. Distinct characters (rather than reusing US/RS) keep
-# the component unambiguous no matter what an event `kind` or an ISO timestamp ever contains.
+# event records, FS between an event's fields.
 _FP_GS = "\x1d"
 _FP_FS = "\x1c"
 
-# Two ideas that used to be one dict, and conflating them is part of what made a single unscoped
-# accept verb possible at all.
-#
-# A **read scope** is what `_read_population` fetches in its one `UNION ALL`: the widest set any
-# form on that page needs, read once, so the page's rows, its counts and every fingerprint it
-# publishes come from a single snapshot (design D2). Two values, because there are two pages.
-_FP_READ_SCOPES: dict[str, tuple[str, ...]] = {
-    "baseline-new": ("new",),
-    "review": ("missing", "modified"),
-}
+# The one READ a review surface makes: every `missing` and `modified` file of the collection plus
+# its open events, in a single statement, so the page's rows, its counts and every fingerprint it
+# publishes come from one snapshot.
+_FP_READ_STATUSES: tuple[str, ...] = ("missing", "modified")
 
 # A **form scope** is what a fingerprint is minted *for*. It is the first field of the preimage
-# header, so a fingerprint minted for one verb can never validate another — four values to keep
-# apart now, not two. Each entry names the read it is sliced out of and the file statuses its own
-# population covers; `_narrow` does the slicing, purely, on the mint side and the recount side
-# alike. `review-accept` is retired with its route and its button: a live scope string with no form
-# to mint it is a loaded gun for the next reader who wants "just an accept-all for a script".
-_FP_FORMS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "baseline-new": ("baseline-new", ("new",)),
-    "adopt-changed": ("review", ("modified",)),
-    "stop-tracking": ("review", ("missing",)),
-    # A per-file accept is offered on the review page's rows, so its one record comes out of the
-    # same `review` read; `file_id`, not the status tuple, is what selects it.
-    "accept-file": ("review", ("missing", "modified")),
+# header, so a fingerprint minted for one verb can never validate another. Each entry names the
+# file statuses its own population covers; `_narrow` does the slicing, purely, on the mint side and
+# the recount side alike. The names are the route constants and are deliberately unchanged across
+# the rename of the operator-facing verbs ("Accept change" / "Accept deletion"): they appear in the
+# access log, and one address must keep meaning one consequence.
+_FP_FORMS: dict[str, tuple[str, ...]] = {
+    "adopt-changed": ("modified",),
+    "stop-tracking": ("missing",),
+    # A per-file accept names its one record by `file_id`, not by the status tuple.
+    "accept-file": ("missing", "modified"),
 }
-
-# The service scope each bulk form hands `accept_collection`. `accept-file` has no entry — it calls
-# `accept_file` with the single row instead.
-_FP_ACCEPT_SCOPES: dict[str, set[str]] = {
-    "baseline-new": {"new"},
-    "adopt-changed": {"modified"},
-    "stop-tracking": {"missing"},
-}
+# The two bulk forms, which additionally carry a folder scope (design D6).
+_FP_BULK_FORMS = frozenset({"adopt-changed", "stop-tracking"})
 
 # SQLite result codes that mean "someone else holds the writer lock", i.e. drift — not a broken
 # datastore. Everything else propagates.
@@ -1387,13 +1248,89 @@ def _is_lock_contention(exc: OperationalError) -> bool:
     return any(m in msg for m in _FP_LOCK_MESSAGES)
 
 
+# --- folder scope (design D6) ---------------------------------------------------------------
+
+
+class _Scope(NamedTuple):
+    """Which part of a collection a bulk verb (or a review page) covers.
+
+    ``dir`` is a collection-relative directory with no leading or trailing slash (``""`` = the
+    collection root). ``deep`` selects the directory's whole subtree; ``False`` selects only the
+    files directly in it. The pair travels in a form or a query string, so it is operator-controlled
+    bytes: it is never trusted to select anything on its own — it is bound into the fingerprint and
+    recomputed against (:func:`_narrow`), and it never reaches the filesystem.
+    """
+
+    dir: str
+    deep: bool
+
+    @property
+    def is_root(self) -> bool:
+        return self.dir == "" and self.deep
+
+
+_ROOT_SCOPE = _Scope("", True)
+_SCOPE_MAX_BYTES = 4096
+
+
+def _parse_scope(dir_raw: str | None, deep_raw: str | None) -> _Scope | None:
+    """Parse a submitted scope; ``None`` means "not a scope any page could have rendered".
+
+    Refused rather than repaired: an absolute path, a trailing slash, a NUL, an over-long value or
+    an unknown ``deep`` flag is not something this panel emits, so guessing what was meant would
+    put an interpretation step between the operator's click and a destructive verb.
+    """
+    d = dir_raw or ""
+    try:
+        encoded = d.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if len(encoded) > _SCOPE_MAX_BYTES or "\x00" in d:
+        return None
+    if d.startswith("/") or d.endswith("/"):
+        return None
+    if deep_raw not in ("0", "1"):
+        return None
+    return _Scope(d, deep_raw == "1")
+
+
+def _in_scope(relpath: str, scope: _Scope) -> bool:
+    """THE folder rule — the only place it is written (design D6).
+
+    Literal, case-sensitive string comparison on the stored relpath: no pattern matching, so a
+    folder named ``100%`` or ``a_b`` matches only itself, and ``foo`` never matches ``foobar/x``
+    because the separator is part of the prefix.
+    """
+    if scope.dir:
+        prefix = scope.dir + "/"
+        if not relpath.startswith(prefix):
+            return False
+        rest = relpath[len(prefix):]
+    else:
+        rest = relpath
+    return scope.deep or "/" not in rest
+
+
+def _scope_query(scope: _Scope) -> str:
+    """The query string that re-opens a review page at ``scope`` (empty for the whole collection).
+
+    Built with ``urlencode`` on a fixed path by every caller, so a submitted ``dir`` only ever
+    becomes a percent-encoded query *value* — never a host, a path segment or a second parameter.
+    """
+    if scope.is_root:
+        return ""
+    params = {"dir": scope.dir}
+    if not scope.deep:
+        params["deep"] = "0"
+    return urlencode(params)
+
+
 class _PopFile(NamedTuple):
     """One file row of an accept-family population.
 
     Carries BOTH the fields the guard hashes (``id``/``relpath``/``status``/``sha256``/
     ``first_seen``) and the fields the review page renders, because they come from one fetch: see
-    :func:`_read_population`. Attribute names match :class:`~src.models.db.FileEntry`, so
-    :func:`_review_item` renders either.
+    :func:`_read_population`.
     """
 
     id: int
@@ -1405,16 +1342,15 @@ class _PopFile(NamedTuple):
     last_checked: datetime | None
     last_changed: datetime | None
     ots_state: str
+    mtime: float | None
 
 
 class _PopEvent(NamedTuple):
     """One open event, by identity and generation — never by tally (see `_population_fingerprint`).
 
-    ``file_id`` is **not** hashed. It is what :func:`_narrow` filters on, so a scoped verb's event
-    term can cover exactly the alerts that verb will acknowledge and no others (design D3). ``None``
-    marks a *detached* event, whose file record an earlier accept removed: it belongs to no narrowed
-    population and is acknowledged by no scoped verb, but it is still an unread alarm, so it still
-    refuses ``baseline-new``, whose term is the whole collection's.
+    ``file_id`` is **not** hashed. It is what :func:`_narrow` filters on, so a verb's event term
+    covers exactly the alerts that verb will close and no others. ``None`` marks a *detached* event,
+    whose file record an earlier accept removed: it belongs to no narrowed population.
     """
 
     id: int
@@ -1427,31 +1363,51 @@ class _Population(NamedTuple):
     """Everything an accept-family form displays and hashes, read as ONE statement.
 
     ``files`` is sorted by ``relpath`` (total order — unique within a collection), ``open_events``
-    by ``id``. ``issues`` is the ``missing`` + ``modified`` count and is read only for the
-    ``baseline-new`` scope (0 elsewhere, where it is neither hashed nor asserted).
-    ``total_files`` is the collection's whole file population (every status) from this same
-    snapshot: it is what tells "nothing is wrong" apart from "nothing is watched", and reading it
-    anywhere else would let the two disagree (see :func:`collection_review`).
+    by ``id``. ``total_files`` is the collection's whole file population (every status) from this
+    same snapshot: it is what tells "nothing is wrong" apart from "nothing is watched".
     """
 
     scope: str
     files: list[_PopFile]
     open_events: list[_PopEvent]
-    issues: int
     total_files: int
     # Set by `_narrow` for the `accept-file` form only: the row the form was minted for, carried
-    # into the preimage header so a fingerprint cannot validate a POST at another row's address
-    # even where the two rows encode identically (design D6). `None` for every other form.
+    # into the preimage header so a fingerprint cannot validate a POST at another row's address.
     file_id: int | None = None
+    # Set by `_narrow` for the two bulk forms: the folder the form was minted for (design D6).
+    folder: _Scope | None = None
+
+
+class _PopIndex:
+    """Lookups over one snapshot, built once per page so minting N row fingerprints is O(N).
+
+    Purely an access path: it holds the same tuples the snapshot holds and changes nothing about
+    what is selected. Without it every row's `_narrow` rescans the whole population, which on a
+    collection whose volume went away is hundreds of rows times hundreds of thousands of records.
+    """
+
+    def __init__(self, pop: _Population) -> None:
+        self.files_by_id: dict[int, _PopFile] = {f.id: f for f in pop.files}
+        self.events_by_file: dict[int, list[_PopEvent]] = {}
+        for e in pop.open_events:  # id-ordered, so each per-file list stays id-ordered
+            if e.file_id is not None:
+                self.events_by_file.setdefault(e.file_id, []).append(e)
+
+    def newest_event(self, file_id: int, kind: str | None = None) -> _PopEvent | None:
+        """The file's newest open event (of ``kind``, if given) — highest id is the newest."""
+        events = self.events_by_file.get(file_id) or ()
+        for event in reversed(events):
+            if kind is None or event.kind == kind:
+                return event
+        return None
 
 
 async def _read_population(
     session: AsyncSession,
     collection: Collection,
-    scope: str,
     file_id: int | None = None,
 ) -> _Population:
-    """Read the whole population for the READ scope ``scope`` in a SINGLE SQL statement.
+    """Read a collection's whole review population in a SINGLE SQL statement.
 
     The mint side and the recount side both go through here, so the two can never encode the same
     state differently — and, on the mint side, the rows the page *renders* are sliced from the very
@@ -1460,16 +1416,14 @@ async def _read_population(
     one connection are two independent snapshots and a scanner can commit between them. A review
     page that read its visible rows in one statement and minted the fingerprint in another could
     therefore publish a fingerprint for a population it never displayed — an unchanged POST would
-    then validate and delete a ``missing`` row the operator never saw, which is precisely the
-    accident this guard exists to prevent. One statement is one snapshot, by construction.
+    then validate and delete a ``missing`` row the operator never saw. One statement is one
+    snapshot, by construction.
 
-    The union is the price of that: the file rows, the open-event rows and (for ``baseline-new``)
-    the issue count live in different tables/shapes, so they are padded to one 10-column row shape
-    and tagged in the first column. SQLite evaluates the compound statement inside a single implicit
-    read transaction; SQLAlchemy takes result types from the first leg, so the events' ``detected_at``
-    is decoded by ``first_seen``'s ``DateTime`` processor (same column type, same storage format).
+    The union is the price of that: the file rows, the open-event rows and the file total live in
+    different tables/shapes, so they are padded to one 11-column row shape and tagged in the first
+    column. SQLAlchemy takes result types from the first leg, so the events' ``detected_at`` is
+    decoded by ``first_seen``'s ``DateTime`` processor (same column type, same storage format).
     """
-    statuses = _FP_READ_SCOPES[scope]
     files_q = select(
         literal("f").label("part"),
         FileEntry.id.label("n1"),
@@ -1481,19 +1435,18 @@ async def _read_population(
         FileEntry.last_checked.label("d2"),
         FileEntry.last_changed.label("d3"),
         FileEntry.ots_state.label("t4"),
+        FileEntry.mtime.label("f1"),
     ).where(
         FileEntry.collection_id == collection.id,
-        FileEntry.status.in_(statuses),
+        FileEntry.status.in_(_FP_READ_STATUSES),
     )
     if file_id is not None:
-        # The `accept-file` RECOUNT only (design D6): reading a whole collection's issue set to
-        # hash one row is waste. The mint side slices that row out of the page's existing snapshot
-        # instead, and `_narrow` makes the two encode identically either way — this narrows which
-        # rows are *fetched*, never how they are selected once fetched.
+        # The `accept-file` RECOUNT only: reading a whole collection's issue set to hash one row is
+        # waste. This narrows which rows are *fetched*, never how they are selected once fetched.
         files_q = files_q.where(FileEntry.id == file_id)
-    # `Event.file_id` rides the spare `n2` slot, which the file leg fills with `FileEntry.size` —
-    # an integer column either way, so no result-type coercion changes. It is what `_narrow`
-    # filters the event term on; it never enters the preimage.
+    # `Event.file_id` rides the `n2` slot, which the file leg fills with `FileEntry.size` — an
+    # integer column either way. It is what `_narrow` filters the event term on; it never enters
+    # the preimage.
     events_q = select(
         literal("e"),
         Event.id,
@@ -1505,11 +1458,11 @@ async def _read_population(
         null(),
         null(),
         null(),
+        null(),
     ).where(Event.collection_id == collection.id, Event.acknowledged_at.is_(None))
     # The collection's entire file population, counted in the same snapshot as the rows above so a
     # concurrent accept cannot empty the collection between "are there issues?" and "is this
-    # collection watching anything at all?" — the interleaving that rendered a false green "All
-    # clear" for a just-emptied collection. Counted, never materialized: only its zero-ness is used.
+    # collection watching anything at all?".
     total_q = (
         select(
             literal("t"),
@@ -1522,119 +1475,80 @@ async def _read_population(
             null(),
             null(),
             null(),
+            null(),
         )
         .select_from(FileEntry)
         .where(FileEntry.collection_id == collection.id)
     )
-    legs = [files_q, events_q, total_q]
-    if scope == "baseline-new":
-        # The zero-issue assertion the detail form makes, hashed and re-asserted. Counted rather
-        # than materialized: on a collection that has both `new` files and a large issue set the
-        # form is not shown at all, and fetching those rows would be pure waste.
-        legs.append(
-            select(
-                literal("c"),
-                func.count(),
-                null(),
-                null(),
-                null(),
-                null(),
-                null(),
-                null(),
-                null(),
-                null(),
-            )
-            .select_from(FileEntry)
-            .where(
-                FileEntry.collection_id == collection.id,
-                FileEntry.status.in_(("missing", "modified")),
-            )
-        )
 
     files: list[_PopFile] = []
     events: list[_PopEvent] = []
-    issues = 0
     total_files = 0
-    for row in (await session.execute(union_all(*legs))).all():
+    for row in (await session.execute(union_all(files_q, events_q, total_q))).all():
         part = row[0]
         if part == "f":
-            files.append(_PopFile(*row[1:10]))
+            files.append(_PopFile(*row[1:11]))
         elif part == "e":
             events.append(_PopEvent(row[1], row[2], row[5], row[6]))
-        elif part == "t":
-            total_files = int(row[1] or 0)
         else:
-            issues = int(row[1] or 0)
+            total_files = int(row[1] or 0)
 
     files.sort(key=lambda f: f.relpath)
     events.sort(key=lambda e: e.id)
-    return _Population(
-        scope=scope,
-        files=files,
-        open_events=events,
-        issues=issues,
-        total_files=total_files,
-    )
+    return _Population(scope="review", files=files, open_events=events, total_files=total_files)
 
 
 def _narrow(
     pop: _Population,
     form: str,
-    statuses: tuple[str, ...],
     file_id: int | None = None,
+    folder: _Scope | None = None,
+    index: _PopIndex | None = None,
 ) -> _Population:
     """Slice one wide read down to the population a SINGLE form acts on. Pure — it reads nothing.
 
-    This is the only narrowing there is. The mint side (which needs the whole ``review`` set once,
-    because the page renders it, copies it, counts it and mints three kinds of fingerprint from it)
-    and the recount side both go through here, so the two cannot encode the same state differently
-    — D14's requirement, and the reason the recount does not narrow in SQL even where an equivalent
-    ``WHERE`` looks obvious.
+    This is the only narrowing there is. The mint side (which needs the whole review set once,
+    because the page renders it, groups it, counts it and mints many fingerprints from it) and the
+    recount side both go through here, so the two cannot encode the same state differently.
 
-    **The event term has two rules, and this function branches on the form** (design D2/D3):
-
-    * ``adopt-changed`` / ``stop-tracking`` / ``accept-file`` — the open events of the files in the
-      narrowed file term, i.e. exactly the alerts the verb will acknowledge. Binding them to the
+    * ``accept-file`` — the one record named by ``file_id`` (whatever its status), and its events.
+    * ``adopt-changed`` / ``stop-tracking`` — every file in the form's status **inside ``folder``**
+      (:func:`_in_scope`; the whole collection when ``folder`` is the root scope), and the open
+      events of exactly those files: the alerts the verb will close. Binding the event term to the
       collection's whole set instead would refuse a submission over drift the verb cannot reach (an
-      alert opening on a file in another state), and refusals an operator cannot account for are how
-      a guard gets worked around.
-    * ``baseline-new`` — the wide read's **entire** open-event set, passed through untouched, and
-      `_guarded_accept` refuses when it is non-empty. Its term is not a description of what the verb
-      mutates (it clears nothing): it is the binding of the D7 gate's precondition — that nobody is
-      baselining in front of an unread alarm — which is a claim about the *collection*. Narrowing it
-      generically would collapse it to the empty set for every input, because `new` files
-      essentially never carry open events (`added` is born acknowledged), leaving the render-time
-      gate with no submit-time binding. The ABA that would then walk through: an unrelated file goes
-      ``ok -> modified -> missing -> restored``, the restore acknowledges only its `missing` event,
-      and it ends healthy with its `modified` event still open while the `new` set and the issue
-      count are back to their rendered values.
+      alert opening on a file in another state or another folder), and refusals an operator cannot
+      account for are how a guard gets worked around.
+
+    A detached event (``file_id IS NULL``) is in no narrowed term: no verb closes it.
+    ``index`` is an optional access path for the per-row case; it never changes the result.
     """
+    statuses = _FP_FORMS[form]
     if file_id is not None:
-        files = [f for f in pop.files if f.id == file_id]
-    else:
-        files = [f for f in pop.files if f.status in statuses]
+        if index is not None:
+            one = index.files_by_id.get(file_id)
+            files = [one] if one is not None else []
+            events = list(index.events_by_file.get(file_id, ())) if one is not None else []
+        else:
+            files = [f for f in pop.files if f.id == file_id]
+            ids = {f.id for f in files}
+            events = [e for e in pop.open_events if e.file_id is not None and e.file_id in ids]
+        return _Population(
+            scope=form, files=files, open_events=events, total_files=pop.total_files,
+            file_id=file_id,
+        )
 
-    if form == "baseline-new":
-        events = list(pop.open_events)
-    else:
-        ids = {f.id for f in files}
-        # A detached event (`file_id IS NULL`) is in no narrowed term: no scoped verb acknowledges
-        # it, and *Mark all reviewed* — which is not fingerprint-guarded, because it mutates no file
-        # record — is what clears it.
-        events = [e for e in pop.open_events if e.file_id is not None and e.file_id in ids]
-
+    scope = folder if folder is not None else _ROOT_SCOPE
+    files = [f for f in pop.files if f.status in statuses and _in_scope(f.relpath, scope)]
+    ids = {f.id for f in files}
+    events = [e for e in pop.open_events if e.file_id is not None and e.file_id in ids]
     return _Population(
-        scope=form,
-        files=files,
-        open_events=events,
-        issues=pop.issues,
-        total_files=pop.total_files,
-        file_id=file_id,
+        scope=form, files=files, open_events=events, total_files=pop.total_files,
+        folder=scope if form in _FP_BULK_FORMS else None,
     )
 
 
 def _population_fingerprint(collection: Collection, pop: _Population) -> str:
-    """Hex SHA-256 of D14's canonical encoding of one :func:`_read_population` snapshot.
+    """Hex SHA-256 of D14's canonical encoding of one narrowed population.
 
     Pure: it hashes the rows it is handed and reads nothing. That is what lets the mint side hash
     exactly the rows it rendered, and the recount side re-derive the same encoding from its own
@@ -1642,41 +1556,30 @@ def _population_fingerprint(collection: Collection, pop: _Population) -> str:
 
     Preimage = header + RS + RS.join(records), UTF-8 encoded.
 
-    * header — ``{scope}US{collection_id}US{created_at}USopen_events={events}`` and then, per
-      form, either ``USissues={n}`` (``baseline-new``, so both of that gate's zero assertions
-      travel *inside* the hash) or ``USfile={id}`` (``accept-file``, so the row is named by the
-      header as well as by its record).
-    * ``events`` — GS-joined, id-ordered ``{id}FS{kind}FS{detected_at}`` for every event with
-      ``acknowledged_at IS NULL``; empty when there are none.
+    * header — ``{form}US{collection_id}US{created_at}USopen_events={events}`` and then, per form,
+      ``USfile={id}`` (``accept-file``, so the row is named by the header as well as by its record)
+      or ``USdir={byte length}US{dir}USdeep={0|1}`` (the bulk forms, so a fingerprint minted for one
+      folder cannot validate a submission naming another even where the two hold the same files —
+      design D6).
+    * ``events`` — GS-joined, id-ordered ``{id}FS{kind}FS{detected_at}`` for every open event of the
+      population's files; empty when there are none.
     * record — ``{id}US{len(relpath_bytes)}US{relpath}US{status}US{sha256 or ''}US{first_seen}``,
       one per file, sorted by ``relpath`` (unique within a collection, so the order is total).
       Deliberately **not** sorted by ``id``: ``id`` is the field this encoding distrusts.
 
     Why each field is there. ``files.id`` / ``collections.id`` are ``INTEGER PRIMARY KEY`` *without*
     ``AUTOINCREMENT``, so SQLite may hand a deleted row's id to a later insert — an
-    id-and-status-only preimage is byte-identical for two populations sharing no file, and the stale
-    form would then delete a record the operator never saw. ``relpath`` pins the logical file,
-    ``sha256`` the content generation, and ``first_seen`` the *row* generation (it is NOT NULL,
-    written at insertion and never rewritten in place, so a row deleted and re-created at the same
-    path with the same digest on the same reused id still encodes differently). The collection's own
+    id-and-status-only preimage is byte-identical for two populations sharing no file. ``relpath``
+    pins the logical file, ``sha256`` the content generation, and ``first_seen`` the *row*
+    generation (NOT NULL, written at insertion and never rewritten in place). The collection's own
     ``created_at`` does the same job one level up for a recreated collection reusing its id.
 
-    The open-event population is the third population the verb mutates and is not derivable from the
-    file rows: a file can go modified -> missing -> restored between render and submit, returning the
-    protected set to exactly its rendered value while its ``modified`` event stays open by design.
-    It is bound by **identity**, not by cardinality: hashing only the count leaves a same-count ABA
-    open — the single open ``missing`` event on a file is acknowledged (by a restore, or in another
-    tab) and a fresh incident opens another one, the count returns to 1, and a stale form would
+    The open-event population is bound by **identity**, not by cardinality: hashing only the count
+    leaves a same-count ABA open — the single open ``missing`` event on a file is closed (by a
+    restore) and a fresh incident opens another one, the count returns to 1, and a stale form would
     validate and silently close an alert nobody has seen. ``id`` + ``kind`` name the incident and
     ``detected_at`` pins its generation, since ``events.id`` is a rowid too and an event *can* be
-    deleted (``events.file_id`` is ``ON DELETE CASCADE``, and ``_reconcile_moves`` deletes file
-    rows), which frees the id for reuse.
-    (``added``/``restored``/``moved`` events are born acknowledged, so an ordinary new file does not
-    enter this component — the documented ``new``-set exception survives.)
-
-    *Which* events are in ``pop.open_events`` is decided by :func:`_narrow`, not here: the scoped
-    verbs carry their own files' alerts, ``baseline-new`` carries the collection's whole set. This
-    function hashes whatever it is handed.
+    deleted (``events.file_id`` is ``ON DELETE CASCADE``), which frees the id for reuse.
     """
     events = _FP_GS.join(
         f"{e.id}{_FP_FS}{e.kind}{_FP_FS}"
@@ -1687,14 +1590,14 @@ def _population_fingerprint(collection: Collection, pop: _Population) -> str:
         f"{pop.scope}{_FP_US}{collection.id}{_FP_US}"
         f"{collection.created_at.isoformat()}{_FP_US}open_events={events}"
     )
-    if pop.scope == "baseline-new":
-        header += f"{_FP_US}issues={pop.issues}"
-    elif pop.scope == "accept-file":
-        # The row the form names, in the header rather than only in the record — so a fingerprint
-        # minted for one row cannot validate a POST at another row's address even in the case where
-        # the two rows encode identically, and so the "the row is already gone" recount (an empty
-        # record set) is still bound to the row that was submitted (design D6).
+    if pop.scope == "accept-file":
         header += f"{_FP_US}file={pop.file_id}"
+    elif pop.scope in _FP_BULK_FORMS:
+        folder = pop.folder if pop.folder is not None else _ROOT_SCOPE
+        header += (
+            f"{_FP_US}dir={len(folder.dir.encode('utf-8'))}{_FP_US}{folder.dir}"
+            f"{_FP_US}deep={'1' if folder.deep else '0'}"
+        )
 
     records = [
         f"{f.id}{_FP_US}{len(f.relpath.encode('utf-8'))}{_FP_US}{f.relpath}{_FP_US}{f.status}"
@@ -1706,20 +1609,26 @@ def _population_fingerprint(collection: Collection, pop: _Population) -> str:
     return hashlib.sha256(preimage.encode("utf-8")).hexdigest()
 
 
-def _review_return_base(collection_id: int, origin: str) -> str:
-    """The review surface a per-file accept came from, chosen from a **fixed pair** (design D2).
+def _review_return(collection_id: int, origin: str, scope: _Scope | None, stale: bool = False) -> str:
+    """Where an accept lands — on success and on refusal alike — chosen from a **fixed pair**.
 
     ``origin`` is a query value, so it is treated as one bit of information and nothing else:
     exactly the literal ``"fleet"`` selects the fleet page; every other value — absent, empty,
     ``//evil.example``, an absolute URL, arbitrary text — falls back to the collection's own review
-    page. No part of the supplied string ever reaches the ``Location`` header, so there is no
-    open-redirect surface to reason about and no proxy-dependent ``Referer`` heuristic.
+    page. No part of the supplied string ever reaches the ``Location`` header.
 
-    It selects a DESTINATION only. The verb performed stays a route constant (see
-    :func:`_guarded_accept`), so one URL still means one consequence; this only stops a fleet-page
-    operator from being deposited on a different page on every click, success or refusal.
+    ``scope`` is the review scope the form was rendered on, so an operator working through one
+    folder is returned to that folder. It contributes only percent-encoded query values on the
+    fixed collection path (:func:`_scope_query`); a scope that did not parse contributes nothing.
+    It selects a DESTINATION only — the verb performed stays a route constant.
     """
-    return "/review" if origin == "fleet" else f"/collection/{collection_id}/review"
+    if origin == "fleet":
+        return "/review?stale=1" if stale else "/review"
+    query = _scope_query(scope) if scope is not None else ""
+    if stale:
+        query = f"{query}&stale=1" if query else "stale=1"
+    base = f"/collection/{collection_id}/review"
+    return f"{base}?{query}" if query else base
 
 
 async def _guarded_accept(
@@ -1730,35 +1639,42 @@ async def _guarded_accept(
     submitted_fp: str,
     file_id: int | None = None,
     origin: str = "",
+    folder: _Scope | None = _ROOT_SCOPE,
+    return_scope: _Scope | None = None,
+    outcome: dict[str, int] | None = None,
 ) -> RedirectResponse | None:
     """Run ``form``'s accept only if its population still matches ``submitted_fp`` (design D14).
 
+    ``outcome``, if given, receives the service's counts (``accepted`` / ``removed``) on success —
+    what the confirmation shown after the redirect states. It is filled only after the mutation
+    committed, so a refusal leaves it empty.
+
     Returns ``None`` when the accept was performed (the caller then redirects to its own success
-    target), or the fail-closed refusal response — a 303 to ``…/review?stale=1`` on the surface the
-    submission came from (:func:`_review_return_base`), the page that lists exactly the issues that
-    caused the refusal — on any of:
+    target), or the fail-closed refusal response — a 303 to the review surface the submission came
+    from, carrying ``stale=1`` — on any of:
 
     * an absent or empty ``population_fp`` (fail closed: an unguarded POST is refused, never run);
-    * an operation already in flight (``blocking_run``, now belt-and-braces for the *long* window);
+    * a bulk form whose folder scope did not parse (``folder is None``) — refused, not interpreted;
+    * an operation already in flight (``blocking_run``, belt-and-braces for the *long* window);
     * the writer lock being unobtainable (BUSY / BUSY_SNAPSHOT / LOCKED — that *is* drift, and an
       uncaught 500 on a destructive POST is the refusal promise broken exactly where the guard
       exists, and an invitation to retry blind);
-    * for ``baseline-new``, ``issues`` or ``open_events`` no longer being zero;
     * the recomputed fingerprint differing from the submitted one.
 
     Every refusal path rolls back before returning, so a refusal mutates nothing.
 
     ``form`` is a **constant per route**, never operator-supplied: the verb performed must not be
-    chosen by input on a destructive endpoint, and one URL in the access log must mean one
-    consequence. It selects the read scope, the file statuses `_narrow` slices to, and the service
-    call — ``accept_collection(scope=…)`` for the three bulk forms, ``accept_file`` for
-    ``accept-file``, whose ``file_id`` is the row named by the URL.
+    chosen by input on a destructive endpoint. ``folder`` IS operator-supplied, which is why it is
+    bound rather than trusted: the recount slices by it, the header names it, and a fingerprint that
+    does not reproduce is refused. The mutation then acts on **the ids of the records the recount
+    just hashed** (`accept_files`) — never on a second, differently expressed selection of the same
+    folder and state, so there is exactly one encoding of "which records" on this path.
     """
     stale = RedirectResponse(
-        f"{_review_return_base(collection.id, origin)}?stale=1", status_code=303
+        _review_return(collection.id, origin, return_scope, stale=True), status_code=303
     )
     submitted = (submitted_fp or "").strip()
-    if not submitted:
+    if not submitted or (form in _FP_BULK_FORMS and folder is None):
         await session.rollback()
         return stale
     if await collections_svc.blocking_run(session, collection.id) is not None:
@@ -1774,20 +1690,27 @@ async def _guarded_accept(
         await session.rollback()
         return stale
 
-    # 2. Recompute inside this transaction, through the SAME single-statement read and the SAME
-    #    encoder the form was minted with, and re-assert the detail form's two zeroes explicitly
-    #    (they are hashed too, so this is belt-and-braces on an unambiguous failure mode).
-    read_scope, statuses = _FP_FORMS[form]
-    pop = await _read_population(
-        session,
-        collection,
-        read_scope,
-        file_id=file_id if form == "accept-file" else None,
-    )
-    narrowed = _narrow(pop, form, statuses, file_id=file_id)
-    if form == "baseline-new" and (narrowed.issues > 0 or narrowed.open_events):
+    # 1b. Look for an operation again, now that nothing else can commit. The check above ran
+    #     before the lock, so a scan could have claimed the collection in between and already be
+    #     holding rows it read before this accept — which it would then write over. Under the lock
+    #     a claim either committed before us (seen here: refuse) or waits for our commit (and then
+    #     reads what we wrote). A plain read: reclaiming a stale claim writes from another
+    #     connection, which would wait on the lock this request is holding.
+    if await collections_svc.active_run(session, collection.id) is not None:
         await session.rollback()
         return stale
+
+    # 2. Recompute inside this transaction, through the SAME single-statement read, the SAME slice
+    #    and the SAME encoder the form was minted with.
+    pop = await _read_population(
+        session, collection, file_id=file_id if form == "accept-file" else None
+    )
+    narrowed = _narrow(
+        pop,
+        form,
+        file_id=file_id if form == "accept-file" else None,
+        folder=folder if form in _FP_BULK_FORMS else None,
+    )
     current = _population_fingerprint(collection, narrowed)
 
     # 3. Compare.
@@ -1798,118 +1721,415 @@ async def _guarded_accept(
     # 4. Only now act; the service's own commit() closes this same transaction.
     if form == "accept-file":
         # The fingerprint just proved this row is present, in the state the form named, in this
-        # collection. Load it fresh (nothing in this request has put a `FileEntry` in the identity
-        # map) so the service acts on the row the recount saw, not on a pre-lock read of it.
+        # collection. Load it fresh so the service acts on the row the recount saw.
         fe = await session.get(FileEntry, file_id) if narrowed.files else None
         if fe is None or fe.collection_id != collection.id:
             await session.rollback()
             return stale
-        await scanner_svc.accept_file(session, collection, fe, user.id)
-        return None
-    await scanner_svc.accept_collection(
-        session, collection, user.id, scope=_FP_ACCEPT_SCOPES[form]
-    )
+        result = await scanner_svc.accept_file(session, collection, fe, user.id)
+    else:
+        result = await scanner_svc.accept_files(
+            session, collection, [f.id for f in narrowed.files], user.id
+        )
+    if outcome is not None:
+        outcome.update(result)
     return None
 
 
-@router.post("/collection/{collection_id}/accept", response_class=HTMLResponse, dependencies=[Depends(verify_csrf)])
-async def collection_accept(
-    collection_id: int,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-    user: User = Depends(current_user),
-    population_fp: str = Form(""),
-):
-    """The detail page's "Baseline new files" submit, bound to the population it was rendered for.
+# --- "it worked" (a one-shot confirmation after an accept) -----------------------------------
+# An accept answers with a redirect to a freshly rendered review page. The only sign that it
+# worked used to be a smaller number somewhere on that page. The route now leaves a short-lived
+# cookie stating what the service reported, and the next review render shows it once and clears it.
+# The cookie is client-held, so it is parsed against a strict pattern and can only ever produce
+# the sentence "Accepted N change(s)/deletion(s)" — it selects nothing and authorises nothing.
+_DONE_COOKIE = "cairn_done"
+_DONE_RE = re.compile(r"^(changes|deletions):([0-9]{1,7})$")
 
-    The one accept form that is NOT on the review page (design D5): the review page lists `missing`
-    and `modified`, and a button whose count names a population the page does not display is the
-    dead end this split exists to remove. Its scope is `{"new"}` — it promotes nothing else and,
-    with the ack now scoped, it acknowledges nothing at all.
-    """
-    collection = await _get_owned_collection(session, collection_id, user)
-    refused = await _guarded_accept(session, collection, user, "baseline-new", population_fp)
-    if refused is not None:
-        return refused
-    return RedirectResponse(f"/collection/{collection_id}", status_code=303)
+
+def _set_done(response: RedirectResponse, outcome: dict[str, int]) -> None:
+    accepted, removed = int(outcome.get("accepted", 0)), int(outcome.get("removed", 0))
+    if removed > 0:
+        value = f"deletions:{removed}"
+    elif accepted > 0:
+        value = f"changes:{accepted}"
+    else:
+        return
+    response.set_cookie(_DONE_COOKIE, value, max_age=60, httponly=True, samesite="lax", path="/")
+
+
+def _take_done(request: Request) -> dict[str, Any] | None:
+    """The confirmation to show on this render, or ``None``. Never trusts the cookie's shape."""
+    match = _DONE_RE.match(request.cookies.get(_DONE_COOKIE, ""))
+    if match is None:
+        return None
+    return {"kind": match.group(1), "count": int(match.group(2))}
 
 
 # --- issue review + recovery ----------------------------------------------------------------
-# The focused "what happened to my files, and what do I do now" view. Reuses the existing file
-# query + acknowledge/accept services; the only new surface is the read-side review item and a
-# couple of collection-scoped action routes that land back on the review page.
+# The "what happened to my files, and what do I do now" surfaces: a collection's review page, the
+# fleet-wide review page and the dashboard's needs-you list. All three are views of ONE model,
+# built by `_review_model` from ONE `_read_population` snapshot per collection.
 
-# Bound the work the page does for a collection with a very large issue set (e.g. a whole deleted
-# folder): render at most this many detailed rows, and copy at most this many paths into the
-# recovery clipboard (with a "+N more" note). The accurate full count still comes from the counts.
+# Bound the work a page does for a collection with a very large issue set (a whole deleted folder,
+# a volume that went away): at most this many detailed rows per page and per group, and at most
+# this many paths in the recovery clipboard. Counts, groups and fingerprints always come from the
+# whole snapshot, never from the truncated render list.
 REVIEW_ROW_LIMIT = 500
+REVIEW_GROUP_ROW_LIMIT = 200
 REVIEW_COPY_LIMIT = 2000
+# A group this small is rendered open; a larger one is a collapsed <details>.
+REVIEW_GROUP_OPEN_MAX = 8
 
-# The fleet page's two caps, for two different failure modes (design D11):
-#   * per group, so one collection with 40,000 missing files cannot crowd every other collection
-#     off a page whose whole purpose is showing the operator every collection in trouble;
+# The fleet page's two caps, for two different failure modes:
+#   * per collection, so one collection with 40,000 missing files cannot crowd every other
+#     collection off a page whose whole purpose is showing every collection in trouble;
 #   * in total, so the page's cost is bounded however many collections are affected.
-# A group past the TOTAL budget is still rendered — header, counts and its "Review all in X" link,
-# with zero rows: a collection must never disappear from a fleet-wide issue list because of a
-# render budget. Counts and ordering always come from each collection's population snapshot, never
-# from the truncated render list.
+# A section past the TOTAL budget is still rendered — header, counts, group headers and its link.
 FLEET_COLLECTION_ROW_LIMIT = 100
 FLEET_ROW_LIMIT = 500
 
+# The kinds of event that record a change to a file's contents (as opposed to its presence).
+_CHANGE_EVENT_KINDS = ("modified", "restored_changed")
 
-def _review_item(
-    fe: FileEntry | _PopFile, root: str, event: Event | _PopEvent | None, fp: str = ""
-) -> dict[str, Any]:
-    """One review row: the file, what happened to it, its open event, and its own accept form.
 
-    ``fp`` is the row's per-file fingerprint (design D6/D9), sliced by :func:`_narrow` out of the
-    very snapshot the row was rendered from — never a second read. Empty means the row renders no
-    accept control, which fails closed: the endpoint refuses an absent fingerprint.
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
-    ``event`` may be an ORM :class:`~src.models.db.Event` or a :class:`_PopEvent` out of that same
-    snapshot. A ``_PopEvent`` carries no ``acknowledged_at`` because it cannot have one: the
-    population read selects ``acknowledged_at IS NULL``, so it is open by construction.
+
+def _local_day(dt: datetime | None) -> date | None:
+    """The calendar day ``dt`` fell on in the server's timezone (what "found on" means to a person)."""
+    dt = _as_utc(dt)
+    return dt.astimezone().date() if dt is not None else None
+
+
+def _day_label(day: date | None, today: date | None = None) -> str:
+    """"Today" / "Yesterday" / "26 Oct" (with the year once it is not this year)."""
+    if day is None:
+        return "an unknown date"
+    today = today or datetime.now().astimezone().date()
+    if day == today:
+        return "today"
+    if day == today - timedelta(days=1):
+        return "yesterday"
+    label = f"{day.day} {day.strftime('%b')}"
+    return label if day.year == today.year else f"{label} {day.year}"
+
+
+def _stamp_utc(dt: datetime | None) -> str:
+    dt = _as_utc(dt)
+    return dt.strftime("%Y-%m-%d %H:%M UTC") if dt is not None else "unknown"
+
+
+def _found_at(f: _PopFile, index: _PopIndex) -> datetime | None:
+    """When this issue was found: its newest open event, from the SAME snapshot as the row.
+
+    A file with no open event (data from before events stayed open until resolution) falls back to
+    when its record last changed, then to when it was last checked.
     """
-    rel_dir = fe.relpath.rsplit("/", 1)[0] if "/" in fe.relpath else ""
-    open_event = (
-        event if (event is not None and getattr(event, "acknowledged_at", None) is None) else None
-    )
-    detected_src = event.detected_at if event is not None else fe.last_changed
+    event = index.newest_event(f.id)
+    if event is not None and event.detected_at is not None:
+        return _as_utc(event.detected_at)
+    return _as_utc(f.last_changed or f.last_checked)
+
+
+def _common_dir(relpaths: list[str]) -> str:
+    """The deepest directory containing every path ("" = the collection root)."""
+    common: list[str] | None = None
+    for p in relpaths:
+        segs = p.split("/")[:-1]
+        if common is None:
+            common = segs
+        else:
+            n = 0
+            limit = min(len(common), len(segs))
+            while n < limit and common[n] == segs[n]:
+                n += 1
+            common = common[:n]
+        if not common:
+            break
+    return "/".join(common or [])
+
+
+def _group_scopes(files: list[_PopFile], scope: _Scope) -> list[tuple[_Scope, list[_PopFile]]]:
+    """Partition ``files`` (already inside ``scope``) into folder groups (design D7). Pure.
+
+    One group per immediate child folder of the files' deepest common folder (its whole subtree),
+    plus one for any files sitting directly in that common folder. A single element means "no
+    grouping to show": every file is in one folder.
+    """
+    if not files:
+        return []
+    if not scope.deep:
+        return [(scope, files)]
+    common = _common_dir([f.relpath for f in files])
+    base = f"{common}/" if common else ""
+    groups: dict[_Scope, list[_PopFile]] = {}
+    for f in files:
+        rest = f.relpath[len(base):]
+        if "/" in rest:
+            key = _Scope(base + rest.split("/", 1)[0], True)
+        else:
+            key = _Scope(common, False)
+        groups.setdefault(key, []).append(f)
+    return list(groups.items())
+
+
+def _action(collection: Collection, pop: _Population, form: str, folder: _Scope, shown: int) -> dict[str, Any] | None:
+    """One bulk control: its count, its fingerprint and how many of its files are not on the page.
+
+    All three come from the same slice of the same snapshot, so the number on the button, the
+    population hashed and the population eventually mutated are one statement. ``None`` when the
+    population is empty — an action over nothing is never rendered.
+    """
+    narrowed = _narrow(pop, form, folder=folder)
+    count = len(narrowed.files)
+    if count == 0:
+        return None
     return {
-        "id": fe.id,
-        "relpath": fe.relpath,
-        "name": fe.relpath.rsplit("/", 1)[-1],
-        "dir": rel_dir,
-        "abs_path": str(Path(root) / fe.relpath),
-        "status": fe.status,
-        "size": humanize_size(fe.size),
-        "last_seen": humanize_delta(fe.last_checked),
-        "last_seen_full": (
-            fe.last_checked.strftime("%Y-%m-%d %H:%M UTC") if fe.last_checked else "unknown"
-        ),
-        "detected": humanize_delta(detected_src),
-        "notarized": fe.ots_state in ("incomplete", "complete"),
-        "event_id": open_event.id if open_event else None,
-        "acked": open_event is None,
-        "fp": fp,
+        "count": count,
+        "fp": _population_fingerprint(collection, narrowed),
+        "hidden": max(0, count - shown),
+        "dir": folder.dir,
+        "deep": "1" if folder.deep else "0",
     }
 
 
-async def _latest_events_by_file(
-    session: AsyncSession, collection_id: int, file_ids: list[int]
-) -> dict[int, Event]:
-    """Map each file id to its most recent event (the open one, if any, drives Acknowledge)."""
-    out: dict[int, Event] = {}
-    if not file_ids:
-        return out
-    rows = await session.scalars(
-        select(Event)
-        .where(Event.collection_id == collection_id, Event.file_id.in_(file_ids))
-        .order_by(Event.detected_at.desc())
+def _row(
+    f: _PopFile,
+    collection: Collection,
+    pop: _Population,
+    index: _PopIndex,
+    group_dir: str,
+) -> dict[str, Any]:
+    """One review row from the snapshot. Display-only facts are attached later (`_attach_facts`)."""
+    rel_dir = f.relpath.rsplit("/", 1)[0] if "/" in f.relpath else ""
+    # Inside a group the folder is already on the group's header; show only what lies below it.
+    shown_dir = rel_dir
+    if group_dir and (rel_dir == group_dir or rel_dir.startswith(group_dir + "/")):
+        shown_dir = rel_dir[len(group_dir):].lstrip("/")
+    event = index.newest_event(f.id)
+    found = _found_at(f, index)
+    written = (
+        datetime.fromtimestamp(f.mtime, tz=timezone.utc) if f.mtime is not None else None
     )
-    for e in rows:
-        out.setdefault(e.file_id, e)  # first seen = latest by detected_at
-    return out
+    # A file that came back different stays that alarm for as long as that event is open — even
+    # when a LATER ordinary change has opened a newer event on top of it. Its detail line is the
+    # only surviving record of the digest the file had before it came back, and accepting the row
+    # closes that event too, so it must never be accepted without having been shown.
+    came_back = index.newest_event(f.id, "restored_changed") if f.status != "missing" else None
+    if f.status == "missing":
+        kind = "missing"
+    elif came_back is not None:
+        kind = "came_back"
+    else:
+        kind = "changed"
+    return {
+        "id": f.id,
+        "relpath": f.relpath,
+        "name": f.relpath.rsplit("/", 1)[-1],
+        "dir": shown_dir,
+        "status": f.status,
+        "kind": kind,
+        "size": humanize_size(f.size),
+        "found": humanize_delta(found),
+        "found_full": _stamp_utc(found),
+        "written": humanize_delta(written) if written is not None else None,
+        "written_full": _stamp_utc(written),
+        "notarized": f.ots_state in ("incomplete", "complete"),
+        # The event whose recorded detail the row shows (the came-back-different one, if any).
+        "event_id": (came_back or event).id if (came_back or event) is not None else None,
+        "changes": 0,
+        "changes_since": None,
+        "detail": None,
+        "fp": _population_fingerprint(
+            collection, _narrow(pop, "accept-file", file_id=f.id, index=index)
+        ),
+    }
+
+
+async def _attach_facts(session: AsyncSession, collection_id: int, rows: list[dict[str, Any]]) -> None:
+    """Add the display-only history to rendered rows: how often a file changed, and since when.
+
+    Separate reads on purpose. Nothing here names a verb or enters a fingerprint — a row's status,
+    its control and its authorisation all came from the snapshot — so these are "pure display"
+    counts in the guard's own terms, and they are fetched only for the rows actually rendered.
+    """
+    ids = [r["id"] for r in rows if r["status"] != "missing"]
+    for i in range(0, len(ids), 400):
+        chunk = ids[i : i + 400]
+        result = await session.execute(
+            select(Event.file_id, func.count(), func.min(Event.detected_at))
+            .where(
+                Event.collection_id == collection_id,
+                Event.file_id.in_(chunk),
+                Event.kind.in_(_CHANGE_EVENT_KINDS),
+            )
+            .group_by(Event.file_id)
+        )
+        history = {fid: (n, first) for fid, n, first in result.all()}
+        for r in rows:
+            n, first = history.get(r["id"], (0, None))
+            if n > 1:
+                r["changes"] = int(n)
+                r["changes_since"] = _day_label(_local_day(first))
+    # A file that came back different carries both digests in its event's detail — the only
+    # surviving record of what it was before — and the row is where that is shown now.
+    detail_ids = [r["event_id"] for r in rows if r["kind"] == "came_back" and r["event_id"]]
+    for i in range(0, len(detail_ids), 400):
+        chunk = detail_ids[i : i + 400]
+        result = await session.execute(select(Event.id, Event.detail).where(Event.id.in_(chunk)))
+        details = dict(result.all())
+        for r in rows:
+            if r["event_id"] in details:
+                r["detail"] = details[r["event_id"]]
+
+
+def _found_range(days: list[date]) -> str:
+    """"26 Oct" for one day of findings, "2 Nov – 9 Nov" for several."""
+    if not days:
+        return ""
+    lo, hi = min(days), max(days)
+    return _day_label(lo) if lo == hi else f"{_day_label(lo)} – {_day_label(hi)}"
+
+
+def _group_label(scope: _Scope, page_scope: _Scope) -> str:
+    """A group's heading: its folder, relative to nothing (the full collection-relative path)."""
+    if scope.deep:
+        return (scope.dir + "/") if scope.dir else "the whole collection"
+    # The files sitting directly in a folder, as opposed to the folder's whole subtree: the label
+    # has to say so, because its bulk action and its scope link leave the subfolders alone.
+    return f"{scope.dir}/ (this folder only)" if scope.dir else "top level (not in any folder)"
+
+
+def _review_model(
+    collection: Collection,
+    pop: _Population,
+    scope: _Scope,
+    row_budget: int,
+) -> dict[str, Any]:
+    """Everything a review surface shows for one collection at one scope. Pure — it reads nothing.
+
+    Groups, counts, the day summary, every row and every fingerprint are slices of the one
+    snapshot it is handed (design D7), so no two controls on a page can describe different states.
+    Rows are budgeted (per group and per page); counts and fingerprints are not.
+    """
+    index = _PopIndex(pop)
+    files = [f for f in pop.files if _in_scope(f.relpath, scope)]
+    found_by_id = {f.id: _found_at(f, index) for f in files}
+    missing = sum(1 for f in files if f.status == "missing")
+    modified = len(files) - missing
+
+    # "Found" summary by local day, newest first.
+    days: dict[date | None, int] = {}
+    for f in files:
+        d = _local_day(found_by_id[f.id])
+        days[d] = days.get(d, 0) + 1
+    ordered_days = sorted(
+        days.items(), key=lambda kv: (kv[0] is not None, kv[0] or date.min), reverse=True
+    )
+    found_days = [{"label": _day_label(d), "count": n} for d, n in ordered_days[:4]]
+    earlier = sum(n for _d, n in ordered_days[4:])
+
+    partition = _group_scopes(files, scope)
+    flat = len(partition) <= 1
+    # Newest finding first, then by path — a stable, total order.
+    def _newest(members: list[_PopFile]) -> float:
+        stamps = [found_by_id[f.id].timestamp() for f in members if found_by_id[f.id] is not None]
+        return max(stamps) if stamps else 0.0
+
+    partition.sort(key=lambda g: (-_newest(g[1]), g[0].dir, not g[0].deep))
+
+    groups: list[dict[str, Any]] = []
+    rows_all: list[dict[str, Any]] = []
+    budget = max(row_budget, 0)
+    shown_missing = shown_modified = 0
+    for gscope, members in partition:
+        ordered = sorted(members, key=lambda f: (0 if f.status == "missing" else 1, f.relpath))
+        # A group is capped so one folder cannot use the whole page; a single list IS the page.
+        take = min(len(ordered), budget) if flat else min(len(ordered), REVIEW_GROUP_ROW_LIMIT, budget)
+        budget -= take
+        rows = [_row(f, collection, pop, index, gscope.dir) for f in ordered[:take]]
+        rows_all.extend(rows)
+        g_missing = sum(1 for f in members if f.status == "missing")
+        g_shown_missing = sum(1 for r in rows if r["status"] == "missing")
+        shown_missing += g_shown_missing
+        shown_modified += len(rows) - g_shown_missing
+        g_days = [d for d in (_local_day(found_by_id[f.id]) for f in members) if d is not None]
+        groups.append(
+            {
+                "label": _group_label(gscope, scope),
+                "dir": gscope.dir,
+                "deep": gscope.deep,
+                "query": _scope_query(gscope),
+                "total": len(members),
+                "missing": g_missing,
+                "modified": len(members) - g_missing,
+                "found": _found_range(g_days),
+                "items": rows,
+                "shown": len(rows),
+                "more": len(members) - len(rows),
+                "open": len(members) <= REVIEW_GROUP_OPEN_MAX,
+                # Bulk actions only where grouping exists; a flat list uses the page-wide ones.
+                "accept_changes": None if flat else _action(
+                    collection, pop, "adopt-changed", gscope, len(rows) - g_shown_missing
+                ),
+                "accept_deletions": None if flat else _action(
+                    collection, pop, "stop-tracking", gscope, g_shown_missing
+                ),
+            }
+        )
+
+    return {
+        "collection_id": collection.id,
+        "collection_name": collection.name,
+        "root": collection.root,
+        "scope_dir": scope.dir,
+        "scope_deep": scope.deep,
+        "scope_is_root": scope.is_root,
+        "scope_query": _scope_query(scope),
+        "scope_label": _group_label(scope, scope),
+        "total": len(files),
+        "missing": missing,
+        "modified": modified,
+        "collection_total": len(pop.files),
+        "found_days": found_days,
+        "found_earlier": earlier,
+        "newest_found": max(
+            (found_by_id[f.id] for f in files if found_by_id[f.id] is not None), default=None
+        ),
+        "flat": flat,
+        "groups": groups,
+        "rows": rows_all,
+        "shown": len(rows_all),
+        "truncated": len(files) > len(rows_all),
+        # Page-wide actions act on the page's own scope.
+        "accept_changes": _action(collection, pop, "adopt-changed", scope, shown_modified),
+        "accept_deletions": _action(collection, pop, "stop-tracking", scope, shown_missing),
+        "copy_relpaths": [f.relpath for f in files[:REVIEW_COPY_LIMIT]],
+    }
+
+
+def _newest_found(pop: _Population) -> datetime | None:
+    """When the collection's most recent issue was found (from the snapshot, like every row)."""
+    index = _PopIndex(pop)
+    return max(
+        (d for d in (_found_at(f, index) for f in pop.files) if d is not None), default=None
+    )
+
+
+def _severity_key(collection: Collection, newest: datetime | None) -> tuple[int, float, str]:
+    """Order affected collections by what most deserves attention, not by size (design D9).
+
+    Locked before Working — an issue where nothing should change is the higher signal — then the
+    collection whose newest issue was found most recently, then by name.
+    """
+    return (
+        0 if collection.mode == "worm" else 1,
+        -(newest.timestamp() if newest is not None else 0.0),
+        collection.name,
+    )
 
 
 @router.get("/collection/{collection_id}/review", response_class=HTMLResponse)
@@ -1919,93 +2139,54 @@ async def collection_review(
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
     stale: str = Query(""),
+    dir: str = Query(""),
+    deep: str = Query("1"),
 ):
-    """Focused review of a collection's missing + modified files, with recovery guidance.
+    """A collection's changed and missing files, grouped by folder, with the actions that resolve them.
 
-    Publishes, all from one snapshot: ``adopt_fp``/``stop_fp`` (design D14's hidden field for each
-    scoped bulk form), ``adopt_count``/``stop_count`` (the counts those buttons are labelled with,
-    and the numbers the legend reads), a per-row ``fp`` on each item, and ``stale`` (the "this
-    collection changed since the page loaded" banner, whitelisted from ``?stale=1`` exactly as
-    ``view``/``filter`` are handled in D11).
+    ``dir`` / ``deep`` open the page at a folder scope (design D7): the same view, restricted to
+    that folder and grouped one level deeper. A scope that does not parse is ignored (the page
+    renders the whole collection) — it selects only what is *displayed*; every action on the page
+    carries its own bound scope.
     """
     collection = await _get_owned_collection(session, collection_id, user)
     view = await _collection_view(session, collection)
+    scope = _parse_scope(dir, deep) or _ROOT_SCOPE
 
-    # ONE read of the whole protected population (uncapped) + the open-event set. Everything below
-    # is derived from it: the rendered rows, the recovery copy list, the issue total, the "need
-    # action" pill and the fingerprint. Re-querying for any of those would reopen the window this
-    # guard exists to close — a scanner commit between two SELECTs would put a file in the hash
-    # that is not in the list, and the operator's unchanged POST would then delete it unseen.
-    pop = await _read_population(session, collection, "review")
-    # Every fingerprint this page publishes is a pure slice of that ONE snapshot (design D2/D9):
-    # the two bulk forms, and one per rendered row. A second read here would let two controls on
-    # the same page describe different states, which is the failure the guard exists to close
-    # reintroduced inside the guard's own mint.
-    adopt = _narrow(pop, "adopt-changed", _FP_FORMS["adopt-changed"][1])
-    stop = _narrow(pop, "stop-tracking", _FP_FORMS["stop-tracking"][1])
-    # `pop.files` is path-ordered; the page shows missing first, then modified, stable by path
-    # within each. A Python sort of the fetched rows, not a second query.
-    rendered = sorted(pop.files, key=lambda f: (0 if f.status == "missing" else 1, f.relpath))
-    rendered = rendered[:REVIEW_ROW_LIMIT]
-    events = await _latest_events_by_file(session, collection_id, [f.id for f in rendered])
-    items = [
-        _review_item(
-            f,
-            collection.root,
-            events.get(f.id),
-            fp=_population_fingerprint(
-                collection,
-                _narrow(pop, "accept-file", _FP_FORMS["accept-file"][1], file_id=f.id),
-            ),
-        )
-        for f in rendered
-    ]
+    # ONE read of the whole review population. Everything below is derived from it: the groups, the
+    # rows, the copy list, the totals and every fingerprint. Re-querying for any of those would
+    # reopen the window this guard exists to close.
+    pop = await _read_population(session, collection)
+    model = _review_model(collection, pop, scope, REVIEW_ROW_LIMIT)
+    await _attach_facts(session, collection.id, model["rows"])
 
-    copy_relpaths = [f.relpath for f in pop.files[:REVIEW_COPY_LIMIT]]
-    review_open = len(pop.open_events)
-
-    total_issues = len(pop.files)
-    # The legend sits directly above the list, so it counts the list: take its two numbers from the
-    # snapshot rather than from `_collection_view`'s earlier, separate count query.
-    # ...and so do the two button labels (design D9): the label, the rendered list, the copy list
-    # and the fingerprint are then one statement. A count sourced from `_collection_view`'s earlier
-    # query could name a number the fingerprint does not cover — the render-time lie this change
-    # exists to remove, reintroduced in the label.
+    # The page's own claims about the collection come from the snapshot too, not from
+    # `_collection_view`'s earlier, separate count queries: "nothing to review" only means
+    # "all clear" if the collection is actually watching files (#31).
     view["counts"] = dict(view["counts"])
-    view["counts"]["missing"] = len(stop.files)
-    view["counts"]["modified"] = len(adopt.files)
-    # Same reason, one level up: "no issues" only means "All clear" if the collection is actually
-    # watching files. `_collection_view` counted them in an EARLIER, separate statement, so an
-    # accept committed between the two reads (the last missing file adopted, the collection left
-    # empty) left `is_empty` false while this snapshot has nothing in it — the page then claimed a
-    # green all-clear for a collection that has established nothing (#31). Take it from the
-    # snapshot the rest of this page is rendered from.
+    view["counts"]["missing"] = sum(1 for f in pop.files if f.status == "missing")
+    view["counts"]["modified"] = len(pop.files) - view["counts"]["missing"]
     view["is_empty"] = pop.total_files == 0
+
+    copy_relpaths = model["copy_relpaths"]
     ctx = await _base_context(request, session, user, "collection")
     ctx.update(
         {
             "c": view,
-            "items": items,
-            "total_issues": total_issues,
-            "shown": len(items),
-            "truncated": total_issues > len(items),
-            "root": collection.root,
+            "r": model,
+            "row_from": "",
             "copy_relpaths": "\n".join(copy_relpaths),
             "copy_count": len(copy_relpaths),
-            "copy_truncated": total_issues > len(copy_relpaths),
-            "review_open": review_open,
-            # Each bulk form is hashed over the collection's ENTIRE population in its own state —
-            # the same `pop.files` the rows above were sliced from, not a second query: the verb
-            # acts on all of it, so hashing only the visible rows would leave every issue past the
-            # render cap outside the guard, and re-reading would let the two disagree.
-            "adopt_count": len(adopt.files),
-            "stop_count": len(stop.files),
-            "adopt_fp": _population_fingerprint(collection, adopt),
-            "stop_fp": _population_fingerprint(collection, stop),
+            "copy_truncated": model["total"] > len(copy_relpaths),
             "stale": stale == "1",
+            # Never beside the refusal notice: the two would be about different clicks.
+            "done": None if stale == "1" else _take_done(request),
         }
     )
-    return templates.TemplateResponse(request, "collection_review.html", ctx)
+    response = templates.TemplateResponse(request, "collection_review.html", ctx)
+    if ctx["done"] is not None:
+        response.delete_cookie(_DONE_COOKIE, path="/")
+    return response
 
 
 @router.get("/review", response_class=HTMLResponse)
@@ -2015,116 +2196,91 @@ async def fleet_review(
     user: User = Depends(current_user),
     stale: str = Query(""),
 ):
-    """Every open issue across the current user's collections, grouped by collection (#27).
+    """Every open issue across the current user's collections, one section per collection.
 
-    The destination the fleet-wide counts never had: the dashboard's "Open issues" tile and the
-    sidebar badge count files across every collection, and until this page existed the only honest
-    place to send that number was a list of collections, which acts on nothing.
-
-    **A read surface with per-row verbs, not a new mutation surface** (design D1/D3). It introduces
-    no query primitive, no route and no ``_FP_FORMS`` entry: the rows are the same
-    ``partials/review_row.html`` the collection review page renders, minted from the same
-    ``_read_population`` snapshot, and they post to the same per-file routes. It offers **no
-    collection-spanning bulk verb** — each bulk accept is authorized by a fingerprint over ONE
-    collection's whole population and is irreversible, so a fleet bulk would be "stop tracking 412
-    files across 6 collections" behind a single button: the unscoped irreversible verb the scoped
-    ones replaced, rebuilt one level up. Those verbs stay one click away, on each group's own
-    review page.
-
-    **One population read per collection, and everything a group shows or authorizes is a slice of
-    it** — the counts, the rows, each row's per-file fingerprint AND each row's open-event state.
+    **One population read per collection, and everything a section shows or authorizes is a slice
+    of it** — the counts, the groups, the rows and every fingerprint. Each control acts inside one
+    collection (one file, or one folder of one collection); there is no collection-spanning verb,
+    because every accept is authorised over a single collection's population and is irreversible.
     """
     collections = await collections_svc.list_collections(session, user_id=user.id)
 
-    # Read once per collection, then decide what to render. Ordering needs every group's counts, so
-    # the reads cannot be stopped early at the row budget — and a group past the budget still has
-    # to state its counts, which is the only reason this page is worth loading for that operator.
+    # Read once per collection, then decide what to render. Ordering needs every section's newest
+    # finding, so the reads cannot be stopped early at the row budget — and a section past the
+    # budget still has to state its counts.
     snapshots = []
     for c in collections:
-        pop = await _read_population(session, c, "review")
+        pop = await _read_population(session, c)
         if not pop.files:
             continue  # not affected — an unaffected collection is not listed at all
-        missing = sum(1 for f in pop.files if f.status == "missing")
-        snapshots.append((c, pop, missing, len(pop.files) - missing))
-    # Worst first, matching "missing first" within a group.
-    snapshots.sort(key=lambda s: (-s[2], -s[3], s[0].name))
+        snapshots.append((c, pop))
 
-    groups: list[dict[str, Any]] = []
+    sections: list[dict[str, Any]] = []
     budget = FLEET_ROW_LIMIT
-    for c, pop, missing, modified in snapshots:
-        # The row's open event comes out of the SAME snapshot (design D1) — deliberately NOT
-        # `_latest_events_by_file`, which the collection review page uses. With two reads, a
-        # scanner insert or a concurrent acknowledgement between them lets a row offer "Mark
-        # reviewed" for an event that is already acknowledged, or hide the control for one that is
-        # open, while its accept fingerprint describes the other read: the guard's own failure mode
-        # reintroduced beside the guard. Highest id = newest generation, the same rule `ack_event`
-        # applies to `narrowed.open_events[-1]`.
-        #
-        # Accepted consequence: `pop.open_events` holds OPEN events only, so a row whose events are
-        # all acknowledged shows no open event (correct — the collection page renders it the same
-        # way) and takes its "detected" time from `last_changed` rather than from that acknowledged
-        # event. A slightly different relative timestamp on an already-reviewed row is the whole
-        # cost, and it buys a snapshot property that authorizes a destructive verb.
-        open_by_file: dict[int, _PopEvent] = {}
-        for e in pop.open_events:
-            if e.file_id is None:
-                continue
-            prev = open_by_file.get(e.file_id)
-            if prev is None or e.id > prev.id:
-                open_by_file[e.file_id] = e
-
-        ordered = sorted(
-            pop.files, key=lambda f: (0 if f.status == "missing" else 1, f.relpath)
-        )
-        shown = ordered[: min(FLEET_COLLECTION_ROW_LIMIT, max(budget, 0))]
-        budget -= len(shown)
-        groups.append(
-            {
-                "id": c.id,
-                "name": c.name,
-                # Every number from the snapshot, never from the truncated render list.
-                "missing": missing,
-                "modified": modified,
-                "issues": len(pop.files),
-                "review_open": len(pop.open_events),
-                "items": [
-                    _review_item(
-                        f,
-                        c.root,
-                        open_by_file.get(f.id),
-                        fp=_population_fingerprint(
-                            c,
-                            _narrow(
-                                pop, "accept-file", _FP_FORMS["accept-file"][1], file_id=f.id
-                            ),
-                        ),
-                    )
-                    for f in shown
-                ],
-                "shown": len(shown),
-                "more": len(pop.files) - len(shown),
-            }
-        )
+    snapshots.sort(key=lambda s: _severity_key(s[0], _newest_found(s[1])))
+    for c, pop in snapshots:
+        model = _review_model(c, pop, _ROOT_SCOPE, min(FLEET_COLLECTION_ROW_LIMIT, max(budget, 0)))
+        budget -= model["shown"]
+        await _attach_facts(session, c.id, model["rows"])
+        model["policy"] = _policy_view(c.mode)
+        sections.append(model)
 
     ctx = await _base_context(request, session, user, "review")
     ctx.update(
         {
-            "groups": groups,
+            "sections": sections,
             "has_collections": bool(collections),
-            "total_missing": sum(g["missing"] for g in groups),
-            "total_modified": sum(g["modified"] for g in groups),
-            "total_issues": sum(g["issues"] for g in groups),
+            "total_missing": sum(s["missing"] for s in sections),
+            "total_modified": sum(s["modified"] for s in sections),
+            "total_issues": sum(s["total"] for s in sections),
+            "row_from": "fleet",
             "stale": stale == "1",
+            # Never beside the refusal notice: the two would be about different clicks.
+            "done": None if stale == "1" else _take_done(request),
         }
     )
-    return templates.TemplateResponse(request, "review_fleet.html", ctx)
+    response = templates.TemplateResponse(request, "review_fleet.html", ctx)
+    if ctx["done"] is not None:
+        response.delete_cookie(_DONE_COOKIE, path="/")
+    return response
 
 
-# The review page's two bulk verbs, one route each. `POST /collection/{id}/review/accept` — the
-# single "Accept all changes" that adopted the modified files, deleted the missing ones AND
-# promoted every `new` file in the collection — is **removed, not redirected**: a POST from a stale
-# open tab gets a 404/405 and mutates nothing, where forwarding it to one of these would perform a
-# verb that tab's button never named.
+# The two bulk verbs, one route each. The addresses are unchanged from before the verbs were
+# renamed for the operator ("Accept N changes" / "Accept N deletions"): one address keeps meaning
+# one consequence. Each takes the folder scope its form was rendered for.
+
+
+async def _bulk_accept(
+    form: str,
+    collection_id: int,
+    session: AsyncSession,
+    user: User,
+    population_fp: str,
+    dir: str,
+    deep: str,
+    return_dir: str,
+    return_deep: str,
+    origin: str,
+) -> RedirectResponse:
+    collection = await _get_owned_collection(session, collection_id, user)
+    return_scope = _parse_scope(return_dir, return_deep)
+    outcome: dict[str, int] = {}
+    refused = await _guarded_accept(
+        session,
+        collection,
+        user,
+        form,
+        population_fp,
+        origin=origin,
+        folder=_parse_scope(dir, deep),
+        return_scope=return_scope,
+        outcome=outcome,
+    )
+    if refused is not None:
+        return refused
+    response = RedirectResponse(_review_return(collection_id, origin, return_scope), status_code=303)
+    _set_done(response, outcome)
+    return response
 
 
 @router.post(
@@ -2137,19 +2293,23 @@ async def collection_review_adopt_changed(
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
     population_fp: str = Form(""),
+    dir: str = Form(""),
+    deep: str = Form("1"),
+    return_dir: str = Form(""),
+    return_deep: str = Form("1"),
+    origin: str = Query("", alias="from"),
 ):
-    """Adopt the collection's `modified` files as the expected version, stay on review.
+    """Accept the changed files inside one folder scope as they are now ("Accept N changes").
 
-    Acts on the modified set and nothing else: the missing records are untouched and no
-    not-yet-baselined file is promoted. Guarded by the same D14 fingerprint as every other accept
-    form, minted over *this* verb's population — so a scan recording another missing file, which
-    this button would not have touched, does not refuse it, while a change to the modified set does.
+    Acts on the `modified` files in that scope and nothing else: missing records are untouched.
+    Guarded by the D14 fingerprint minted over *this* verb's population in *this* folder — so a
+    scan recording a change in another folder does not refuse it, while a change to its own set
+    does.
     """
-    collection = await _get_owned_collection(session, collection_id, user)
-    refused = await _guarded_accept(session, collection, user, "adopt-changed", population_fp)
-    if refused is not None:
-        return refused
-    return RedirectResponse(f"/collection/{collection_id}/review", status_code=303)
+    return await _bulk_accept(
+        "adopt-changed", collection_id, session, user, population_fp,
+        dir, deep, return_dir, return_deep, origin,
+    )
 
 
 @router.post(
@@ -2162,18 +2322,22 @@ async def collection_review_stop_tracking(
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
     population_fp: str = Form(""),
+    dir: str = Form(""),
+    deep: str = Form("1"),
+    return_dir: str = Form(""),
+    return_deep: str = Form("1"),
+    origin: str = Query("", alias="from"),
 ):
-    """Remove the records of the collection's `missing` files, stay on review.
+    """Remove the records of the missing files inside one folder scope ("Accept N deletions").
 
-    The loud one: the file rows are deleted (their events detached first, so the audit trail
-    survives the cascade and keeps the path it is about). Nothing on disk is touched and no `.ots`
-    proof is deleted — what is lost is the link from Cairn's records to the proof.
+    The file rows are deleted (their events detached first, so the history survives the cascade and
+    keeps the path it is about). Nothing on disk is touched and no `.ots` proof is deleted — what
+    is lost is the link from Cairn's records to the proof.
     """
-    collection = await _get_owned_collection(session, collection_id, user)
-    refused = await _guarded_accept(session, collection, user, "stop-tracking", population_fp)
-    if refused is not None:
-        return refused
-    return RedirectResponse(f"/collection/{collection_id}/review", status_code=303)
+    return await _bulk_accept(
+        "stop-tracking", collection_id, session, user, population_fp,
+        dir, deep, return_dir, return_deep, origin,
+    )
 
 
 @router.post(
@@ -2187,16 +2351,17 @@ async def collection_file_accept(
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
     population_fp: str = Form(""),
+    return_dir: str = Form(""),
+    return_deep: str = Form("1"),
     # Which review surface this row was rendered on. Whitelisted to a fixed pair by
-    # `_review_return_base`; it never becomes part of a redirect target and never selects a verb.
+    # `_review_return`; it never becomes part of a redirect target and never selects a verb.
     origin: str = Query("", alias="from"),
 ):
-    """Accept ONE row from a review page (#30), then land back on a freshly rendered review.
+    """Accept ONE row from a review page, then land back on a freshly rendered review.
 
-    A plain POST → 303, not an htmx row swap: the row's disappearance changes the header count, the
-    legend, the copy list, both bulk button labels, the "need action" pill and the sidebar badge —
-    and, decisively, a *refusal* inside a row swap has nowhere to render the staleness banner. The
-    row's Mark-reviewed control keeps its swap; it mutates no file record.
+    A plain POST → 303, not an htmx row swap: the row's disappearance changes the summary, the
+    group's counts, the copy list, every bulk label and the sidebar badge — and a *refusal* inside
+    a row swap has nowhere to render the staleness notice.
 
     A row belonging to another collection is a 404 — the same non-disclosure `_get_owned_collection`
     makes one level up. A row that no longer exists is NOT a 404: another tab may have just accepted
@@ -2208,35 +2373,18 @@ async def collection_file_accept(
     )
     if owner_id is not None and owner_id != collection.id:
         raise HTTPException(status_code=404, detail="file not found")
+    return_scope = _parse_scope(return_dir, return_deep)
+    outcome: dict[str, int] = {}
     refused = await _guarded_accept(
-        session, collection, user, "accept-file", population_fp, file_id=file_id, origin=origin
+        session, collection, user, "accept-file", population_fp,
+        file_id=file_id, origin=origin, return_scope=return_scope, outcome=outcome,
     )
     if refused is not None:
         return refused
-    # Success and refusal land on the SAME surface (design D2): a fleet-page operator who is sent
-    # to a different page on every click has a worse dead end than the one `/review` removes.
-    return RedirectResponse(_review_return_base(collection_id, origin), status_code=303)
-
-
-@router.post(
-    "/collection/{collection_id}/review/ack-all",
-    dependencies=[Depends(verify_csrf)],
-)
-async def collection_review_ack_all(
-    collection_id: int,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-    user: User = Depends(current_user),
-):
-    """Acknowledge every open event in THIS collection (ack-only, no re-baseline), stay on review."""
-    collection = await _get_owned_collection(session, collection_id, user)
-    await session.execute(
-        update(Event)
-        .where(Event.collection_id == collection.id, Event.acknowledged_at.is_(None))
-        .values(acknowledged_at=datetime.now(timezone.utc), acknowledged_by=user.id)
-    )
-    await session.commit()
-    return RedirectResponse(f"/collection/{collection_id}/review", status_code=303)
+    # Success and refusal land on the SAME surface and scope.
+    response = RedirectResponse(_review_return(collection_id, origin, return_scope), status_code=303)
+    _set_done(response, outcome)
+    return response
 
 
 @router.post("/collection/{collection_id}/stamp-all", response_class=HTMLResponse, dependencies=[Depends(verify_csrf)])
@@ -2288,7 +2436,6 @@ async def collection_edit(
         "ots": collection.ots_mode,
         "cadence_seconds": str(collection.hash_cadence_seconds),
         "verify_cadence_seconds": str(collection.verify_cadence_seconds),
-        "auto_baseline_new": collection.auto_baseline_new,
         "excludes": "\n".join(json.loads(collection.exclude_globs_json or "[]")),
         "email_enabled": bool(email_cfg.get("enabled")),
         "email_to": ", ".join(email_cfg.get("to") or []),
@@ -2331,7 +2478,6 @@ async def collection_create(
     ots: str = Form("perfile"),
     cadence: str = Form("86400"),
     verify_cadence: str = Form("604800"),
-    auto_baseline: str = Form("off"),
     excludes: str = Form(""),
     email_enabled: bool = Form(False),
     email_to: str = Form(""),
@@ -2348,7 +2494,9 @@ async def collection_create(
         ots_mode=ots if ots in ("none", "perfile") else "none",
         hash_cadence_seconds=_safe_cadence(cadence, 86400),
         verify_cadence_seconds=_safe_cadence(verify_cadence, 604800),
-        auto_baseline_new=(auto_baseline == "on"),
+        # The form no longer offers this as a control (design D4): a new file is not work, so a
+        # collection created here graduates new files on its own.
+        auto_baseline_new=True,
         exclude_globs=_parse_excludes(excludes),
         alert=_build_alert(email_enabled, email_to),
     )
@@ -2367,7 +2515,6 @@ async def collection_update(
     ots: str = Form("perfile"),
     cadence: str = Form("86400"),
     verify_cadence: str = Form("604800"),
-    auto_baseline: str = Form("off"),
     excludes: str = Form(""),
     email_enabled: bool = Form(False),
     email_to: str = Form(""),
@@ -2385,7 +2532,6 @@ async def collection_update(
         ots_mode=ots if ots in ("none", "perfile") else "none",
         hash_cadence_seconds=_safe_cadence(cadence, 86400),
         verify_cadence_seconds=_safe_cadence(verify_cadence, 604800),
-        auto_baseline_new=(auto_baseline == "on"),
         exclude_globs=_parse_excludes(excludes),
         alert=_build_alert(email_enabled, email_to),
     )

@@ -232,12 +232,18 @@ def test_the_deep_tag_is_dropped_from_the_card_badge_at_phone_width():
     )
 
 
-def test_the_bulk_review_button_may_wrap_instead_of_overflowing_the_rail_card():
-    """#7: a nowrap button wider than its 390px card pushed the card off the right edge."""
+def test_the_bulk_accept_button_may_wrap_instead_of_overflowing_its_card():
+    """#7: a nowrap button wider than its 390px card pushed the card off the right edge.
+
+    The control that defect was found on (the dashboard's "Mark all N reviewed" pill) was removed
+    by unify-issue-model; the bulk controls an operator meets on a phone today are the review
+    page's "Accept N changes" / "Accept N deletions", whose labels grow with the count. They may
+    wrap, their rows wrap, and the toolbar that holds the page-wide pair wraps too.
+    """
     blocks = _media_blocks(768)
-    assert any("#open-events-pill .btn" in b and "white-space: normal" in b for b in blocks)
-    assert any("#open-events-pill { flex-wrap: wrap;" in b for b in blocks)
-    assert any(".row-between { flex-wrap: wrap;" in b for b in blocks)
+    assert any(".bulk-accept .btn" in b and "white-space: normal" in b for b in blocks)
+    for selector in (".bulk-accept", ".review-toolbar", ".issue-group__actions"):
+        assert any("flex-wrap: wrap" in body for body in _rule_bodies(selector)), selector
 
 
 def test_the_mono_root_path_cell_wraps_rather_than_clipping_on_a_phone():
@@ -280,9 +286,11 @@ async def _seed_file(cid: int, *, status: str) -> None:
         await s.commit()
 
 
-def test_the_card_legend_reports_the_baseline_comparison_not_a_notary_verdict(cairn_env):
+def test_the_card_legend_reports_the_integrity_result_not_a_notary_verdict(cairn_env):
     """#9: "verified" is the notary's word for a proof checked against Bitcoin. A scan compares
-    against the recorded baseline and confirms no proof at all."""
+    each file against what the last scan recorded and confirms no proof at all — so a clean card
+    states the integrity fact ("Nothing changed or missing") in the panel's issue vocabulary, and
+    no longer speaks of a "baseline" (unify-issue-model)."""
     root = cairn_env / "clean-collection"
     root.mkdir()
 
@@ -293,30 +301,12 @@ def test_the_card_legend_reports_the_baseline_comparison_not_a_notary_verdict(ca
     with _make_client(cairn_env, seed) as client:
         body = client.get("/").text
 
+    card = body.split('class="card card--flush card--hover collection-card"')[1]
+    legend = card.split('class="legend"')[1].split('class="collection-card__footer"')[0]
+    assert "Nothing changed or missing" in legend
+    assert "verified" not in legend.lower()
+    assert "baseline" not in legend.lower()
     assert "All files verified" not in body
-    assert "matching baseline" in body.lower()
-
-
-def test_the_alert_pills_say_unreviewed_rather_than_need_action(cairn_env):
-    """#12: "need action" overstated it — clearing the pill is a reading log, not a repair."""
-    async def seed():
-        from datetime import datetime, timezone
-
-        from src.database import get_sessionmaker
-        from src.models.db import Event
-
-        root = cairn_env / "pill-collection"
-        root.mkdir()
-        cid = await seed_collection(root)
-        async with get_sessionmaker()() as s:
-            s.add(Event(collection_id=cid, kind="missing", detected_at=datetime.now(timezone.utc)))
-            await s.commit()
-
-    with _make_client(cairn_env, seed) as client:
-        body = client.get("/").text
-
-    assert "unreviewed" in body
-    assert "need action" not in body
 
 
 def test_the_keyboard_activated_issue_count_answers_space_as_well_as_enter(cairn_env):
@@ -338,29 +328,43 @@ def test_the_keyboard_activated_issue_count_answers_space_as_well_as_enter(cairn
 # --- live-pass fixes: C1 (digest line) and W6 (dead log-out control) ---------------------------
 
 
-def _rule_body(selector: str) -> str:
-    """Body of the last top-level `selector { ... }` rule in panel.css."""
+def _rule_bodies(selector: str) -> list[str]:
+    """Bodies of EVERY `selector { ... }` rule in panel.css (base rule and media overrides)."""
     css = CSS_PATH.read_text()
     marker = f"{selector} {{"
-    idx = css.rfind(marker)
-    assert idx != -1, f"panel.css declares no `{selector}` rule"
-    start = idx + len(marker)
-    end = css.index("}", start)
-    return css[start:end]
+    bodies: list[str] = []
+    idx = css.find(marker)
+    while idx != -1:
+        start = idx + len(marker)
+        end = css.index("}", start)
+        bodies.append(css[start:end])
+        idx = css.find(marker, end)
+    assert bodies, f"panel.css declares no `{selector}` rule"
+    return bodies
 
 
 def test_the_changed_restore_digest_line_wraps_instead_of_ellipsizing():
     """C1: "recorded <64hex> → found <64hex>" is 146 characters and the only surviving record of
-    the pre-restore digest. On `.event-row__relpath` (nowrap + ellipsis) the second digest never
-    reached the screen, so it gets a line that wraps at any width."""
-    body = _rule_body(".event-row__detail")
+    the pre-restore digest. On a nowrap + ellipsis line the second digest never reached the screen,
+    so it gets a line that wraps at any width.
+
+    The line moved with the surface that carries it: the event feed is gone (unify-issue-model),
+    and the digests are now rendered on the file's review row, in `.review-row__detail`."""
+    bodies = _rule_bodies(".review-row__detail")
+    assert len(bodies) == 1, "one rule, so no override can re-introduce the clipping"
+    body = bodies[0]
     assert "white-space: normal" in body
     assert "overflow-wrap: anywhere" in body
     assert "nowrap" not in body, "the digest line must never clip"
     assert "text-overflow" not in body, "the digest line must never ellipsize"
-    # It is still a hash line: monospace, muted, and small enough not to shout over the path.
-    assert "var(--font-mono)" in body
+    assert "overflow: hidden" not in body, "the digest line must never clip"
+    # It is still a hash line: muted, small, and monospace — the face comes from the `mono` class
+    # the row template puts on the element.
     assert "var(--text-2)" in body
+    row = _rendered_text("partials/review_row.html")
+    assert 'class="review-row__detail mono"' in row
+    # And it is rendered for the kind it exists for, from the event's own recorded detail.
+    assert "it.kind == 'came_back' and it.detail" in row
 
 
 def test_single_mode_chrome_offers_no_log_out(cairn_env):
@@ -383,11 +387,19 @@ def test_single_mode_chrome_offers_no_log_out(cairn_env):
 
 
 def test_the_fleet_group_header_wraps_rather_than_clipping_on_a_phone():
-    """Live-pass W1 on add-fleet-review-and-run-health: at 390px the legend row measured 452px
-    inside an overflow-hidden card, cutting the per-group CTA mid-label."""
-    joined = "\n".join(_media_blocks(640))
-    assert ".review-list__legend" in joined
-    assert "flex-wrap: wrap" in joined
+    """Live-pass W1 on add-fleet-review-and-run-health: at 390px a group's header row measured
+    452px inside an overflow-hidden card, cutting the per-group CTA mid-label.
+
+    The fleet page was rebuilt (unify-issue-model): a collection's header is `.fleet-section__head`
+    and a folder group's is `.issue-group__head`. Both hold a title, counts and a control on one
+    flex row, so both must wrap — and on a phone a group's actions take a row of their own."""
+    for selector in (
+        ".fleet-section__head", ".fleet-section__title", ".issue-group__head", ".issue-group__title"
+    ):
+        assert any("flex-wrap: wrap" in body for body in _rule_bodies(selector)), selector
+    assert any(
+        ".issue-group__actions { width: 100%; }" in b for b in _media_blocks(768)
+    )
 
 
 # --- sprint 2 (#36, #41): the chrome's search control, and the badge's one render path ---------

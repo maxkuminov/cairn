@@ -212,12 +212,14 @@ server-rendered htmx, so there was never a separate JSON API to mount. `api/`, `
   `kind='scan'` runs count toward freshness. `interrupted` is the reaper's terminal state (a
   restart killed the run), kept distinct from a genuine `error`.
 - `events(id, collection_id, file_id, kind[added|modified|missing|restored|moved|restored_changed],
-  detail, detected_at, acknowledged_at, acknowledged_by)` — nag-until-accept lifecycle + the panel's
-  feed. **Only the alarming kinds nag**: `missing`, WORM `modified`, and `restored_changed`. The
+  detail, detected_at, acknowledged_at, acknowledged_by)` — the history of what scans found (the
+  dashboard's recent-activity summary reads it). **Only the alarming kinds nag**: `missing`, WORM `modified`, and `restored_changed`. The
   informational kinds (`added`, `restored`, `moved`) are written *already acknowledged*
-  (`acknowledged_by` NULL = a system ack), so routine activity shows in the feed without inflating
-  "needs action". `detail` carries context — `"old → new"` for a move, both digests for a
-  `restored_changed`.
+  (`acknowledged_by` NULL = a system ack), so they never keep an issue open. `detail` carries context — `"old → new"` for a move, both digests for a
+  `restored_changed`. An alarming event stays open until the issue it belongs to is resolved
+  (the file is accepted or restored); the panel never acknowledges an event by hand, and a scan
+  keeps any file that carries an open `modified` / `restored_changed` event recorded `modified`,
+  so an unaccepted change cannot become healthy by being deleted-and-restored or renamed.
 - `app_settings(key, value, updated_at)` — UI-editable global config (the SMTP server, the public
   panel address) overlaid over the env defaults at read time, **DB wins**; an empty table is pure
   env fallback.
@@ -280,20 +282,31 @@ monitor such as Uptime Kuma to poll. (The push-style Kuma notifier is scaffolded
 mechanism.) `CAIRN_SCHEDULER_ENABLED=0` gives a cron-only deployment driven by `cairn scan --once`.
 
 ### Web panel (pages, as built — the living spec is `openspec/specs/web-panel/`)
-- **dashboard** — per-collection status cards (resting status pill, live operation badge, last
-  scan, counts, proof coverage stated as a **ratio** rather than an unearned "all confirmed"), the
-  recent `events` feed with single and bulk acknowledge, and the health pill
+- **dashboard** — leads with **Needs you**: every collection with changed or missing files (Locked
+  collections first, then newest finding), or a plain all-clear; then summary tiles, per-collection
+  status cards (status pill stating what is wrong — "2 changed", "377 missing" — live operation
+  badge, last scan, counts, proof coverage stated as a **ratio** rather than an unearned "all
+  confirmed"), a read-only **recent activity** summary by day and collection, and the health pill.
+  The panel has one kind of open item — the **issue**, a file that is changed or missing — and one
+  count of them; the event log is history and is not acknowledged by hand
 - **collections** — the collection list
 - **collection detail** — a **Tree ⇄ List** file browser (tree default; one directory level per
   request, so the full set is never materialized — the list view is searched, filtered, sorted and
   paginated server-side), per-file status and proof state with the notarization date, and the
-  "Scan now" / "Stamp all" / re-baseline actions
+  "Scan now" / "Stamp all" actions (accepting is offered only on the review page)
 - **collection review** (`/collection/{id}/review`) — the "what happened to my files and what do I
-  do now" page: every missing + modified file with what happened, last seen, and whether a proof of
-  prior existence is held; per-file and collection-scoped acknowledge/accept; "Copy paths"; and a
-  **tool-neutral "How to recover" panel** — Cairn never restores files itself
-- **add / edit collection** — root (validated live, within the allowed base), mode, OTS mode,
-  exclude globs, scan + deep-verify cadences, auto-baseline, alert routing
+  do now" page: files first, **grouped by folder**, each row with what happened, when it was found,
+  when the file was last written, how often it has changed and whether a proof of prior existence
+  is held. One resolving action per kind, named for its outcome — **Accept change** / **Accept
+  deletion** — per file, per folder group and page-wide; a folder can be opened as its own scope
+  (`?dir=`). "Copy paths" and a **tool-neutral recovery guide** follow the list — Cairn never
+  restores files itself. Every accept is bound to the population it was rendered for (a
+  fingerprint recomputed under the write lock, including the folder scope)
+- **fleet review** (`/review`) — the same groups for every affected collection, ordered by what
+  most deserves attention; no action spans collections
+- **add / edit collection** — root (validated live, within the allowed base), change policy
+  (**Locked** / **Working** — stored as `worm` / `churn`), OTS mode, exclude globs, scan +
+  deep-verify cadences, alert routing
 - **verify** — **no upload**: search the tracked files that hold proofs, and Cairn re-hashes the
   file it already watches and checks the stored `.ots` against the configured block source. The
   result card names *which* outcome occurred — anchored, not yet anchored, digest disagreement,

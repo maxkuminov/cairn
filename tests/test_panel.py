@@ -1,5 +1,9 @@
-"""Control-panel routes: page renders, server-side file search/filter/pagination, htmx
-mutations (acknowledge / accept / scan), root validation, verify (ots mocked), and mode toggle.
+"""Control-panel routes: page renders, server-side file search/filter/pagination, the accept
+and scan mutations, root validation, verify (ots mocked), and mode toggle.
+
+The acknowledge routes and the "Baseline new files" action were removed by unify-issue-model;
+their replacement tests (the retired addresses answer 404/405 and mutate nothing, no surface
+offers to acknowledge or baseline) live in ``tests/test_issue_vocabulary.py``.
 
 Uses TestClient with CAIRN_SCHEDULER_ENABLED=0 and a temp DB, mirroring the healthz tests in
 tests/test_scheduler.py — including the reset_engine()-after-seed trick to avoid cross-loop
@@ -132,8 +136,9 @@ def _population_fp(collection_id: int, form: str, file_id: int | None = None) ->
     """The fingerprint the page publishes for one accept form (fix-ux-audit-sprint1 D14, #16, #30).
 
     Every accept route recomputes it under the write lock and refuses on any drift, so a POST
-    without it fails closed. Minted the way the page mints it — the wide read for that page,
-    narrowed purely to the form's own population — on a throwaway engine, so it can run while a
+    without it fails closed. Minted the way the page mints it — the ONE wide read, narrowed purely
+    to the form's own population (the two bulk forms at the collection-root folder scope, which is
+    what a POST without `dir`/`deep` fields submits) — on a throwaway engine, so it can run while a
     TestClient is live.
     """
     from sqlalchemy import event as sa_event
@@ -141,7 +146,6 @@ def _population_fp(collection_id: int, form: str, file_id: int | None = None) ->
 
     from src.config import get_settings
     from src.control_panel.routes import (
-        _FP_FORMS,
         _narrow,
         _population_fingerprint,
         _read_population,
@@ -155,11 +159,8 @@ def _population_fp(collection_id: int, form: str, file_id: int | None = None) ->
         try:
             async with AsyncSession(engine, expire_on_commit=False) as s:
                 collection = await s.get(Collection, collection_id)
-                read_scope, statuses = _FP_FORMS[form]
-                pop = await _read_population(s, collection, read_scope)
-                return _population_fingerprint(
-                    collection, _narrow(pop, form, statuses, file_id=file_id)
-                )
+                pop = await _read_population(s, collection)
+                return _population_fingerprint(collection, _narrow(pop, form, file_id=file_id))
         finally:
             await engine.dispose()
 
@@ -295,13 +296,14 @@ def test_files_search_matches_relpath(cairn_env):
         assert "1 matching" in r.text
 
 
-def test_new_only_collection_reads_all_clear_with_baseline_button(cairn_env):
+def test_new_only_collection_reads_all_clear_and_offers_no_baseline_action(cairn_env):
     """A collection whose only non-ok files are `new` (informational) is healthy, not "Attention".
 
-    Regression: `new` files used to force the collection status to "attention" with no way out (the
-    Accept button was gated on modified+missing only, and a scan never promotes new→ok). Now the
-    status reads "All clear" and a "Baseline new files" button is offered to move them into the
-    "Verified OK" count.
+    Regression: `new` files used to force the collection status to "attention" with no way out.
+    They then read "All clear" next to a "Baseline N new files" button; unify-issue-model (D4)
+    removed the button and its route, because a new file is watched from the scan that found it
+    and baselining it changes nothing about how it is watched — so the page must state the all
+    clear and offer nothing to do about the new files.
     """
     root = cairn_env / "newonly"
     root.mkdir()
@@ -315,14 +317,13 @@ def test_new_only_collection_reads_all_clear_with_baseline_button(cairn_env):
         assert r.status_code == 200
         assert "All clear" in r.text
         assert "Attention" not in r.text
-        # The baseline affordance is present (and labelled for new files, not "Accept changes").
-        assert "new file" in r.text and "Baseline" in r.text
-        assert "/collection/1/accept" in r.text
-        # Regression: the form must be a plain POST→redirect (a real page refresh), not an htmx
-        # hx-post with hx-swap="none" that silently discards the redirected page and leaves the UI
-        # stale after a successful re-baseline.
-        assert 'action="/collection/1/accept"' in r.text
-        assert 'hx-post="/collection/1/accept"' not in r.text
+        # The files are still on the page (the browser lists them) …
+        assert "new/file_00000.txt" in r.text
+        # … but nothing presents them as work: no baseline wording, no action, no form.
+        assert "baselin" not in r.text.lower()
+        assert "/collection/1/accept" not in r.text
+        assert "/collection/1/review" not in r.text  # nothing to review, so no review CTA either
+        assert "<form" not in r.text.split('class="stat-row"')[1].split('class="table-toolbar"')[0]
 
 
 def test_tripwire_hides_notarization_column(cairn_env):
@@ -340,181 +341,13 @@ def test_tripwire_hides_notarization_column(cairn_env):
         assert "Notarization" not in r.text
 
 
-# --- acknowledge ----------------------------------------------------------------------------
-
-
-def test_acknowledge_marks_event_and_returns_partial(cairn_env):
-    root = cairn_env / "ack"
-    root.mkdir()
-
-    async def seed():
-        cid = await _seed_collection(root, ots_mode="perfile")
-        await _seed_files(cid, n_ok=1, n_modified=0, n_missing=1)
-        await _seed_event(cid, "missing")
-
-    with _make_client(cairn_env, seed) as client:
-        token = _csrf_token(client)
-        # event id is 1
-        r = client.post("/events/1/ack", headers={"X-CSRF-Token": token})
-        assert r.status_code == 200, r.text
-        # The acknowledged row partial no longer offers the Acknowledge CTA.
-        assert "Acknowledge" not in r.text
-        # OOB swaps are present (sidebar badge + need-action pill containers).
-        assert "sidebar-alert-badge" in r.text and "open-events-pill" in r.text
-
-    # Confirm persisted.
-    async def check():
-        from src.database import get_sessionmaker
-        from src.models.db import Event
-
-        async with get_sessionmaker()() as s:
-            e = await s.get(Event, 1)
-            return e.acknowledged_at is not None
-
-    assert _run_check(check)
-
-
-def test_acknowledge_requires_csrf(cairn_env):
-    root = cairn_env / "csrf"
-    root.mkdir()
-
-    async def seed():
-        cid = await _seed_collection(root)
-        await _seed_event(cid, "missing")
-
-    with _make_client(cairn_env, seed) as client:
-        r = client.post("/events/1/ack")  # no token
-        assert r.status_code == 403
-
-
-# --- acknowledge all (bulk) -----------------------------------------------------------------
-
-
-async def _seed_other_user_event(root: Path, username: str) -> None:
-    """A second user with their own collection + one open event (for isolation tests)."""
-    from src.database import get_sessionmaker
-    from src.models.db import Event, User
-    from src.services.collections import create_collection
-
-    now = datetime.now(timezone.utc)
-    async with get_sessionmaker()() as s:
-        u = User(username=username, is_admin=False, is_active=True, created_at=now)
-        s.add(u)
-        await s.flush()
-        collection = await create_collection(
-            s, user_id=u.id, name=root.name, root=str(root), mode="worm", ots_mode="none"
-        )
-        s.add(Event(collection_id=collection.id, kind="missing", detected_at=now))
-        await s.commit()
-
-
-def test_ack_all_acks_open_events_and_refreshes(cairn_env):
-    root = cairn_env / "ackall"
-    root.mkdir()
-
-    async def seed():
-        cid = await _seed_collection(root, ots_mode="perfile")
-        await _seed_files(cid, n_ok=1, n_modified=1, n_missing=2)
-        await _seed_event(cid, "missing")
-        await _seed_event(cid, "missing")
-        await _seed_event(cid, "modified")
-
-    with _make_client(cairn_env, seed) as client:
-        # The bulk control is offered while events are open.
-        assert "/events/ack-all" in client.get("/").text
-        token = _csrf_token(client)
-        r = client.post("/events/ack-all", headers={"X-CSRF-Token": token})
-        assert r.status_code == 200, r.text
-        # Refreshed feed: no remaining Acknowledge CTAs, the pill cleared, OOB swaps present.
-        assert "Acknowledge" not in r.text
-        assert "need action" not in r.text
-        assert "sidebar-alert-badge" in r.text and "open-events-pill" in r.text
-
-    async def open_count():
-        from src.database import get_sessionmaker
-        from src.models.db import Event
-
-        async with get_sessionmaker()() as s:
-            return len(list(await s.scalars(
-                select(Event).where(Event.acknowledged_at.is_(None))
-            )))
-
-    assert _run_check(open_count) == 0
-
-
-def test_ack_all_requires_csrf(cairn_env):
-    root = cairn_env / "ackallcsrf"
-    root.mkdir()
-
-    async def seed():
-        cid = await _seed_collection(root)
-        await _seed_event(cid, "missing")
-
-    with _make_client(cairn_env, seed) as client:
-        r = client.post("/events/ack-all")  # no token
-        assert r.status_code == 403
-
-
-def test_ack_all_is_scoped_to_current_user(cairn_env):
-    mine = cairn_env / "mine"
-    mine.mkdir()
-    theirs = cairn_env / "theirs"
-    theirs.mkdir()
-
-    async def seed():
-        cid = await _seed_collection(mine, ots_mode="none")  # implicit user's collection
-        await _seed_event(cid, "missing")
-        await _seed_other_user_event(theirs, "bob")  # another user's open event
-
-    with _make_client(cairn_env, seed) as client:
-        token = _csrf_token(client)
-        r = client.post("/events/ack-all", headers={"X-CSRF-Token": token})
-        assert r.status_code == 200
-
-    async def open_flags():
-        from src.database import get_sessionmaker
-        from src.models.db import Collection, Event
-
-        async with get_sessionmaker()() as s:
-            out = {}
-            for cname in ("mine", "theirs"):
-                cid = await s.scalar(select(Collection.id).where(Collection.name == cname))
-                evs = list(await s.scalars(select(Event).where(Event.collection_id == cid)))
-                out[cname] = [e.acknowledged_at is None for e in evs]
-            return out
-
-    out = _run_check(open_flags)
-    assert out["mine"] == [False]   # current user's event acknowledged
-    assert out["theirs"] == [True]  # other user's event untouched
-
-
-def test_ack_all_button_hidden_when_nothing_open(cairn_env):
-    root = cairn_env / "noopen"
-    root.mkdir()
-
-    async def seed():
-        cid = await _seed_collection(root, ots_mode="perfile")
-        # An auto-acknowledged `added` event: in the feed, but not a nag.
-        from src.database import get_sessionmaker
-        from src.models.db import Event
-
-        now = datetime.now(timezone.utc)
-        async with get_sessionmaker()() as s:
-            s.add(Event(collection_id=cid, kind="added", detected_at=now, acknowledged_at=now))
-            await s.commit()
-
-    with _make_client(cairn_env, seed) as client:
-        html = client.get("/").text
-        assert "/events/ack-all" not in html  # no bulk control
-        assert "need action" not in html
-        assert "Acknowledge" not in html  # the acked `added` row offers no per-event CTA either
-
-
 # --- accept ---------------------------------------------------------------------------------
 
 
 def test_the_two_scoped_verbs_together_clear_the_review_page(cairn_env):
-    """What the retired "Accept all changes" did to `modified` + `missing`, now as two named verbs.
+    """What the retired "Accept all changes" did to `modified` + `missing`, now as two named verbs
+    ("Accept N changes" → `review/adopt-changed`, "Accept N deletions" → `review/stop-tracking`;
+    the route addresses kept their names).
 
     Each is submitted with its own fingerprint and acts on its own population only; the `ok` files
     are untouched by both, and no third population is swept up.
@@ -552,10 +385,8 @@ def test_the_two_scoped_verbs_together_clear_the_review_page(cairn_env):
         return statuses
 
     statuses = _run_check(check)
-    # modified/new → ok, missing removed: all remaining are ok, none modified/missing.
-    assert statuses, "files vanished"
-    assert all(s == "ok" for s in statuses)
-    assert "missing" not in statuses and "modified" not in statuses
+    # modified → ok, missing removed: the 2 ok + 3 accepted changes remain, nothing else.
+    assert sorted(statuses) == ["ok"] * 5
 
 
 # --- scan now ------------------------------------------------------------------------------
@@ -1028,6 +859,11 @@ async def _seed_missing_with_event(collection_id: int, relpath: str = "gone/phot
         return e.id
 
 
+def _text(html: str) -> str:
+    """Collapse whitespace so copy assertions do not depend on how the template wraps a line."""
+    return re.sub(r"\s+", " ", html)
+
+
 def test_review_page_lists_missing_file_with_story_and_recovery(cairn_env):
     root = cairn_env / "photos"
     root.mkdir()
@@ -1044,14 +880,26 @@ def test_review_page_lists_missing_file_with_story_and_recovery(cairn_env):
         assert "Gone from disk" in body                      # what-happened story
         assert "proof of prior existence kept" in body       # notarized note
         assert "Copy paths" in body and "Copy full paths" in body  # recovery affordance
-        assert "/collection/1/review/stop-tracking" in body  # the scoped bulk verb for `missing`
-        assert "/collection/1/review/ack-all" in body        # bulk acknowledge
         assert "2019/IMG_4421.jpg" in body                   # recovery copy list payload
-        # The two bulk actions are disambiguated, not two look-alike buttons: each carries a
-        # plain-English consequence pill so Acknowledge (note it) can't be confused with Accept
-        # (rewrite the baseline).
-        assert "Baseline unchanged" in body
-        assert "Rewrites your baseline" in body
+        # The one resolving action for a missing file, per row and in bulk, named for its outcome
+        # and labelled with the number of files it acts on.
+        assert "/collection/1/review/stop-tracking" in body
+        assert "/collection/1/file/1/accept" in body
+        assert re.search(r"<button[^>]*btn--danger-outline[^>]*>\s*Accept deletion\s*</button>", body)
+        assert "Accept 1 deletion</button>" in body
+        # Nothing is modified here, so no accept-change action is offered (an empty population
+        # gets no control): neither the bulk form nor a single accept-change button.
+        assert "/collection/1/review/adopt-changed" not in body
+        assert "btn--warn-outline" not in body
+        # The acknowledge verb is gone, with the look-alike pair of consequence pills that had to
+        # explain it ("Baseline unchanged" vs "Rewrites your baseline").
+        assert "/collection/1/review/ack-all" not in body
+        assert "/events/" not in body
+        for retired in ("Mark reviewed", "Acknowledge", "Baseline unchanged",
+                        "Rewrites your baseline", "Stop tracking", "unreviewed"):
+            assert retired not in body, retired
+        # The files come before the explanation of what the actions do.
+        assert body.index("IMG_4421.jpg") < body.index('id="review-help"')
 
 
 def test_review_recovery_copy_matches_what_a_changed_restore_actually_does(cairn_env):
@@ -1071,9 +919,16 @@ def test_review_recovery_copy_matches_what_a_changed_restore_actually_does(cairn
         await _seed_missing_with_event(cid, "2019/IMG_4421.jpg")
 
     with _make_client(cairn_env, seed) as client:
-        body = client.get("/collection/1/review").text
-        assert "closes the now-obsolete <em>missing</em> alert and replaces it with a new" in body
+        body = _text(client.get("/collection/1/review").text)
+        assert (
+            "the missing alert is closed and replaced by a new <em>came back different</em> issue"
+            in body
+        )
         assert "instead of clearing the old one" not in body
+        # And the one promise the page may make about a restore is made for MISSING files only:
+        # an identical file coming back closes its own issue; a changed file put back does not.
+        assert "If it matches, the missing alert closes by itself" in body
+        assert "putting an earlier version back shows up as one more change" in body
 
 
 def test_dashboard_issue_count_links_to_review(cairn_env):
@@ -1089,36 +944,7 @@ def test_dashboard_issue_count_links_to_review(cairn_env):
         assert "/collection/1/review" in html                # the card legend deep-links to review
 
 
-def test_review_acknowledge_marks_event_and_refreshes_counts(cairn_env):
-    root = cairn_env / "photos"
-    root.mkdir()
-
-    async def seed():
-        cid = await _seed_collection(root)
-        await _seed_missing_with_event(cid)
-
-    with _make_client(cairn_env, seed) as client:
-        token = _csrf_token(client)
-        r = client.post("/events/1/ack?view=review", headers={"X-CSRF-Token": token})
-        assert r.status_code == 200
-        assert "Reviewed" in r.text                           # row flipped to acked state
-        assert 'id="review-open-pill"' in r.text              # OOB pill refresh
-        assert 'id="sidebar-alert-badge"' in r.text           # OOB sidebar badge refresh
-
-    def check():
-        from src.database import get_sessionmaker
-        from src.models.db import Event
-
-        async def go():
-            async with get_sessionmaker()() as s:
-                e = await s.get(Event, 1)
-                return e.acknowledged_at
-        return go()
-
-    assert _run_check(check) is not None
-
-
-def test_stop_tracking_clears_issues_and_stays_on_review(cairn_env):
+def test_accept_deletions_clears_issues_and_stays_on_review(cairn_env):
     root = cairn_env / "photos"
     root.mkdir()
 
@@ -1137,9 +963,12 @@ def test_stop_tracking_clears_issues_and_stays_on_review(cairn_env):
                         follow_redirects=False)
         assert r.status_code == 303
         assert r.headers["location"] == "/collection/1/review"
-        # After accept, the review page is the all-clear empty state.
+        # After accept, the review page is the all-clear empty state …
         page = client.get("/collection/1/review").text
         assert "All clear" in page
+        assert "gone/photo.jpg" not in page
+        # … and the sidebar badge, which counts issues, has nothing left to count.
+        assert 'class="nav-badge"' not in page
 
 
 def test_review_empty_state_when_all_clear(cairn_env):
@@ -1154,7 +983,11 @@ def test_review_empty_state_when_all_clear(cairn_env):
         r = client.get("/collection/1/review")
         assert r.status_code == 200
         assert "All clear" in r.text
-        assert "Acknowledge all" not in r.text                 # no actions when nothing to review
+        # No actions when there is nothing to review: no toolbar, no accept form of either kind.
+        assert 'id="review-toolbar"' not in r.text
+        assert "/review/adopt-changed" not in r.text
+        assert "/review/stop-tracking" not in r.text
+        assert "/accept" not in r.text
 
 
 def test_legacy_corpus_urls_redirect_to_collection(cairn_env):
@@ -1176,40 +1009,6 @@ def test_legacy_corpus_urls_redirect_to_collection(cairn_env):
             assert r.headers["location"] == "/collections", (src, r.headers["location"])
         # And following the redirect fully lands on a 200.
         assert client.get("/corpus", follow_redirects=True).status_code == 200
-
-
-def test_auto_baseline_toggle_persists_through_form(cairn_env):
-    root = cairn_env / "abform"
-    root.mkdir()
-
-    with _make_client(cairn_env, lambda: _seed_collection(root)) as client:
-        token = _csrf_token(client)
-        # Turn the toggle ON via the edit form POST.
-        r = client.post(
-            "/collection/1",
-            headers={"X-CSRF-Token": token},
-            data={
-                "name": "abform", "root": str(root), "mode": "worm", "ots": "perfile",
-                "cadence": "900", "verify_cadence": "604800", "auto_baseline": "on",
-                "excludes": "", "email_enabled": "false", "email_to": "",
-            },
-            follow_redirects=False,
-        )
-        assert r.status_code == 303
-        # Edit form reflects the saved ON state.
-        html = client.get("/collection/1/edit").text
-        assert '<option value="on" selected' in html
-
-    def check():
-        from src.database import get_sessionmaker
-        from src.models.db import Collection
-
-        async def go():
-            async with get_sessionmaker()() as s:
-                return (await s.get(Collection, 1)).auto_baseline_new
-        return go()
-
-    assert _run_check(check) is True
 
 
 # --- alert-link hint honesty + branded errors -------------------------------------------------

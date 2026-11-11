@@ -1,0 +1,60 @@
+{% import "_macros.html" as m %}
+{# What the accept actions do, and how to get files back instead. Rendered AFTER the list of
+   files on every review surface: an operator arriving from an alert must reach the first file
+   without scrolling past instructions. `root` (optional) names the collection root for the
+   restore steps; `copy_note` (optional) is the truncated-copy-list notice.
+
+   Two claims are never made here (spec: "Issues are resolved by actions named for their outcome"):
+   that accepting a change can be undone by a rescan, and that accepting a deletion deletes a
+   proof. And one promise is never made: that restoring an EARLIER version of a changed file
+   clears its issue — the scan compares against the newest contents it recorded. #}
+<div class="card guide" id="review-help">
+  <div class="guide__grid">
+    <div>
+      <div class="guide__title">{{ m.icon("checkCircle", size=15, stroke=1.9) }} What the actions do</div>
+      <dl class="guide__terms">
+        <dt>Accept change</dt>
+        <dd>This is the file now. Cairn recorded the new contents when it found the change;
+          accepting clears the issue, and this change is not reported again. No earlier version is
+          kept on record to compare against.</dd>
+        <dt>Accept deletion</dt>
+        <dd>Cairn forgets the file: its record, its first-seen date and the link to its timestamp
+          proof are removed. Nothing on disk is deleted and the proof file stays in the proof store,
+          but the file is no longer listed under Verify.</dd>
+      </dl>
+    </div>
+    <div>
+      <div class="guide__title">{{ m.icon("download", size=15, stroke=1.9) }} To get files back instead</div>
+      <div class="guide__text">
+        Cairn watches your files read-only — it never restores them itself.
+        {% if copy_control|default(true) %}Copy the affected paths with <strong>Copy paths</strong>,{% else %}Open the collection's own review page to copy the affected paths,{% endif %}
+        restore them with your own backup tool (restic, Borg, rsync, Time Machine, a cloud sync…),
+        then run <strong>Scan now</strong> on the collection.
+      </div>
+      <ul class="guide__list">
+        <li>A <strong>missing</strong> file that comes back is re-read and compared against the
+          fingerprint recorded before it went missing. If it matches, the missing alert closes by
+          itself (a file that also had an unaccepted change stays listed as changed).
+          If it does not — the wrong snapshot, a truncated restore — the missing alert is closed
+          and replaced by a new <em>came back different</em> issue for you to check.</li>
+        <li>A <strong>changed</strong> file is compared against the newest contents Cairn recorded,
+          so putting an earlier version back shows up as one more change, which you then accept.</li>
+        <li>For files you don't want back, use <strong>Accept deletion</strong>.</li>
+      </ul>
+      {% if copy_note %}<div class="guide__text">{{ copy_note }}</div>{% endif %}
+      {% if root %}
+      <details class="recovery__more">
+        <summary>How to recover (any backup tool)</summary>
+        <ol class="recovery__steps">
+          <li>Copy the affected paths with the <strong>Copy paths</strong> button (relative to the collection root) or <strong>Copy full paths</strong>.</li>
+          <li>In your backup tool, restore exactly those paths to the collection root <span class="mono">{{ root }}</span>.</li>
+          <li>Run <strong>Scan now</strong> on the collection page. A missing file that reappeared with
+            the recorded contents returns to healthy; one whose contents differ is flagged
+            <em>came back different</em> — check that one before you trust it.</li>
+          <li>For anything you don't want back, use <strong>Accept deletion</strong> — for a folder, or one file at a time from its row.</li>
+        </ol>
+      </details>
+      {% endif %}
+    </div>
+  </div>
+</div>

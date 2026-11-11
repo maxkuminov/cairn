@@ -17,7 +17,7 @@
         {{ m.icon("folder", size=15, cls="text-3") }}
         <span class="tree-row__name mono">{{ d.name }}</span>
         {% if d.issues > 0 %}
-          <span class="tree-issue" title="{{ d.issues }} file(s) modified or missing beneath this folder">{{ m.dot("var(--danger)", size=7) }}</span>
+          <span class="tree-issue" title="{{ d.issues }} file(s) changed or missing beneath this folder">{{ m.dot("var(--danger)", size=7) }}</span>
         {% endif %}
         <span class="tree-row__count">{{ d.file_count_h }}</span>
       </button>

@@ -1,13 +1,14 @@
 {% import "_macros.html" as m %}
-{# The row renders on two surfaces: a collection's own review page and the fleet-wide `/review`.
-   `row_from` / `row_view` name which one, and BOTH default to the collection page so its rendered
-   markup is byte-for-byte what it was. They select a DESTINATION only — never the verb, which
-   stays a route constant, and never a URL, which the route whitelists to a fixed pair. #}
-{% set row_accept_q = "?from=fleet" if row_from|default("") == "fleet" else "" %}
-{% set row_ack_view = "fleet" if row_view|default("review") == "fleet" else "review" %}
+{# One issue: a file that changed, went missing, or came back different. Rendered on a
+   collection's review page and on the fleet-wide `/review`; `row_from` names which (it selects the
+   page an accept returns to — never the verb, which is a route constant, and never a URL, which
+   the route builds from a fixed pair). `r` is the review model the row belongs to: it supplies the
+   collection id and the scope the page was opened at. Everything the row shows about the file's
+   state, and the fingerprint its control carries, are slices of ONE snapshot. #}
+{% set row_q = "?from=fleet" if row_from|default("") == "fleet" else "" %}
 <div class="review-row" id="review-row-{{ it.id }}">
-  <div class="review-row__icon review-row__icon--{{ 'danger' if it.status == 'missing' else 'warn' }}">
-    {{ m.icon('minusCircle' if it.status == 'missing' else 'alert', size=16, stroke=2) }}
+  <div class="review-row__icon review-row__icon--{{ 'warn' if it.kind == 'changed' else 'danger' }}">
+    {{ m.icon('minusCircle' if it.kind == 'missing' else 'alert', size=16, stroke=2) }}
   </div>
   <div class="review-row__body">
     {# The full relpath is the only way to tell two same-named files apart; on desktop it is the
@@ -17,58 +18,67 @@
       <span class="review-row__name mono">{{ it.name }}</span>
     </div>
     <div class="review-row__story">
-      {% if it.status == 'missing' %}
-        Gone from disk — last seen {{ it.last_seen }} <span class="review-row__when">({{ it.last_seen_full }})</span>
+      {% if it.kind == 'missing' %}
+        <span>Gone from disk</span>
+        <span class="review-row__sep">·</span>
+        <span title="{{ it.found_full }}">found missing {{ it.found }}</span>
+      {% elif it.kind == 'came_back' %}
+        {# A file that was missing and came back with DIFFERENT bytes. Never drawn as an ordinary
+           change, and never as an arrival: this label is the one thing that tells "your file came
+           back" from "something else came back in its place". #}
+        <span class="review-row__alarm">Came back different</span>
+        <span class="review-row__sep">·</span>
+        <span title="{{ it.found_full }}">found {{ it.found }}</span>
       {% else %}
-        Contents changed — detected {{ it.detected }}
+        <span>Contents changed</span>
+        <span class="review-row__sep">·</span>
+        <span title="{{ it.found_full }}">found {{ it.found }}</span>
       {% endif %}
-      <span class="review-row__sep">·</span> {{ it.size }}
+      {# When the file itself was last written — the fact that answers "was that me?". #}
+      {% if it.kind != 'missing' and it.written %}
+        <span class="review-row__sep">·</span>
+        <span title="{{ it.written_full }}">file last written {{ it.written }}</span>
+      {% endif %}
+      <span class="review-row__sep">·</span> <span>{{ it.size }}</span>
+      {% if it.changes and it.changes > 1 %}
+        <span class="review-row__sep">·</span>
+        <span class="review-row__repeat">changed {{ it.changes }} times since {{ it.changes_since }}</span>
+      {% endif %}
       {% if it.notarized %}
-        <span class="review-row__proof" title="An OpenTimestamps proof attests this file existed before it was lost — it survives even though the bytes are gone.">{{ m.icon('bitcoin', size=12) }} proof of prior existence kept</span>
+        <span class="review-row__proof" title="An OpenTimestamps proof attests that an earlier version of this file existed. It is kept whatever you decide here.">{{ m.icon('bitcoin', size=12) }} proof of prior existence kept</span>
       {% endif %}
     </div>
+    {# Both digests (recorded → found), in full and wrapping at any width: this line is the only
+       surviving record of what the file was before it came back. #}
+    {% if it.kind == 'came_back' and it.detail %}<div class="review-row__detail mono">{{ it.detail }}</div>{% endif %}
   </div>
   <div class="review-row__action">
-    {# Per-row accept (#30 / design D6+D10). Rendered only with a fingerprint to carry: the row's
-       own, sliced from the same snapshot the row was rendered from, so this form is bound to THIS
-       record's generation and cannot validate a POST at another row's address. The endpoint fails
-       closed on an absent field, so a context without one simply offers no control.
-       Styled apart from Mark reviewed on purpose: `btn--subtle` is already the row's
-       changes-nothing control, so a look-alike accept beside it is the exact collision the
-       contrast card exists to prevent. The path rides a data attribute rather than the confirm
-       string so a quote in a filename cannot break the confirm. #}
+    {# The row's own accept. Rendered only with a fingerprint to carry — the row's own, sliced from
+       the snapshot the row was rendered from — so the form is bound to THIS record's generation
+       and cannot validate a POST at another row's address. The endpoint fails closed on an absent
+       field. Quiet outline controls, coloured by kind: a column of filled red buttons trains the
+       eye to stop reading them. The path rides a data attribute, not the confirm string, so a
+       quote in a filename cannot break the confirm. #}
     {% if it.fp and csrf_token %}
-      <form method="post" action="/collection/{{ c.id }}/file/{{ it.id }}/accept{{ row_accept_q }}" style="display:inline"
+      <form method="post" action="/collection/{{ r.collection_id }}/file/{{ it.id }}/accept{{ row_q }}" style="display:inline"
             data-relpath="{{ it.relpath }}"
-            onsubmit="return confirm({% if it.status == 'missing' %}'Stop tracking ' + this.dataset.relpath + '? Its record is permanently removed from Cairn — path, first-seen date, and the link to its timestamp proof. Nothing on disk is deleted and the .ots proof file stays in the proof store.'{% else %}'Adopt the current contents of ' + this.dataset.relpath + ' as correct from now on? This change will not be reported again.'{% endif %});">
+            onsubmit="return confirm({% if it.status == 'missing' %}'Accept the deletion of ' + this.dataset.relpath + '?\n\nIts record is removed from Cairn — path, first-seen date and the link to its timestamp proof. Nothing on disk is deleted and no proof file is deleted.'{% else %}'Accept ' + this.dataset.relpath + ' as it is now?\n\nThis change will not be reported again.'{% endif %});">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
         <input type="hidden" name="population_fp" value="{{ it.fp }}" />
+        <input type="hidden" name="return_dir" value="{{ r.scope_dir }}" />
+        <input type="hidden" name="return_deep" value="{{ '1' if r.scope_deep else '0' }}" />
         {% if it.status == 'missing' %}
-          <button class="btn btn--sm btn--danger" type="submit"
-                  title="Permanently removes this file from Cairn's records — its path, first-seen date, and the link to its timestamp proof. Nothing on disk is deleted and the .ots proof file stays in the proof store.">
-            {{ m.icon('minusCircle', size=14, stroke=2) }} Stop tracking this file
+          <button class="btn btn--sm btn--danger-outline" type="submit"
+                  title="Cairn forgets this file: its record, first-seen date and the link to its timestamp proof are removed. Nothing on disk is deleted and the proof file stays in the proof store.">
+            Accept deletion
           </button>
         {% else %}
           <button class="btn btn--sm btn--warn-outline" type="submit"
-                  title="Treats the current contents as correct from now on. Cairn recorded and notarized the new contents when it detected the change; this stops the alert. You won't be told about this change again.">
-            {{ m.icon('refresh', size=14, stroke=2) }} Adopt this change
+                  title="This is the file now. Cairn recorded the new contents when it found the change; accepting clears the issue and this change is not reported again.">
+            Accept change
           </button>
         {% endif %}
       </form>
-    {% endif %}
-    {% if it.acked %}
-      <span class="pill pill--soft pill--muted pill--sm">{{ m.icon('check', size=12, stroke=2) }} Reviewed</span>
-    {% else %}
-      {# Style un-inverted (design D8): marking a row reviewed is a reading-log write that changes
-         nothing about the file, so it is never the loud button — the accept beside it is.
-         The hint rides as this control's tooltip and is shown once in full above the list;
-         repeating the paragraph on up to 500 rows would bury it. #}
-      <button class="btn btn--sm btn--subtle"
-              title="Notes that you've seen this. The file stays on record as missing or changed, keeps any existence proof, and the collection keeps its Alert status until you restore or retire it."
-              hx-post="/events/{{ it.event_id }}/ack?view={{ row_ack_view }}"
-              hx-target="#review-row-{{ it.id }}" hx-swap="outerHTML">
-        {{ m.icon('check', size=14, stroke=2) }} Mark reviewed
-      </button>
     {% endif %}
   </div>
 </div>

@@ -2,6 +2,9 @@
 {% import "_macros.html" as m %}
 {% block title %}Dashboard · Cairn{% endblock %}
 {% block content %}
+{# The dashboard answers one question first: does anything need me? (unify-issue-model D10).
+   Order: needs-you → summary tiles → collections → recent activity. It carries NO control that
+   acts on an event or a file: resolving happens on a review page, where the files are listed. #}
 <div class="page-header">
   <div>
     <h1>Dashboard</h1>
@@ -9,12 +12,9 @@
   </div>
   <div class="page-header__actions">
     {# Plain POST→303 redirect (not htmx): the scan refreshes the whole dashboard, so let the redirect
-       reload it. An htmx hx-post with hx-swap="none" would discard the redirected page and never update. #}
-    {# The control fans out over EVERY collection the operator owns (a multi-TiB walk on a real
-       host), so it says so in its label and names the count before it acts. The count is the
-       render-time snapshot deliberately: the POST scans whatever is owned at execution time, and
-       a scan is read-only detection, so a collection added since this page rendered is exactly
-       what the operator wants scanned — no fingerprint, no drift check (design D5). #}
+       reload it. The control fans out over EVERY collection the operator owns, so it says so in its
+       label and names the count before it acts. The count is the render-time snapshot deliberately:
+       the POST scans whatever is owned at execution time, and a scan is read-only detection. #}
     <form method="post" action="/scan" style="display:inline"
           onsubmit="return confirm('Scan all {{ collections|length }} collection{{ '' if collections|length == 1 else 's' }} now?')">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
@@ -23,32 +23,65 @@
   </div>
 </div>
 
-{# Summary tiles #}
+{# --- Needs you ----------------------------------------------------------------------------
+   `needs_total` is the sidebar badge's number, from the same definition, so the two agree. #}
+{% if needs_total > 0 %}
+  <section class="card card--flush needs" id="needs-you">
+    <div class="needs__head">
+      <div>
+        <h2 class="needs__title">{{ m.icon("alert", size=17, stroke=2) }} Needs you</h2>
+        <div class="needs__sub">
+          <strong id="needs-total">{{ "{:,}".format(needs_total) }}</strong> file{{ "" if needs_total == 1 else "s" }}
+          {{ "needs" if needs_total == 1 else "need" }} a decision —
+          {{ "{:,}".format(needs_missing) }} missing · {{ "{:,}".format(needs_modified) }} changed
+        </div>
+      </div>
+      {% if needs|length > 1 %}
+        <a class="btn btn--sm btn--subtle" href="/review">Review everything {{ m.icon("chevronR", size=12) }}</a>
+      {% endif %}
+    </div>
+    {% for n in needs %}
+      <a class="needs__row" href="/collection/{{ n.id }}/review">
+        <div class="needs__main">
+          <div class="needs__name">
+            <span>{{ n.name }}</span>
+            <span class="pill pill--soft pill--muted pill--sm" title="{{ n.policy.short }}. {{ n.policy.flags }}">{{ n.policy.label }}</span>
+          </div>
+          <div class="needs__facts">
+            {% if n.modified %}<span class="legend__stat">{{ m.dot("var(--warn)", size=7) }}{{ "{:,}".format(n.modified) }} changed</span>{% endif %}
+            {% if n.missing %}<span class="legend__stat">{{ m.dot("var(--danger)", size=7) }}{{ "{:,}".format(n.missing) }} missing</span>{% endif %}
+            <span class="needs__when">newest found {{ n.found }}</span>
+          </div>
+          {% if n.folders %}
+            <div class="needs__folders mono">
+              {% for f in n.folders %}<span>{{ f.label }}{% if n.folders|length > 1 or n.more_folders %} <em>{{ "{:,}".format(f.count) }}</em>{% endif %}</span>{% endfor %}
+              {% if n.more_folders %}<span class="needs__morefolders">+{{ n.more_folders }} more folder{{ "" if n.more_folders == 1 else "s" }}</span>{% endif %}
+            </div>
+          {% endif %}
+        </div>
+        <span class="needs__cta">Review {{ m.icon("chevronR", size=12) }}</span>
+      </a>
+    {% endfor %}
+  </section>
+{% elif any_files %}
+  <section class="needs needs--clear" id="needs-you">
+    <span class="needs__clear-icon">{{ m.icon("checkCircle", size=17, stroke=2) }}</span>
+    <span><strong>Nothing needs you.</strong> No files are changed or missing.</span>
+  </section>
+{% elif collections %}
+  {# Nothing indexed is not all clear: nothing has been checked yet. #}
+  <section class="needs needs--empty" id="needs-you">
+    <span class="needs__clear-icon">{{ m.icon("folder", size=17, stroke=2) }}</span>
+    <span><strong>No files indexed yet.</strong> Run a scan to start watching your collections.</span>
+  </section>
+{% endif %}
+
+{# --- Summary tiles --- #}
 <div class="tiles">
   <div class="card tile">
     <div class="tile__label">{{ m.icon("file", size=16, stroke=1.9) }}<span>Files monitored</span></div>
     <div class="tile__value">{{ tiles.files }}</div>
     <div class="tile__sub">{{ tiles.files_sub }}</div>
-  </div>
-  {% if tiles.issues > 0 and tiles.issues_href %}
-    <a class="card tile tile--link" href="{{ tiles.issues_href }}">
-      <div class="tile__label">{{ m.icon("alert", size=16, stroke=1.9) }}<span>Open issues</span></div>
-      <div class="tile__value" style="color:{{ tiles.issues_color }}">{{ tiles.issues }}</div>
-      <div class="tile__sub">{{ tiles.issues_sub }} <span class="tile__cta">· Review {{ m.icon("chevronR", size=11) }}</span></div>
-    </a>
-  {% else %}
-    <div class="card tile">
-      <div class="tile__label">{{ m.icon("alert", size=16, stroke=1.9) }}<span>Open issues</span></div>
-      <div class="tile__value" style="color:{{ tiles.issues_color }}">{{ tiles.issues }}</div>
-      <div class="tile__sub">{{ tiles.issues_sub }}</div>
-    </div>
-  {% endif %}
-  {# `Total ≠ OK + issues` was unexplained: `new` files are watched and notarized but not yet
-     baselined, and nothing on the dashboard said so. #}
-  <div class="card tile">
-    <div class="tile__label">{{ m.icon("file", size=16, stroke=1.9) }}<span>New files</span></div>
-    <div class="tile__value" style="color:{{ 'var(--accent)' if tiles.new > 0 else 'var(--text-3)' }}">{{ tiles.new }}</div>
-    <div class="tile__sub">{{ tiles.new_sub }}</div>
   </div>
   <div class="card tile">
     <div class="tile__label">{{ m.icon("bitcoin", size=16, stroke=1.9) }}<span>Proofs anchored</span></div>
@@ -62,34 +95,29 @@
   </div>
 </div>
 
-<div class="dash-grid" id="collections">
-  {# Left: collection cards #}
-  <div class="collection-cards">
-    <div class="section-label">Collections</div>
-    {% for c in collections %}
-      {% include "partials/_collection_card.html" %}
-    {% endfor %}
-    {% if not collections %}
-      <div class="card empty-state">No collections yet. <a href="/collection/new">Add one</a> to start monitoring.</div>
-    {% endif %}
-  </div>
+{# --- Collections --- #}
+<div class="section-label" id="collections">Collections</div>
+<div class="collection-grid">
+  {% for c in collections %}
+    {% include "partials/_collection_card.html" %}
+  {% endfor %}
+  {% if not collections %}
+    <div class="card empty-state">No collections yet. <a href="/collection/new">Add one</a> to start monitoring.</div>
+  {% endif %}
+</div>
 
-  {# Right rail: recent events #}
-  <div class="right-rail">
-    <div class="card" style="padding:18px">
-      <div class="row-between" style="margin-bottom:4px">
-        <h3 style="font-size:14.5px">Recent events</h3>
-        <span id="open-events-pill" style="display:flex;gap:6px;align-items:center">
-          {% include "partials/_events_controls.html" %}
-        </span>
-      </div>
-      <div id="events-feed">
-        {% for e in events %}
-          {% include "partials/_event_row.html" %}
-        {% endfor %}
-        {% if not events %}<div class="empty-state">No events recorded yet.</div>{% endif %}
-      </div>
-    </div>
-  </div>
+{# --- Recent activity: a read-only summary of the event log by day and collection --- #}
+<div class="section-label" style="margin-top:26px">Recent activity</div>
+<div class="card card--flush activity" id="recent-activity">
+  {% for a in activity %}
+    <a class="activity__row" href="/collection/{{ a.collection_id }}">
+      <span class="activity__day">{{ a.day }}</span>
+      <span class="activity__collection">{{ a.collection }}</span>
+      <span class="activity__parts">
+        {% for p in a.parts %}<span class="activity__part{{ ' activity__part--alarm' if p.alarm }}">{{ p.text }}</span>{% endfor %}
+      </span>
+    </a>
+  {% endfor %}
+  {% if not activity %}<div class="empty-state">Nothing recorded in the last 30 days.</div>{% endif %}
 </div>
 {% endblock %}

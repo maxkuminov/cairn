@@ -66,7 +66,7 @@
 {% macro status_badge(status, size="md") -%}
 {%- set meta = {
   "ok": ("OK", "ok", "checkCircle"),
-  "modified": ("Modified", "warn", "alert"),
+  "modified": ("Changed", "warn", "alert"),
   "missing": ("Missing", "danger", "minusCircle"),
   "new": ("New", "accent", "plus"),
   "added": ("Added", "accent", "plus"),
@@ -206,4 +206,40 @@
 {%- elif c.latest_run_result == "error" -%}
   <div class="run-health run-health--danger">{{ icon("x", size=12, stroke=2) }} a later scan failed &mdash; check the logs; it will re-run on the next cadence</div>
 {%- endif -%}
+{%- endmacro %}
+
+{# One bulk accept control (unify-issue-model D2/D6): "Accept N changes" or "Accept N deletions"
+   for one folder scope of one collection. `a` is the action dict the route minted — count,
+   fingerprint, folder scope and how many of its files are NOT shown on the page — all from the
+   same slice of the same snapshot, so the number on the button, the population hashed and the
+   population mutated are one statement. Renders nothing for an empty population.
+
+   The scope fields are hidden inputs, so they are operator-controlled bytes at submit time: the
+   route binds them into the fingerprint and refuses a mismatch. `where` (the folder, for the
+   confirm) rides a data attribute so a quote in a folder name cannot break the confirm string.
+   When the action covers files the page does not list, the hint AND the confirm say how many. #}
+{% macro bulk_accept(kind, a, r, where, from_q, csrf_token) -%}
+{%- if a and csrf_token %}
+  {%- set n = a.count %}
+  {%- set s = "" if n == 1 else "s" %}
+  <form method="post" class="bulk-accept"
+        action="/collection/{{ r.collection_id }}/review/{{ 'adopt-changed' if kind == 'changes' else 'stop-tracking' }}{{ from_q }}"
+        data-where="{{ where }}"
+        onsubmit="return confirm({% if kind == 'changes' %}'Accept {{ '{:,}'.format(n) }} changed file{{ s }} in ' + this.dataset.where + ' as {{ 'it is' if n == 1 else 'they are' }} now?\n\n{{ 'This change' if n == 1 else 'These changes' }} will not be reported again.{% if a.hidden %}\n\n{{ '{:,}'.format(a.hidden) }} of them {{ 'is' if a.hidden == 1 else 'are' }} not shown on this page.{% endif %}'{% else %}'Accept the deletion of {{ '{:,}'.format(n) }} file{{ s }} in ' + this.dataset.where + '?\n\n{{ 'Its record is' if n == 1 else 'Their records are' }} removed from Cairn — path, first-seen date and the link to the timestamp proof. Nothing on disk is deleted and no proof file is deleted.{% if a.hidden %}\n\n{{ '{:,}'.format(a.hidden) }} of them {{ 'is' if a.hidden == 1 else 'are' }} not shown on this page.{% endif %}'{% endif %});">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <input type="hidden" name="population_fp" value="{{ a.fp }}" />
+    <input type="hidden" name="dir" value="{{ a.dir }}" />
+    <input type="hidden" name="deep" value="{{ a.deep }}" />
+    <input type="hidden" name="return_dir" value="{{ r.scope_dir }}" />
+    <input type="hidden" name="return_deep" value="{{ '1' if r.scope_deep else '0' }}" />
+    {% if kind == 'changes' -%}
+      <button class="btn btn--sm btn--warn-outline" type="submit"
+              title="{% if n == 1 %}This is the file now. Cairn recorded the new contents when it found the change; accepting clears the issue and this change is not reported again.{% else %}These are the files now. Cairn recorded the new contents when it found each change; accepting clears the issues and these changes are not reported again.{% endif %}">Accept {{ "{:,}".format(n) }} change{{ s }}</button>
+    {%- else -%}
+      <button class="btn btn--sm btn--danger-outline" type="submit"
+              title="{% if n == 1 %}Cairn forgets this file: its record, first-seen date and the link to its timestamp proof are removed. Nothing on disk is deleted and the proof file stays in the proof store.{% else %}Cairn forgets these files: their records, first-seen dates and the links to their timestamp proofs are removed. Nothing on disk is deleted and the proof files stay in the proof store.{% endif %}">Accept {{ "{:,}".format(n) }} deletion{{ s }}</button>
+    {%- endif %}
+    {% if a.hidden %}<span class="bulk-accept__hidden">includes {{ "{:,}".format(a.hidden) }} not shown here</span>{% endif %}
+  </form>
+{%- endif %}
 {%- endmacro %}

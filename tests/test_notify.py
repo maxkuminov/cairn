@@ -595,7 +595,7 @@ def test_smtp_with_link_is_multipart_with_anchor(cairn_env, monkeypatch):
     assert "Photos" in plain and "1 missing" in plain
     assert "2026-05-31T12:00:00+00:00" in plain
     assert "a/lost.jpg" in plain
-    assert f"Review and acknowledge: {_REVIEW_URL}" in plain
+    assert f"Review and resolve: {_REVIEW_URL}" in plain
 
     html_part = msg.get_body(preferencelist=("html",)).get_content()
     assert f'href="{_REVIEW_URL}"' in html_part
@@ -622,7 +622,7 @@ _LINK_FREE_MESSAGE = (
     b"Affected files:\n"
     b"  - a/lost.jpg\n"
     b"\n"
-    b"Review and acknowledge in the Cairn panel.\n"
+    b"Review and resolve in the Cairn panel.\n"
 )
 
 

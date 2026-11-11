@@ -344,11 +344,8 @@
 .btn--subtle { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
 .btn--ghost { background: transparent; color: var(--text-2); border: 1px solid transparent; }
 .btn--danger { background: var(--danger); color: #fff; border: 1px solid transparent; }
-/* Per-row Adopt (design D10). `btn--subtle` is already the row's Mark-reviewed control — which
-   changes nothing about the file — so a `btn--subtle` per-row accept would be visually identical
-   to it, the exact collision the contrast card exists to prevent. Amber-outlined over the existing
-   `--warn` token: distinct at a glance, quieter than the record-deleting `btn--danger`, no new
-   colour. */
+/* The quiet, amber-outlined accept for a CHANGED file (rows and bulk). Its red sibling,
+   `btn--danger-outline`, is the accept that removes a record. */
 .btn--warn-outline { background: transparent; color: var(--warn); border: 1px solid color-mix(in oklch, var(--warn) 55%, var(--border)); }
 .btn--warn-outline:hover { background: var(--warn-soft); }
 
@@ -496,11 +493,8 @@
 .tile__value { font-family: var(--font-head); font-size: 30px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; }
 .tile__sub { font-size: 12px; color: var(--text-3); margin-top: 7px; }
 
-.dash-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 22px; align-items: start; }
 /* Standalone /collections page: responsive card grid that collapses to one column when narrow. */
 .collections-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; align-items: start; }
-.collection-cards { display: flex; flex-direction: column; gap: 16px; }
-.right-rail { display: flex; flex-direction: column; gap: 18px; }
 
 .collection-card__head { padding: 18px 20px 16px; }
 .collection-card__title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
@@ -518,23 +512,6 @@
   border-top: 1px solid var(--border);
 }
 
-.event-row { display: flex; gap: 11px; padding: 12px 0; border-bottom: 1px solid var(--border); }
-.event-row:last-child { border-bottom: none; }
-.event-icon {
-  width: 30px;
-  height: 30px;
-  border-radius: 999px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.event-row__body { flex: 1; min-width: 0; }
-.event-row__title { display: flex; align-items: center; gap: 7px; margin-bottom: 2px; }
-.event-row__kind { font-size: 12.5px; font-weight: 600; }
-.event-row__time { font-size: 11.5px; color: var(--text-3); margin-left: auto; }
-.event-row__relpath { font-size: 11.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.event-row__collection { font-size: 11px; color: var(--text-3); margin-top: 3px; }
 
 /* ---------- Collection detail ---------- */
 .meta-strip { display: flex; flex-wrap: wrap; }
@@ -758,7 +735,6 @@
   .content { padding: 18px 14px 48px; }
 
   /* Stack the two-column layouts. */
-  .dash-grid { grid-template-columns: 1fr; gap: 18px; }
   .form-grid-2 { grid-template-columns: 1fr; }
   .detail-row { grid-template-columns: 1fr; gap: 6px; }
   .detail-row__label { font-size: 12px; }
@@ -786,9 +762,6 @@
   /* #7: "Mark all N reviewed (all collections)" is a nowrap button wider than the rail-card row it
      sits in, so it overflowed the card off the right edge on a 390px screen. Let the header row and
      the control group wrap, and let this button's own label wrap rather than stay one long line. */
-  .row-between { flex-wrap: wrap; row-gap: 8px; }
-  #open-events-pill { flex-wrap: wrap; max-width: 100%; }
-  #open-events-pill .btn { white-space: normal; text-align: left; max-width: 100%; }
 
   /* File rows reflow from the fixed 5-column grid into a stacked card: the filename gets the full
      first line (it was being crushed to ~0 width by the fixed metadata columns — invisible in the
@@ -820,13 +793,11 @@
   /* Single-column grid items default to min-width:auto, so the collection card's nowrap root path
      blows the column wider than the viewport (cards clip off the right edge). Let them shrink
      below their content width so the path ellipsizes within the card instead. */
-  .dash-grid > *,
   .collections-grid > * { min-width: 0; }
 }
 
 /* ---------- Misc utility ---------- */
 .dimmed { opacity: 0.45; pointer-events: none; transition: opacity 0.15s; }
-.row-between { display: flex; align-items: center; justify-content: space-between; }
 .flex { display: flex; }
 .flex-center { display: flex; align-items: center; }
 .gap-8 { gap: 8px; }
@@ -892,12 +863,7 @@
 @media (prefers-reduced-motion: reduce) { .op-badge__pulse { animation: none; } }
 
 /* --- issue review + recovery (add-issue-review-and-recovery) ------------------------------- */
-.recovery { padding: 18px 20px; margin-bottom: 20px; }
-.recovery__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.recovery__title { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14.5px; color: var(--text); }
-.recovery__actions { display: inline-flex; align-items: center; gap: 8px; }
 .recovery__copied { font-size: 12px; font-weight: 600; color: var(--ok); }
-.recovery__hint { margin-top: 10px; font-size: 12.5px; line-height: 1.55; color: var(--text-2); }
 .recovery__more { margin-top: 12px; }
 .recovery__more > summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--accent); width: fit-content; }
 .recovery__steps { margin: 10px 0 0; padding-left: 20px; font-size: 12.5px; line-height: 1.7; color: var(--text-2); }
@@ -905,7 +871,6 @@
 
 .review-list__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 18px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
 .review-list__head h3 { font-size: 14.5px; }
-.review-list__legend { display: inline-flex; gap: 14px; font-size: 12px; }
 .review-list__more { padding: 13px 18px; font-size: 12px; color: var(--text-3); border-top: 1px solid var(--border); }
 
 .review-row { display: flex; align-items: center; gap: 13px; padding: 13px 18px; border-bottom: 1px solid var(--border); }
@@ -932,26 +897,6 @@
   .review-row__path { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.45; }
 }
 
-/* --- resolve choices: Acknowledge vs Accept, each shown next to its consequence --- */
-.resolve { padding: 18px 20px; margin-bottom: 20px; }
-.resolve__head { font-weight: 600; font-size: 14.5px; color: var(--text); display: inline-flex; align-items: center; gap: 8px; }
-.resolve__sub { margin-top: 5px; font-size: 12.5px; line-height: 1.55; color: var(--text-2); }
-.resolve__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
-.resolve__opt { border: 1px solid var(--border); border-radius: var(--radius); padding: 15px 16px; display: flex; flex-direction: column; gap: 12px; }
-.resolve__opt--accept { border-color: color-mix(in oklch, var(--warn) 35%, var(--border)); background: color-mix(in oklch, var(--warn-soft) 40%, var(--surface)); }
-.resolve__opt-head { display: flex; align-items: flex-start; gap: 11px; }
-.resolve__chip { width: 31px; height: 31px; border-radius: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-.resolve__chip--ack { color: var(--accent); background: var(--accent-soft); }
-.resolve__chip--accept { color: var(--warn); background: var(--warn-soft); }
-.resolve__verb + .resolve__verb { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
-.resolve__opt-title { font-weight: 600; font-size: 13.5px; color: var(--text); margin-bottom: 5px; }
-.resolve__opt-desc { font-size: 12.5px; line-height: 1.6; color: var(--text-2); flex: 1; }
-.resolve__opt form { margin-top: auto; }
-.resolve__done { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-3); margin-top: auto; padding: 7px 0; }
-
-@media (max-width: 720px) {
-  .resolve__grid { grid-template-columns: 1fr; }
-}
 
 /* clickable issue affordances -> review page */
 .legend__review { display: inline-flex; align-items: center; gap: 14px; cursor: pointer; border-radius: var(--radius-sm); padding: 2px 7px; margin: -2px -7px; transition: background 0.14s; }
@@ -1000,12 +945,6 @@
 /* Diagnostic sub-line under a verdict that outranks a recorded transport failure. */
 .verdict__note { font-size: 12.5px; color: var(--text-3); margin-top: 5px; line-height: 1.45; }
 
-/* --- ux-audit sprint 1: tiles & links (slice B) --- */
-/* The dashboard "Open issues" tile becomes a link at issues > 0 (#18), reusing the hover treatment
-   the collection page's `.mini-stat--link` already uses so the two red stats read as one pattern. */
-.tile--link { display: block; text-decoration: none; color: inherit; transition: border-color 0.14s, box-shadow 0.14s; }
-.tile--link:hover { border-color: var(--danger); box-shadow: var(--shadow-lg); }
-.tile__cta { color: var(--danger); font-weight: 600; white-space: nowrap; }
 
 /* --- live-pass fixes: shared clipboard feedback ------------------------------------------- */
 /* Result line for `window.cairnCopy` (partials/_clipboard.html). Green by default; the helper
@@ -1013,28 +952,120 @@
    silently did nothing leaves the operator pasting a stale clipboard. */
 .copy-note { font-size: 12px; font-weight: 600; color: var(--ok); margin-top: 5px; }
 
-/* --- live-pass fix C1: the changed-restore digest line ------------------------------------- */
-/* `restored_changed` renders "recorded <64hex> → found <64hex>" — 146 characters, and the ONLY
-   surviving record of the digest the file had before it came back. It used to share
-   `.event-row__relpath`, which is `white-space: nowrap` + ellipsis, so at 1280px roughly 42 of
-   those characters survived and the "found" digest was invisible: an integrity alarm the operator
-   cannot act on. Its own class, wrapping anywhere (a hex run has no break opportunities of its
-   own), so both digests are fully visible at any width. */
-.event-row__detail {
-  font-family: var(--font-mono);
-  font-feature-settings: "ss01";
-  font-size: 11.5px;
-  color: var(--text-2);
-  white-space: normal;
-  overflow-wrap: anywhere;
-  line-height: 1.5;
-  margin-top: 2px;
-}
 
-/* --- fleet review: the group header wraps at phone width (live-pass W1) ------------------- */
-@media (max-width: 640px) {
-  /* At 390px the legend row (counts + unreviewed pill + "Review all in X ->") measured 452px
-     inside the overflow-hidden card, clipping the CTA mid-label. Stack instead of clip. */
-  .review-list__legend { flex-wrap: wrap; row-gap: 6px; }
-  .review-list__legend .btn { flex-basis: 100%; }
+
+/* ================= unify-issue-model: one issue model, folder-grouped review ================= */
+
+/* Quiet, kind-coloured accept controls. The record-removing one is red *text on an outline* —
+   distinguishable by colour and wording, never a filled button repeated down a column. */
+.btn--danger-outline { background: transparent; color: var(--danger); border: 1px solid color-mix(in oklch, var(--danger) 45%, var(--border)); }
+.btn--danger-outline:hover { background: var(--danger-soft); }
+
+/* A refusal / notice strip (the stale-form notice). */
+.notice { margin-bottom: 16px; display: flex; align-items: flex-start; gap: 10px; padding: 14px 16px; }
+.notice--warn { border-color: color-mix(in oklch, var(--warn) 35%, var(--border)); background: color-mix(in oklch, var(--warn-soft) 40%, var(--surface)); }
+.notice__icon { color: var(--warn); flex-shrink: 0; display: flex; }
+.notice--ok { border-color: color-mix(in oklch, var(--ok) 35%, var(--border)); background: color-mix(in oklch, var(--ok-soft) 45%, var(--surface)); }
+.notice--ok .notice__icon { color: var(--ok); }
+.notice__body { flex: 1; font-size: 13px; line-height: 1.55; color: var(--text-2); }
+
+/* "Showing only <folder>" */
+.scope-bar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; margin-bottom: 14px; padding: 9px 13px; font-size: 12.5px; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.scope-bar a { margin-left: auto; font-weight: 600; color: var(--accent); text-decoration: none; }
+.scope-bar a:hover { text-decoration: underline; }
+
+/* Page-wide actions + copy, directly above the files. */
+.review-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.review-toolbar__actions, .review-toolbar__copy { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bulk-accept { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0; }
+.bulk-accept__hidden { font-size: 11.5px; color: var(--text-3); }
+
+/* The files, grouped by folder. */
+.issues { margin-bottom: 18px; }
+.issues__where { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 10px 18px; font-size: 12px; color: var(--text-3); border-bottom: 1px solid var(--border); background: var(--surface-2); overflow-wrap: anywhere; }
+.issue-group { border-bottom: 1px solid var(--border); }
+.issue-group:last-child { border-bottom: none; }
+.issue-group__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 18px; background: var(--surface-2); }
+.issue-group__title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; font-size: 12.5px; }
+.issue-group__folder { display: inline-flex; }
+.issue-group__path { font-size: 13px; font-weight: 600; color: var(--text); text-decoration: none; overflow-wrap: anywhere; }
+.issue-group__path:hover { color: var(--accent); text-decoration: underline; }
+.issue-group__counts { display: inline-flex; gap: 12px; }
+.issue-group__found { color: var(--text-3); }
+.issue-group__actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.issue-group .review-row:first-of-type { border-top: 1px solid var(--border); }
+.issue-group__rows > summary { cursor: pointer; padding: 9px 18px; font-size: 12.5px; font-weight: 600; color: var(--accent); border-top: 1px solid var(--border); list-style-position: inside; }
+.issue-group__rows > summary:hover { background: var(--surface-2); }
+.issue-group__more { font-weight: 500; color: var(--text-3); }
+.review-row__alarm { color: var(--danger); font-weight: 650; }
+.review-row__repeat { color: var(--warn); font-weight: 600; }
+/* Both digests of a file that came back different, in full: wraps, never clips. */
+.review-row__detail { margin-top: 5px; font-size: 11px; line-height: 1.5; color: var(--text-2); white-space: normal; overflow-wrap: anywhere; word-break: break-all; }
+
+/* What the actions do / how to recover — AFTER the list. */
+.guide { padding: 18px 20px; margin-bottom: 20px; scroll-margin-top: 80px; }
+.guide__grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 26px; }
+.guide__title { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; color: var(--text); margin-bottom: 10px; }
+.guide__terms { margin: 0; font-size: 12.5px; line-height: 1.6; }
+.guide__terms dt { font-weight: 650; color: var(--text); }
+.guide__terms dd { margin: 2px 0 11px; color: var(--text-2); }
+.guide__text { font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+.guide__list { margin: 9px 0 0; padding-left: 18px; font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+.guide__list li { margin-bottom: 5px; }
+
+/* Fleet review: one section per collection. */
+.fleet-section { margin-bottom: 22px; }
+.fleet-section__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.fleet-section__title { display: flex; align-items: center; gap: 11px; flex-wrap: wrap; font-size: 12.5px; }
+.fleet-section__title h2 { font-size: 17px; margin: 0; }
+.fleet-section__title h2 a { color: inherit; text-decoration: none; }
+.fleet-section__title h2 a:hover { color: var(--accent); }
+
+/* Dashboard: needs-you. */
+.needs { margin-bottom: 20px; }
+.needs__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 16px 20px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--danger-soft) 38%, var(--surface)); }
+.needs__title { display: inline-flex; align-items: center; gap: 8px; font-size: 16px; margin: 0; color: var(--danger); }
+.needs__sub { margin-top: 3px; font-size: 13px; color: var(--text-2); }
+.needs__sub strong { color: var(--text); }
+.needs__row { display: flex; align-items: center; gap: 14px; padding: 13px 20px; border-bottom: 1px solid var(--border); text-decoration: none; color: inherit; }
+.needs__row:last-child { border-bottom: none; }
+.needs__row:hover { background: var(--surface-2); }
+.needs__main { flex: 1; min-width: 0; }
+.needs__name { display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 14px; color: var(--text); }
+.needs__facts { display: flex; align-items: center; gap: 13px; flex-wrap: wrap; margin-top: 4px; font-size: 12.5px; }
+.needs__when { color: var(--text-3); }
+.needs__folders { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 5px; font-size: 11.5px; color: var(--text-3); overflow-wrap: anywhere; }
+.needs__folders em { font-style: normal; color: var(--text-2); font-weight: 600; }
+.needs__cta { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; font-size: 13px; font-weight: 600; color: var(--danger); white-space: nowrap; }
+.needs--clear, .needs--empty { display: flex; align-items: center; gap: 10px; padding: 12px 16px; font-size: 13.5px; color: var(--text-2); border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); }
+.needs--clear { border-color: color-mix(in oklch, var(--ok) 35%, var(--border)); background: color-mix(in oklch, var(--ok-soft) 45%, var(--surface)); }
+.needs--clear .needs__clear-icon { color: var(--ok); display: flex; }
+.needs--empty .needs__clear-icon { color: var(--text-3); display: flex; }
+.needs--clear strong, .needs--empty strong { color: var(--text); }
+
+/* Dashboard: collection cards two-up, recent activity. */
+.collection-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 10px; align-items: start; }
+.activity__row { display: grid; grid-template-columns: 92px minmax(120px, 230px) minmax(0, 1fr); gap: 14px; align-items: baseline; padding: 10px 18px; border-bottom: 1px solid var(--border); font-size: 13px; text-decoration: none; color: inherit; }
+.activity__row:last-child { border-bottom: none; }
+.activity__row:hover { background: var(--surface-2); }
+.activity__day { color: var(--text-3); font-size: 12px; }
+.activity__collection { font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity__parts { display: flex; gap: 6px 14px; flex-wrap: wrap; color: var(--text-2); font-size: 12.5px; }
+.activity__part--alarm { color: var(--danger); font-weight: 600; }
+.meta-cell__note { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+
+@media (max-width: 1100px) {
+  .collection-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 768px) {
+  .guide__grid { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+  .review-toolbar { align-items: stretch; }
+  .review-toolbar__actions, .review-toolbar__copy { width: 100%; }
+  .issue-group__head { padding: 11px 14px; }
+  .issue-group__actions { width: 100%; }
+  .bulk-accept .btn { white-space: normal; text-align: left; }
+  .needs__row { align-items: flex-start; }
+  .activity__row { grid-template-columns: 78px minmax(0, 1fr); }
+  .activity__parts { grid-column: 1 / -1; }
+  .scope-bar a { margin-left: 0; width: 100%; }
 }

@@ -2,63 +2,47 @@
 {% import "_macros.html" as m %}
 {% block title %}Review — {{ c.name }} · Cairn{% endblock %}
 {% block content %}
-{# `adopt_fp` / `stop_fp` / `adopt_count` / `stop_count` / `stale` are published by the route
-   (design D14/D9 / D12's context contract), all sliced from the one snapshot this page's rows,
-   counts and copy list come from. Every one is read defensively so this page still renders from a
-   context that does not set them; the POST guard fails closed on an absent or empty fingerprint,
-   so a half-configured render refuses accepts rather than accepting them unguarded. #}
-{%- macro mark_all_reviewed(cid, n, token) -%}
-  <form method="post" action="/collection/{{ cid }}/review/ack-all">
-    <input type="hidden" name="csrf_token" value="{{ token }}" />
-    <button class="btn btn--subtle btn--full" type="submit">{{ m.icon("check", size=15, stroke=2) }} Mark all {{ n }} reviewed</button>
-    <div class="field__hint">Clears {{ n }} alerts in this collection. Nothing about the files changes.</div>
-  </form>
-{%- endmacro -%}
+{# A collection's changed and missing files (unify-issue-model). The order of this page is the
+   requirement: heading, a one-line summary, the page-wide actions, THE FILES — and only then what
+   the actions do and how to recover. `r` is the review model built from ONE population snapshot;
+   every count, group, row and fingerprint below is a slice of it. #}
+{% set has_issues = r.total > 0 %}
 <div class="page-header">
   <div>
     <a class="back-link" href="/collection/{{ c.id }}">{{ m.icon("arrowLeft", size=15) }} {{ c.name }}</a>
     <h1>What changed</h1>
-    {# Only where there is something to act on. On an all-clear page this paragraph described a
-       situation the page then contradicts, and offered recovery instructions for nothing. #}
-    {% if (total_issues or 0) > 0 or (review_open or 0) > 0 %}
-    <div class="page-header__sub">
-      {# The intro names no verb that may not be rendered: each accept action appears only when its
-         own population is non-empty, so enumerating them here would advertise a control that is
-         not on the page. #}
-      Files in <strong>{{ c.name }}</strong> that went missing or changed. Recover anything you want
-      back, then clear the alerts — <strong>Mark reviewed</strong> to just note them, or use the
-      action below that names what you want done. Each acts only on the files it names.
+    {# Only where there is something to act on: on an all-clear page a summary would describe a
+       situation the page then contradicts. #}
+    {% if has_issues %}
+    <div class="page-header__sub" id="review-summary">
+      {% if r.modified %}<strong>{{ "{:,}".format(r.modified) }}</strong> changed{% endif %}{% if r.modified and r.missing %} and {% endif %}{% if r.missing %}<strong>{{ "{:,}".format(r.missing) }}</strong> missing{% endif %}
+      file{{ "" if r.total == 1 else "s" }}
+      in <strong>{{ c.name }}</strong>{% if not r.scope_is_root %}, under <span class="mono">{{ r.scope_label }}</span>{% endif %}
+      — found
+      {%- for d in r.found_days %} {{ d.label }}{% if r.found_days|length > 1 or r.found_earlier %} ({{ "{:,}".format(d.count) }}){% endif %}{{ "," if not loop.last or r.found_earlier }}{% endfor %}
+      {%- if r.found_earlier %} earlier ({{ "{:,}".format(r.found_earlier) }}){% endif %}.
     </div>
     {% endif %}
-  </div>
-  {# The bulk actions used to live here as two near-identical buttons; they now live in the
-     self-explaining "Clear these alerts" panel below so Mark reviewed vs Accept can't be confused. #}
-  <div class="page-header__actions">
-    <span id="review-open-pill">{% include "partials/_review_open_pill.html" %}</span>
   </div>
 </div>
 
 {% if stale %}
   {# Where an accept refused by the population guard lands (`?stale=1`). Without it the operator
      sees an ordinary review page and no account of why their click did nothing. #}
-  <div class="card" id="stale-banner"
-       style="margin-bottom:16px;display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border-color:color-mix(in oklch, var(--warn) 35%, var(--border));background:color-mix(in oklch, var(--warn-soft) 40%, var(--surface))">
-    <span style="color:var(--warn);flex-shrink:0;display:flex">{{ m.icon("alert", size=16, stroke=2) }}</span>
-    {# The consequence comes FIRST. The operator arrives here having clicked a destructive button;
-       the one thing they need to know before anything else is that it did not run. A banner that
-       opens by describing the collection reads as a status note, and leaves them believing the
-       accept went through. #}
-    <div style="flex:1;font-size:13px;line-height:1.55;color:var(--text-2)">
+  <div class="card notice notice--warn" id="stale-banner">
+    <span class="notice__icon">{{ m.icon("alert", size=16, stroke=2) }}</span>
+    {# The consequence comes FIRST: the operator arrives here having clicked an irreversible
+       button, and the one thing they need to know before anything else is that it did not run. #}
+    <div class="notice__body">
       <strong>Your action was NOT applied</strong> — this collection changed since the page loaded.
-      Nothing was deleted or acknowledged.
-      {% if (total_issues or 0) > 0 or (review_open or 0) > 0 %}
+      Nothing was removed or accepted.
+      {% if has_issues %}
         The list below is current; review it and decide again.
       {% else %}
-        {# Refused, and now there is nothing left to review: the state you were acting on may
-           already have been resolved (a file came back, or another session accepted it). Saying
-           "the list below is current" over an empty page reads as if the accept had emptied it. #}
-        There is nothing left to review in this collection right now — whatever you were resolving
-        may already have been handled, by a scan or in another session.
+        {# Refused, and now there is nothing left here: saying "the list below is current" over an
+           empty page would read as if the accept had emptied it. #}
+        There is nothing left to review here right now — whatever you were resolving may already
+        have been handled, by a scan or in another session.
       {% endif %}
     </div>
     <button type="button" class="btn btn--sm btn--subtle" aria-label="Dismiss"
@@ -66,11 +50,29 @@
   </div>
 {% endif %}
 
-{% if total_issues == 0 %}
+{# One-shot confirmation that an accept went through (set by the accept route, shown once). #}
+{% if done %}
+  <div class="card notice notice--ok" id="done-banner" role="status">
+    <span class="notice__icon">{{ m.icon("checkCircle", size=16, stroke=2) }}</span>
+    <div class="notice__body">
+      {% if done.kind == "changes" %}Accepted <strong>{{ "{:,}".format(done.count) }}</strong> change{{ "" if done.count == 1 else "s" }}.
+      {% else %}Accepted <strong>{{ "{:,}".format(done.count) }}</strong> deletion{{ "" if done.count == 1 else "s" }} — {{ "its record was" if done.count == 1 else "their records were" }} removed; nothing on disk was touched.{% endif %}
+    </div>
+  </div>
+{% endif %}
+
+{% if not r.scope_is_root %}
+  <div class="scope-bar" id="review-scope">
+    {{ m.icon("folder", size=14, cls="text-3") }}
+    <span>Showing only <span class="mono">{{ r.scope_label }}</span></span>
+    <a href="/collection/{{ c.id }}/review">Show everything in {{ c.name }}{% if r.collection_total != r.total %} ({{ "{:,}".format(r.collection_total) }}){% endif %}</a>
+  </div>
+{% endif %}
+
+{% if not has_issues %}
   {% if c.is_empty %}
-    {# A collection watching nothing has established nothing: "All clear" here would be the same
-       false green (#31) the dashboard card and the detail header were fixed for. Nothing has been
-       checked, so the card is muted and says exactly that. #}
+    {# A collection watching nothing has established nothing: "All clear" here would be a false
+       green. Nothing has been checked, so the card is muted and says exactly that. #}
     <div class="card">
       <div class="empty-state">
         <div style="display:flex;justify-content:center;margin-bottom:10px;color:var(--text-3)">{{ m.icon("folder", size=34, stroke=1.7) }}</div>
@@ -79,189 +81,66 @@
         <a class="btn btn--subtle btn--sm" href="/collection/{{ c.id }}" style="margin-top:16px;display:inline-flex">Back to {{ c.name }}</a>
       </div>
     </div>
+  {% elif r.collection_total > 0 %}
+    {# A folder scope with nothing (left) in it, while the collection still has issues elsewhere. #}
+    <div class="card">
+      <div class="empty-state">
+        <div style="display:flex;justify-content:center;margin-bottom:10px;color:var(--text-3)">{{ m.icon("checkCircle", size=34, stroke=1.7) }}</div>
+        <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px">Nothing to review in this folder</div>
+        <div>{{ "{:,}".format(r.collection_total) }} file{{ "" if r.collection_total == 1 else "s" }} elsewhere in {{ c.name }} still {{ "needs" if r.collection_total == 1 else "need" }} a decision.</div>
+        <a class="btn btn--subtle btn--sm" href="/collection/{{ c.id }}/review" style="margin-top:16px;display:inline-flex">Show everything in {{ c.name }}</a>
+      </div>
+    </div>
   {% else %}
     <div class="card">
       <div class="empty-state">
         <div style="display:flex;justify-content:center;margin-bottom:10px;color:var(--ok)">{{ m.icon("checkCircle", size=34, stroke=1.7) }}</div>
         <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px">All clear</div>
-        <div>Nothing is missing or changed in this collection right now.</div>
+        <div>Nothing is changed or missing in this collection right now.</div>
         <a class="btn btn--subtle btn--sm" href="/collection/{{ c.id }}" style="margin-top:16px;display:inline-flex">Back to {{ c.name }}</a>
       </div>
     </div>
   {% endif %}
-  {% if review_open and review_open > 0 %}
-    {# Nothing is wrong any more, but alerts raised earlier are still open — a file that went
-       missing and has since come back. Only the Mark-reviewed half is offered (design D9):
-       Accept from an otherwise-empty page would silently baseline every pending `new` file. #}
-    <div class="card resolve">
-      <div class="resolve__head">{{ m.icon("checkCircle", size=16, stroke=1.9) }}
-        {{ review_open }} alert{{ "" if review_open == 1 else "s" }} from files that have since been restored</div>
-      <div class="resolve__sub">
-        The files are back, and the scan that found them compared their contents against the
-        fingerprint recorded before they went missing: they match. Anything that had come back
-        different would be listed above as <em>came back changed</em>, not cleared. These alerts
-        stay open until you note that you've seen them.
-      </div>
-      <div class="resolve__grid" style="grid-template-columns:1fr">
-        <div class="resolve__opt">
-          <div class="resolve__opt-head">
-            <span class="resolve__chip resolve__chip--ack">{{ m.icon("check", size=16, stroke=2) }}</span>
-            <div>
-              <div class="resolve__opt-title">Mark reviewed</div>
-              <span class="pill pill--soft pill--muted pill--sm">Baseline unchanged</span>
-            </div>
-          </div>
-          <div class="resolve__opt-desc">
-            Clears the alerts these files raised while they were gone. Nothing about the files or
-            your baseline changes, and any existence proof is kept.
-          </div>
-          {{ mark_all_reviewed(c.id, review_open, csrf_token) }}
-        </div>
-      </div>
-    </div>
-  {% endif %}
 {% else %}
-  {# Recovery panel — tool-agnostic. Copy the affected paths into whatever backup tool you use. #}
-  <div class="card recovery" id="recovery"
+  {# Page-wide actions: one per kind present, acting on everything in this page's scope, plus the
+     copy list for restoring. Counts and fingerprints come from the same snapshot as the list. #}
+  <div class="review-toolbar" id="review-toolbar"
        data-root="{{ c.root }}"
        data-relpaths="{{ copy_relpaths | e }}">
-    <div class="recovery__head">
-      <div class="recovery__title">{{ m.icon("download", size=16, stroke=1.9) }} Recover these files</div>
-      <div class="recovery__actions">
-        <button type="button" class="btn btn--sm" data-copy="rel">{{ m.icon("copy", size=14) }} Copy paths</button>
-        <button type="button" class="btn btn--sm" data-copy="abs">{{ m.icon("copy", size=14) }} Copy full paths</button>
-        <span class="recovery__copied" id="recovery-copied" hidden>Copied ✓</span>
-      </div>
+    <div class="review-toolbar__actions">
+      {{ m.bulk_accept("changes", r.accept_changes, r, c.name if r.scope_is_root else r.scope_label, "", csrf_token) }}
+      {{ m.bulk_accept("deletions", r.accept_deletions, r, c.name if r.scope_is_root else r.scope_label, "", csrf_token) }}
     </div>
-    <div class="recovery__hint">
-      Cairn watches your files read-only — it never restores them itself. Paste the copied list into
-      your own backup tool (restic, Borg, rsync, Time Machine, a cloud sync…) to bring them back, then
-      <strong>Scan now</strong> on the collection to check what you restored: each returned file is
-      re-read and compared against the fingerprint Cairn recorded before it went missing. Files that
-      match are cleared; a file whose contents differ — the wrong snapshot, a truncated restore —
-      closes the now-obsolete <em>missing</em> alert and replaces it with a new
-      <em>came back changed</em> alert. Or
-      <strong>Stop tracking</strong> the files that are gone for good.
-      {# Point at a route that exists: `cairn status` is not implemented, and the filtered file
-         browser (already linked at the foot of the list) is where the full set actually lives. #}
-      {% if copy_truncated %}<br />The buttons copy the first {{ "{:,}".format(copy_count) }} of {{ "{:,}".format(total_issues) }} paths — open the <a href="/collection/{{ c.id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, for the full set.{% endif %}
-    </div>
-    <details class="recovery__more">
-      <summary>How to recover (any backup tool)</summary>
-      <ol class="recovery__steps">
-        <li>Copy the affected paths with the <strong>Copy paths</strong> button above (relative to the collection root, or full paths).</li>
-        <li>In your backup tool, restore exactly those paths to the collection root <span class="mono">{{ c.root }}</span>.</li>
-        <li>Run <strong>Scan now</strong> on the collection page. Every file that reappeared is re-read
-          and compared against the fingerprint recorded before it went missing: a file whose contents
-          match flips back to <em>restored / OK</em>; a file whose contents differ is flagged
-          <em>came back changed</em>, which closes the obsolete <em>missing</em> alert and raises a
-          new one in its place — check that one before you trust it.</li>
-        <li>For anything you don't want back, <strong>Stop tracking</strong> it — from the button above, or one file at a time from its row.</li>
-      </ol>
-    </details>
-  </div>
-
-  {# Resolve panel — the two bulk actions shown each next to what it actually does. Mark reviewed and
-     Accept land on different routes and have very different consequences, so they're spelled out and
-     visually contrasted (neutral vs amber) rather than sitting as two look-alike buttons. Per-file
-     Mark reviewed still lives on each row in the list below. #}
-  <div class="card resolve">
-    <div class="resolve__head">{{ m.icon("checkCircle", size=16, stroke=1.9) }} Clear these alerts</div>
-    <div class="resolve__sub">Two ways to resolve, depending on whether the change was expected.</div>
-    <div class="resolve__grid">
-      <div class="resolve__opt">
-        <div class="resolve__opt-head">
-          <span class="resolve__chip resolve__chip--ack">{{ m.icon("check", size=16, stroke=2) }}</span>
-          <div>
-            <div class="resolve__opt-title">Mark reviewed</div>
-            <span class="pill pill--soft pill--muted pill--sm">Baseline unchanged</span>
-          </div>
-        </div>
-        <div class="resolve__opt-desc">
-          You've reviewed these. Cairn keeps watching and keeps your baseline — each file stays on
-          record as missing or changed and any existence proof is kept. Clears the alert, but it can
-          return if the file changes again.
-        </div>
-        {% if review_open and review_open > 0 %}
-          {{ mark_all_reviewed(c.id, review_open, csrf_token) }}
-        {% else %}
-          <span class="resolve__done">{{ m.icon("checkCircle", size=14) }} Nothing left to mark reviewed</span>
-        {% endif %}
-      </div>
-      {# The right column is a STACK of scoped verbs, one per population, each rendered only when
-         its own count is non-zero (#16 / design D5). The single "Accept all changes" that used to
-         sit here adopted the modified files, deleted the missing ones AND promoted every
-         not-yet-baselined file in the collection — files this page never displayed. No label can
-         describe that, which is why it is gone rather than reworded. Counts come from the same
-         snapshot as the list below (design D9), so the number on a button and the rows on the page
-         cannot disagree. Baselining `new` files is NOT offered here: this page does not list them. #}
-      <div class="resolve__opt resolve__opt--accept">
-        <div class="resolve__opt-head">
-          <span class="resolve__chip resolve__chip--accept">{{ m.icon("refresh", size=16, stroke=2) }}</span>
-          <div>
-            <div class="resolve__opt-title">Accept as new baseline</div>
-            <span class="pill pill--soft pill--warn pill--sm">Rewrites your baseline</span>
-          </div>
-        </div>
-        <div class="resolve__opt-desc">
-          Treat the current state as correct from now on. Each action below touches only the files
-          it names — nothing else in this collection changes, and nothing on disk is deleted. Use
-          these when <em>you</em> made the change.
-        </div>
-        {% if (adopt_count | default(0)) > 0 %}
-          <form method="post" action="/collection/{{ c.id }}/review/adopt-changed" class="resolve__verb"
-                onsubmit="return confirm('Adopt {{ adopt_count }} changed file{{ '' if adopt_count == 1 else 's' }}? Their current contents become the expected version, and this change will not be reported again.');">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-            {# Binds this form to the population it was rendered for: the POST recomputes the same
-               fingerprint inside the write transaction and refuses on any drift (design D14). The
-               route always publishes a 64-hex value; an absent or empty field is refused. #}
-            <input type="hidden" name="population_fp" value="{{ adopt_fp | default('', true) }}" />
-            <button class="btn btn--subtle btn--full" type="submit">{{ m.icon("refresh", size=15, stroke=2) }} Adopt {{ adopt_count }} changed file{{ "" if adopt_count == 1 else "s" }}</button>
-            <div class="field__hint">Treats the current contents as correct from now on. Cairn recorded and notarized the new contents when it detected the change; this stops the alert. You won't be told about this change again.</div>
-          </form>
-        {% endif %}
-        {% if (stop_count | default(0)) > 0 %}
-          <form method="post" action="/collection/{{ c.id }}/review/stop-tracking" class="resolve__verb"
-                onsubmit="return confirm('Stop tracking {{ stop_count }} missing file{{ '' if stop_count == 1 else 's' }}? Their records are permanently removed from Cairn — paths, first-seen dates, and the link to their timestamp proofs. Nothing on disk is deleted and the .ots proof files stay in the proof store.');">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-            <input type="hidden" name="population_fp" value="{{ stop_fp | default('', true) }}" />
-            {# Un-inverted per design D8: this is the one that deletes records, so it is the loud
-               button — not the per-row reading-log write. #}
-            <button class="btn btn--danger btn--full" type="submit">{{ m.icon("minusCircle", size=15, stroke=2) }} Stop tracking {{ stop_count }} missing file{{ "" if stop_count == 1 else "s" }}</button>
-            <div class="field__hint">Permanently removes {{ stop_count }} file{{ "" if stop_count == 1 else "s" }} from Cairn's records — their paths, first-seen dates, and the link to their timestamp proofs. Nothing on disk is deleted and the .ots proof files stay in the proof store, but Cairn will no longer list them under Verify. If you want them back, restore from backup and run a scan instead.</div>
-          </form>
-        {% endif %}
-      </div>
+    <div class="review-toolbar__copy">
+      <span class="recovery__copied" id="recovery-copied" hidden>Copied ✓</span>
+      <button type="button" class="btn btn--sm btn--ghost" data-copy="rel">{{ m.icon("copy", size=14) }} Copy paths</button>
+      <button type="button" class="btn btn--sm btn--ghost" data-copy="abs">{{ m.icon("copy", size=14) }} Copy full paths</button>
+      <a class="btn btn--sm btn--ghost" href="#review-help">{{ m.icon("info", size=14) }} What do these do?</a>
     </div>
   </div>
 
-  <div class="card card--flush review-list">
-    <div class="review-list__head">
-      <h3>{{ total_issues }} {{ "file" if total_issues == 1 else "files" }} to review</h3>
-      <div class="review-list__legend">
-        {% if c.counts.missing %}<span class="legend__stat">{{ m.dot("var(--danger)", size=7) }}{{ c.counts.missing }} missing</span>{% endif %}
-        {% if c.counts.modified %}<span class="legend__stat">{{ m.dot("var(--warn)", size=7) }}{{ c.counts.modified }} modified</span>{% endif %}
-      </div>
-    </div>
-    <div class="field__hint" style="padding:0 18px 12px;margin-top:0">
-      <strong>Mark reviewed:</strong> Notes that you've seen this. The file stays on record as missing or changed, keeps any existence proof, and the collection keeps its Alert status until you restore or retire it.
-    </div>
-    {% for it in items %}
-      {% include "partials/review_row.html" %}
-    {% endfor %}
-    {% if truncated %}
-      <div class="review-list__more">Showing the first {{ shown }} of {{ total_issues }} — open the
-        <a href="/collection/{{ c.id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, to see the rest.</div>
-    {% endif %}
-  </div>
+  {% include "partials/review_groups.html" %}
+
+  {# Grouped pages only: a single list states its own truncation, and has no folder to open. #}
+  {% if r.truncated and not r.flat %}
+    <div class="review-list__more" id="review-truncated">Showing {{ "{:,}".format(r.shown) }} of {{ "{:,}".format(r.total) }} files on this page — open a folder above to see it in full, or the
+      <a href="/collection/{{ c.id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, for every file.</div>
+  {% endif %}
+
+  {% set root = c.root %}
+  {# Point at a route that exists: the filtered file browser is where the full set lives. #}
+  {% if copy_truncated %}
+    {% set copy_note %}The copy buttons take the first {{ "{:,}".format(copy_count) }} of {{ "{:,}".format(r.total) }} paths — open the <a href="/collection/{{ c.id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, for the full set.{% endset %}
+  {% endif %}
+  {% include "partials/review_help.html" %}
 {% endif %}
 
 <script>
   (function () {
-    var card = document.getElementById("recovery");
-    if (!card) return;
-    var rel = card.getAttribute("data-relpaths") || "";
-    var root = card.getAttribute("data-root") || "";
+    var bar = document.getElementById("review-toolbar");
+    if (!bar) return;
+    var rel = bar.getAttribute("data-relpaths") || "";
+    var root = bar.getAttribute("data-root") || "";
     function paths(kind) {
       if (!rel) return "";
       if (kind === "rel") return rel;
@@ -272,11 +151,12 @@
     // partials/_clipboard.html (window.cairnCopy), shared with the verify card so the two copy
     // surfaces cannot drift. A failed copy has to *say so*: silently doing nothing leaves the
     // operator pasting a stale clipboard into their backup tool and restoring the wrong paths.
-    card.querySelectorAll("[data-copy]").forEach(function (btn) {
+    bar.querySelectorAll("[data-copy]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         window.cairnCopy(paths(btn.getAttribute("data-copy")), "recovery-copied");
       });
     });
   })();
 </script>
+{% include "partials/_keep_scroll.html" %}
 {% endblock %}

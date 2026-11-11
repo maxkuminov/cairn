@@ -21,38 +21,10 @@
         <button class="btn btn--subtle" type="submit">{{ m.icon("bitcoin", size=15) }} Stamp all</button>
       </form>
     {% endif %}
-    {# Action hierarchy (design D7/D5). The destructive verbs are NOT here: Adopt and Stop tracking
-       live only on the review page, where the contrast card explains them and the list shows what
-       each will act on. This form IS the baseline scope — `POST /collection/{id}/accept` with the
-       `baseline-new` form scope, `new -> ok` and nothing else — which is why it is the one accept
-       offered here and is not repeated on the review page, which never lists `new` files.
-       With issues OR any open event outstanding, Review issues stays the primary action. The
-       reason has narrowed with the verb: a scoped baseline no longer acknowledges the collection's
-       other alerts (and an `added` event is born reviewed, so it clears nothing at all). What
-       remains is the ordering — a restored file leaves its alert open while the file set reads
-       clean, and a "nothing to see" control in front of an unread alarm is what this gate exists to
-       prevent. The gate is bound at submit time too: the baseline fingerprint hashes the
-       collection's WHOLE open-event set, so a stale form is refused by an alert on a file it would
-       never have touched (design D3). #}
-    {% if c.issues > 0 or c.open_events > 0 %}
-      <a class="btn btn--primary" href="/collection/{{ c.id }}/review">{{ m.icon("alert", size=15) }} Review issues</a>
-    {% elif show_baseline %}
-      {# Plain POST→303 redirect (not htmx): re-baselining changes the tiles, file table, status pill,
-         and this button's own visibility, so a full reload is the correct refresh. An htmx hx-post with
-         hx-swap="none" would silently discard the redirected page and leave the UI stale.
-         The confirm is deliberately LIGHT — this promotes `new` → `ok`, deletes nothing and rewrites
-         no baseline; a heavy warning here trains the operator to click through the heavy warning on
-         the destructive one. `population_fp` binds the submit to the population this page was
-         rendered for (design D14); the route fails closed without it. `c.counts.new` is that same
-         population's size in this state — the route overwrites it from the snapshot it hashed — so
-         the number the operator confirms is the number the fingerprint authorizes. #}
-      <form method="post" action="/collection/{{ c.id }}/accept" style="display:inline"
-            onsubmit="return confirm('Baseline {{ c.counts.new }} new file{{ '' if c.counts.new == 1 else 's' }} as the expected version?');">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <input type="hidden" name="population_fp" value="{{ population_fp }}" />
-        <button class="btn btn--primary" type="submit"
-                title="Folds files Cairn found but you haven't vouched for into your expected set. They're already watched and notarized — this only clears the New label. There's no un-baseline.">{{ m.icon("check", size=15) }} Baseline {{ c.counts.new }} new file{{ '' if c.counts.new == 1 else 's' }}</button>
-      </form>
+    {# Accepting a change or a deletion is irreversible and is offered only on the review page,
+       which lists the files it acts on. While there are issues, that page is the primary action. #}
+    {% if c.issues > 0 %}
+      <a class="btn btn--primary" href="/collection/{{ c.id }}/review">{{ m.icon("alert", size=15) }} Review {{ "{:,}".format(c.issues) }} issue{{ "" if c.issues == 1 else "s" }}</a>
     {% endif %}
   </div>
 </div>
@@ -72,7 +44,7 @@
     {# The full path is the value: on a phone the ellipsis hid most of it and touch has no hover, so
        the cell carries a `title` for the pointer case and is allowed to wrap under the breakpoint. #}
     <div class="meta-cell"><div class="meta-cell__label">Root path</div><div class="meta-cell__value mono" style="font-size:12px" title="{{ c.root }}">{{ c.root }}</div></div>
-    <div class="meta-cell"><div class="meta-cell__label">Policy</div><div class="meta-cell__value" style="text-transform:uppercase;letter-spacing:0.03em">{{ c.mode }}</div></div>
+    <div class="meta-cell"><div class="meta-cell__label">Policy</div><div class="meta-cell__value" title="{{ c.policy.short }}. {{ c.policy.flags }}">{{ c.policy.label }}</div><div class="meta-cell__note">{{ c.policy.flags }}</div></div>
     <div class="meta-cell"><div class="meta-cell__label">Notarization</div><div class="meta-cell__value">{% if c.ots == "none" %}Tripwire only{% else %}Per-file · new files only{% endif %}</div></div>
     <div class="meta-cell"><div class="meta-cell__label">Scan cadence</div><div class="meta-cell__value">{{ c.cadence }}</div></div>
     <div class="meta-cell" style="border-right:none"><div class="meta-cell__label">Owner</div><div class="meta-cell__value">{{ c.owner }}</div></div>
@@ -86,33 +58,17 @@
     <div class="mini-stat__value">{{ "{:,}".format(c.file_count) }}</div>
     <div class="mini-stat__sub">{{ c.size }}</div>
   </div>
-  <div class="card mini-stat">
-    <div class="mini-stat__label">{{ m.icon("checkCircle", size=15, stroke=1.9) }}<span>Matching baseline</span></div>
-    <div class="mini-stat__value" style="color:{{ 'var(--text-3)' if c.is_empty else 'var(--ok)' }}">{{ "{:,}".format(c.counts.ok) }}</div>
-    {% if c.is_empty %}<div class="mini-stat__sub">No files indexed yet</div>{% endif %}
-  </div>
-  {# `Total = baselined + new + changed/missing`, and the `new` term used to appear on no surface
-     of the page the operator acts on — it was reachable only inside the baseline button's
-     confirm(). Same vocabulary as the dashboard's New files tile, deliberately verbatim: two
-     wordings for one population read as two populations. Rendered for both notarization modes
-     (baselining is a scan concept, not a notary one) and at zero as well, so the arithmetic is
-     always accounted for. #}
-  <div class="card mini-stat">
-    <div class="mini-stat__label">{{ m.icon("file", size=15, stroke=1.9) }}<span>New files</span></div>
-    <div class="mini-stat__value" style="color:{{ 'var(--accent)' if c.counts.new > 0 else 'var(--text-3)' }}">{{ "{:,}".format(c.counts.new) }}</div>
-    <div class="mini-stat__sub">watched, not yet baselined</div>
-  </div>
   {% if c.issues %}
   <a class="card mini-stat mini-stat--link" href="/collection/{{ c.id }}/review">
     <div class="mini-stat__label">{{ m.icon("alert", size=15, stroke=1.9) }}<span>Changed / missing</span></div>
     <div class="mini-stat__value" style="color:var(--danger)">{{ c.issues }}</div>
-    <div class="mini-stat__sub">{{ c.counts.missing }} missing · {{ c.counts.modified }} modified <span class="mini-stat__cta">· Review {{ m.icon("chevronR", size=11) }}</span></div>
+    <div class="mini-stat__sub">{{ c.counts.missing }} missing · {{ c.counts.modified }} changed <span class="mini-stat__cta">· Review {{ m.icon("chevronR", size=11) }}</span></div>
   </a>
   {% else %}
   <div class="card mini-stat">
     <div class="mini-stat__label">{{ m.icon("alert", size=15, stroke=1.9) }}<span>Changed / missing</span></div>
     <div class="mini-stat__value" style="color:var(--text-3)">0</div>
-    <div class="mini-stat__sub">{{ c.counts.missing }} missing · {{ c.counts.modified }} modified</div>
+    <div class="mini-stat__sub">{{ "No files indexed yet" if c.is_empty else "nothing changed or missing" }}</div>
   </div>
   {% endif %}
   {% if c.ots != "none" %}

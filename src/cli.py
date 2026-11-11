@@ -18,6 +18,10 @@ from . import __version__
 PLANNED = ("status",)
 
 
+# The panel's plain names for the two change policies, accepted wherever the stored names are
+# (unify-issue-model D5). The stored values stay `worm` / `churn`.
+_POLICY_ALIASES = {"locked": "worm", "working": "churn"}
+
 def _run(coro) -> int:
     return asyncio.run(coro)
 
@@ -71,7 +75,7 @@ def _cmd_add_collection(args: argparse.Namespace) -> int:
                 user_id=uid,
                 name=args.name,
                 root=args.root,
-                mode=args.mode,
+                mode=_POLICY_ALIASES.get(args.mode, args.mode),
                 ots_mode=args.ots_mode,
                 hash_cadence_seconds=args.cadence,
                 verify_cadence_seconds=args.verify_cadence,
@@ -176,7 +180,16 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 def _cmd_accept(args: argparse.Namespace) -> int:
     async def run() -> int:
         from .database import get_sessionmaker
-        from .services.collections import get_collection_by_name, list_collections
+        from sqlalchemy import text
+        from sqlalchemy.exc import OperationalError
+
+        from .models.db import Collection
+        from .services.collections import (
+            active_run,
+            blocking_run,
+            get_collection_by_name,
+            list_collections,
+        )
         from .services.scanner import accept_collection
 
         async with get_sessionmaker()() as session:
@@ -189,13 +202,51 @@ def _cmd_accept(args: argparse.Namespace) -> int:
                 collections = [collection]
             else:
                 collections = await list_collections(session)
-            for collection in collections:
+            # Identity captured up front, as plain values: a refusal rolls the session back, which
+            # expires every ORM object in it, so nothing after the first refusal may read a
+            # collection attribute off an object loaded before it.
+            targets = [(c.id, c.name) for c in collections]
+            refused = 0
+            for cid, name in targets:
+                # Never accept under a running operation (the panel refuses too): a scan holds the
+                # rows it read when it started and would write over what this accept changes — a
+                # change it had just found could end up recorded healthy. Checked once before
+                # taking SQLite's writer lock (this may reclaim an abandoned claim, which writes
+                # from another connection) and once under it, where no claim can commit any more.
+                busy = await blocking_run(session, cid) is not None
+                if not busy:
+                    try:
+                        await session.execute(
+                            text("UPDATE collections SET name = name WHERE id = :id"), {"id": cid}
+                        )
+                    except OperationalError as exc:
+                        # Someone else holds the writer lock past the busy timeout — an operation
+                        # mid-commit. That is "busy", not a crash. Anything else propagates.
+                        if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                            raise
+                        busy = True
+                    else:
+                        busy = await active_run(session, cid) is not None
+                if busy:
+                    await session.rollback()
+                    refused += 1
+                    print(
+                        f"[{name}] refused: an operation is running on this collection; "
+                        "run accept again when it has finished",
+                        file=sys.stderr,
+                    )
+                    continue
+                collection = await session.get(Collection, cid)
+                if collection is None:  # deleted since it was listed
+                    await session.rollback()
+                    continue
                 r = await accept_collection(session, collection, uid)
                 print(
-                    f"[{collection.name}] accepted={r['accepted']} removed_missing={r['removed']} "
+                    f"[{name}] accepted={r['accepted']} removed_missing={r['removed']} "
                     f"events_acknowledged={r['events_ack']}"
                 )
-        return 0
+        # Like `cairn scan`: non-zero only when nothing at all could be done.
+        return 1 if targets and refused == len(targets) else 0
 
     return _run(run())
 
@@ -944,7 +995,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_add.add_argument("--name", required=True)
     p_add.add_argument("--root", required=True, help="Directory to watch")
-    p_add.add_argument("--mode", choices=("worm", "churn"), default="worm")
+    p_add.add_argument(
+        "--mode",
+        choices=("locked", "working", "worm", "churn"),
+        default="worm",
+        help=(
+            "change policy: 'locked' (nothing should change; every change and deletion is "
+            "flagged) or 'working' (edits are normal and are not flagged; deletions are, and so is "
+            "a file that comes back different after going missing). 'worm' and 'churn' "
+            "are the stored names for the same two policies."
+        ),
+    )
     p_add.add_argument("--ots-mode", dest="ots_mode", choices=("none", "perfile"), default="none")
     p_add.add_argument("--cadence", type=int, default=900, help="Scan cadence seconds")
     p_add.add_argument(
