@@ -1222,3 +1222,75 @@ async def test_a_same_size_change_with_no_recorded_date_is_not_absorbed(cairn_en
     assert row.status == "modified"
     assert kinds == ["corrupted"]
     assert summary.corrupted == 1
+
+
+# --- implementation review, scope B ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_file_that_is_listed_but_cannot_be_examined_is_not_missing(cairn_env, monkeypatch):
+    """A directory can be listable while lookups beneath it fail (search permission removed, I/O
+    errors). Every name is returned, every `stat` fails — and none of those files was deleted."""
+    from pathlib import Path
+
+    from sqlalchemy import func, select
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, Event, FileEntry
+    from src.services.scanner import scan_collection
+
+    root = cairn_env / "nostat"
+    (root / "locked").mkdir(parents=True)
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (root / "locked" / name).write_text(name)
+    (root / "fine.txt").write_text("fine")
+    cid = await seed_collection(root, ots_mode="none", mode="worm")
+    async with get_sessionmaker()() as s:
+        await scan_collection(s, await s.get(Collection, cid))
+
+    real_stat = Path.stat
+
+    def failing_stat(self, *args, **kwargs):
+        if self.parent.name == "locked":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", failing_stat)
+    async with get_sessionmaker()() as s:
+        summary = await scan_collection(s, await s.get(Collection, cid))
+        statuses = dict((await s.execute(select(FileEntry.relpath, FileEntry.status))).all())
+        missing_events = await s.scalar(
+            select(func.count()).select_from(Event).where(Event.kind == "missing")
+        )
+
+    assert set(statuses.values()) == {"new"}, statuses  # nothing went missing
+    assert missing_events == 0
+    assert summary.missing == 0 and summary.errors == 3 and summary.result == "partial"
+
+
+@pytest.mark.asyncio
+async def test_a_stray_symlink_does_not_make_an_empty_root_pass(cairn_env):
+    """An unmounted volume's mount point holding nothing but a symlink is still an empty root."""
+    from sqlalchemy import select
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry
+    from src.services.scanner import REFUSAL_EMPTY, scan_collection
+
+    root = cairn_env / "linkonly"
+    root.mkdir()
+    (root / "a.txt").write_text("a")
+    (root / "b.txt").write_text("b")
+    cid = await seed_collection(root, ots_mode="none", mode="worm")
+    async with get_sessionmaker()() as s:
+        await scan_collection(s, await s.get(Collection, cid))
+
+    (root / "a.txt").unlink()
+    (root / "b.txt").unlink()
+    (root / "stray").symlink_to(cairn_env)
+    async with get_sessionmaker()() as s:
+        summary = await scan_collection(s, await s.get(Collection, cid))
+        statuses = set(await s.scalars(select(FileEntry.status)))
+
+    assert summary.refused == REFUSAL_EMPTY and summary.result == "error"
+    assert statuses == {"new"}

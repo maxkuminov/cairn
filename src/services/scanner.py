@@ -730,8 +730,12 @@ async def scan_collection(
             if not os.path.isdir(root):
                 raise ScanRefused(REFUSAL_UNREACHABLE, f"the folder {root} is not reachable")
             for relpath in iter_relpaths(root, globs, walk_errors):
-                walked_files += 1
+                # `walked_files` answers one question — "does this root hold anything at all?" —
+                # for the empty-root refusal. It counts every entry that IS a file here, readable
+                # or not; it does not count a symlink, which the scan ignores and which must not
+                # make an otherwise empty (unmounted) root pass as populated.
                 if not _db_storable(relpath):
+                    walked_files += 1
                     # Non-UTF-8 name: it cannot be tracked (SQLite TEXT can't bind a lone surrogate).
                     # Skip before any row is created so one bad name can't abort the scan. Not added to
                     # `seen` and never stored, so it also never reads as missing/added on a later scan.
@@ -751,9 +755,16 @@ async def scan_collection(
                     summary.errors += 1
                     if len(error_entries) < RUN_ERROR_SAMPLE_MAX:
                         error_entries.append(_render_skip("lstat", relpath))
+                    # The name was listed, so the file is THERE; it just could not be examined
+                    # (search permission gone, an I/O error). It is counted as skipped — and it is
+                    # `seen`, so the missing sweep cannot report a file we failed to read as a file
+                    # that was deleted.
+                    walked_files += 1
+                    seen.add(relpath)
                     continue
                 if is_symlink:
                     continue  # conservative: never follow symlinks out of the read-only jail
+                walked_files += 1
                 try:
                     st = full.stat()
                 except OSError:
@@ -761,6 +772,7 @@ async def scan_collection(
                     summary.errors += 1
                     if len(error_entries) < RUN_ERROR_SAMPLE_MAX:
                         error_entries.append(_render_skip("stat", relpath))
+                    seen.add(relpath)  # present but unreadable — never "missing" (see above)
                     continue
                 seen.add(relpath)
                 size = st.st_size

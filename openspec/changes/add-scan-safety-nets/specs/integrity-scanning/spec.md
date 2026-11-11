@@ -27,7 +27,12 @@ could not be listed (a permission or input/output error during the walk), the sc
 "this folder's files are gone" from "this folder could not be read", so that pass SHALL NOT mark
 any file missing. It SHALL still record what it found in the directories it could read, SHALL
 count each unreadable directory among the run's errors with a diagnostic entry, and SHALL end
-`partial`. This rule takes precedence over the empty-root refusal: a walk that saw no file because
+`partial`. The same holds one level down: a file whose name the walk listed but which could not be examined
+(its metadata could not be read) is present, not deleted, and SHALL NOT be marked missing — it is
+counted among the files the run skipped. And a symbolic link, which a scan ignores, SHALL NOT count
+as a file for the purpose of deciding whether the root is empty.
+
+This rule takes precedence over the empty-root refusal: a walk that saw no file because
 the directories holding them could not be listed is an unreadable folder, not an empty one, and
 SHALL be reported as such.
 
@@ -74,6 +79,17 @@ does today.
 - **THEN** no file SHALL be marked `missing` by that pass, the run SHALL end `partial` with the
   unreadable directory counted and sampled among its errors, and changes found in readable
   directories SHALL still be recorded
+
+#### Scenario: A file that is listed but cannot be examined is not missing
+
+- **WHEN** a tracked file's name is returned by the walk but its metadata cannot be read
+- **THEN** the file SHALL NOT be marked `missing`, and the run SHALL count it as skipped and end
+  `partial`
+
+#### Scenario: A stray symbolic link does not make an empty root pass
+
+- **WHEN** a collection that tracks files is scanned and its root holds nothing but a symbolic link
+- **THEN** the pass SHALL be refused as an empty root, and no file SHALL be marked `missing`
 
 #### Scenario: A refused deep pass is still owed
 
