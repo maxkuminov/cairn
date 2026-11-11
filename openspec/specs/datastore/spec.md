@@ -29,10 +29,16 @@ boolean `auto_baseline_new` (default false) controlling whether the deep-verify 
 `new` files to `ok`. `files` SHALL be unique on `(collection_id, relpath)` and carry `status` ∈
 {ok,new,modified,missing} and `ots_state` ∈ {none,pending,incomplete,complete}. `files` SHALL also
 carry a nullable `ots_digest` TEXT column recording the digest the proof stored at `ots_path`
-commits to. `events.kind` SHALL
-be constrained to {added,modified,missing,restored,moved,restored_changed}, and `events` SHALL carry
-a nullable `detail` TEXT column (used to record the old → new path of a `moved` file, and both
-digests of a `restored_changed` file). `runs` SHALL carry an
+commits to, and three nullable columns — `prior_sha256`, `prior_size`, `prior_mtime` —
+holding the contents that were on record before an unaccepted change (all NULL for a file with
+no unaccepted change; a changed file that has since gone missing keeps them). The time a
+root-refusal or unreadable-folder alert was last attempted for a collection SHALL be kept as a
+row of the existing key-value settings table, not as a new column. `events.kind` SHALL
+be constrained to {added,modified,missing,restored,moved,restored_changed,corrupted}, and `events` SHALL carry
+a nullable `detail` TEXT column (used to record the old → new path of a `moved` file, both
+digests of a `restored_changed` file, and — as a JSON object carrying the path and the contents
+before and after — what a `modified` or `corrupted` event changed). A run that was refused because
+its root was unreachable SHALL carry the reason as the single entry of `error_sample`. `runs` SHALL carry an
 integer `moved` count and a nullable `heartbeat_at` timestamp recording when the run last reported
 progress, so that a claim held by a live process is distinguishable from one orphaned by a crash.
 `runs` SHALL additionally carry an integer `errors` count (default 0) and a nullable `error_sample`
@@ -131,6 +137,18 @@ rows exist the downgrade SHALL proceed normally.
 - **THEN** `runs.errors` SHALL exist as a NOT NULL integer defaulting to 0 and `runs.error_sample`
   SHALL exist as a nullable TEXT column, with every existing run row preserved and defaulted
 - **AND** `alembic downgrade` SHALL drop both columns, preserving every other row
+
+#### Scenario: The prior-contents columns and the corrupted kind exist after migration
+
+- **WHEN** the datastore is migrated to head from the previous revision with existing rows
+- **THEN** `files` SHALL have nullable `prior_sha256`, `prior_size` and `prior_mtime` columns, all
+  NULL for existing rows, an event of kind `corrupted` SHALL be insertable, and every existing
+  event and file SHALL be unchanged
+
+#### Scenario: Downgrade refuses to drop findings
+
+- **WHEN** a downgrade past this revision is attempted while an event of kind `corrupted` exists
+- **THEN** the downgrade SHALL refuse rather than delete or relabel it
 
 ### Requirement: Implicit single-user bootstrap
 

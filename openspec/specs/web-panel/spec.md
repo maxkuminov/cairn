@@ -1956,11 +1956,11 @@ than a count of changes or deletions accepted. Where every listed file lies in o
 folder the view SHALL render a single list rather than a group of one. Groups SHALL be ordered
 newest finding first.
 
-**Facts on the row.** For each file the view SHALL show what happened (changed, gone, or came back
-different), when it was found, its size, and whether it was notarized — noting for a notarized file
+**Facts on the row.** For each file the view SHALL show what happened (changed, possibly
+corrupted, gone, or came back different), when it was found, its size, and whether it was notarized — noting for a notarized file
 that its proof of prior existence is kept. For a changed file it SHALL also show when the file
-itself was last written, and, where the file has changed more than once, how many changes are on
-record and since when: those are the facts that let the operator answer "was that expected?"
+itself was last written, what its size was before the change where that differs from its size now,
+and, where the file has changed more than once, how many changes are on record and since when: those are the facts that let the operator answer "was that expected?"
 without leaving the page. Each row SHALL carry that file's own accept action.
 
 **Recovery guidance SHALL assume no particular backup tool**: a copyable list of the affected file
@@ -1975,10 +1975,15 @@ that a rescan returns such a file to a healthy state **only where the restored b
 recorded**, and that a file which comes back different **closes the now-obsolete missing alert and
 replaces it with a new "came back different" issue**. It SHALL NOT tell the operator that restoring
 a file and rescanning returns it to a healthy state unconditionally. For a *changed* file the
-guidance SHALL NOT promise that restoring the earlier version clears the issue: the scan compares
-against the newest recorded contents, so a restored earlier version is found as a further change,
-which the operator then accepts. Promising a verification the product does not perform is the
+guidance SHALL say that the issue closes by itself only where the file is put back **exactly as it
+was before the change** — the scan keeps that digest and compares against it — and that any other
+version is found as a further change. Promising a verification the product does not perform is the
 failure class this view exists to close.
+
+A file showing **possible corruption** SHALL be labelled as such, with the visual weight of an
+alarm and in words that say what was observed — its contents changed while its size and date did
+not — and SHALL NOT be presented as an ordinary change. Where a file carries more than one open
+alert, "came back different" takes precedence, then possible corruption.
 
 Where the list of affected files is truncated, the link to the full set SHALL open the file browser
 already switched to the list view and already filtered to issues. Where the copyable path list is
@@ -2112,11 +2117,23 @@ nothing has been checked yet, which is not the same thing and SHALL NOT be prese
   bytes match the digest recorded for it, and that a file restored with different bytes closes its
   obsolete missing alert and raises a new "came back different" issue in its place
 
-#### Scenario: Recovery guidance does not promise that reverting a change clears it
+#### Scenario: Recovery guidance states the exact condition for a changed file
 
 - **WHEN** the review view renders its recovery guidance
-- **THEN** it SHALL NOT state that restoring the earlier version of a changed file returns it to a
-  healthy state
+- **THEN** it SHALL say that a changed file put back exactly as it was before the change closes its
+  own issue, and SHALL NOT say that restoring any earlier version does
+
+#### Scenario: Possible corruption is labelled on the row
+
+- **WHEN** the review view lists a file whose open alert is a `corrupted` event
+- **THEN** its row SHALL say that the contents changed while the size and date did not, styled as
+  an alarm, and SHALL NOT read as an ordinary change
+
+#### Scenario: A changed row says what the size was
+
+- **WHEN** the review view lists a modified file whose size before the change differs from its size
+  now
+- **THEN** its row SHALL state the earlier size
 
 #### Scenario: Recovery guidance names the action for unwanted files
 
@@ -2353,8 +2370,9 @@ for a collection where nothing should change, **Working** for one where edits ar
 SHALL NOT present the stored policy value as the label. Wherever the policy is shown with room for
 it, the panel SHALL say what that policy flags, and SHALL say it accurately: under Locked every
 change and every deletion is flagged; under Working ordinary edits are not flagged, while
-deletions are, and so is a file that comes back different after going missing. It SHALL NOT
-describe Working as flagging deletions only.
+deletions are, and so are a file that comes back different after going missing, possible
+corruption, and an unusually large change in one scan. It SHALL NOT describe Working as flagging
+deletions only, and SHALL NOT describe any finding as unflagged that the scan does flag.
 
 A collection's status indicator SHALL state the fact rather than a grade: that the collection is
 all clear, how many of its files changed, how many are missing, or both. It SHALL NOT label a
@@ -2386,4 +2404,34 @@ collection that has indexed no files SHALL be labelled as such and SHALL NOT rea
 
 - **WHEN** a collection has indexed no files
 - **THEN** its status indicator SHALL say so and SHALL NOT read as all clear
+
+### Requirement: A scan that could not run says why
+
+Where the panel reports that a collection's latest scan failed, it SHALL state the reason that
+same run recorded — the run the failure report is about, never an earlier completed scan's
+diagnostics — in the operator's terms, next to that report — in particular that the collection's
+folder is unreachable, or empty while files are tracked. A bare "failed, check the logs" leaves an
+operator who is looking at a perfectly quiet collection with no way to know that it is quiet
+because nothing is being read.
+
+The recent-activity summary SHALL name files found with possible corruption as such, distinct from
+changed files.
+
+#### Scenario: An unreachable folder is named on the collection
+
+- **WHEN** a collection's latest scan was refused because its root is unreachable
+- **THEN** the collection's card and its page SHALL say that the folder is unreachable, and SHALL
+  NOT describe the collection's files as missing
+
+#### Scenario: The reason shown belongs to the failed run
+
+- **WHEN** a collection's last completed scan skipped some files, and a later scan was refused for
+  an unreachable root
+- **THEN** the failure note SHALL state the unreachable-folder reason, and the completed scan's
+  skipped-file sample SHALL NOT be presented as the reason for the failure
+
+#### Scenario: Recent activity names possible corruption
+
+- **WHEN** the recent-activity summary covers a day on which a file was found possibly corrupted
+- **THEN** that line SHALL say so, and SHALL NOT fold it into the count of changed files
 
