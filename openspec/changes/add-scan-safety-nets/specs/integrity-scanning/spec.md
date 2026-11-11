@@ -112,6 +112,11 @@ editing the `churn` policy exists to exempt. The finding SHALL therefore be rais
 under `churn` alike, and SHALL be distinguishable from an ordinary modification everywhere it is
 reported.
 
+Where no modification time is on record for the file — a manifest import that carried none — a
+digest that differs behind an unchanged size SHALL be reported the same way: the only thing that
+makes a change of contents an ordinary edit is evidence that the file was written, and there is
+none.
+
 A `corrupted` event is a change alert: every rule that applies to an open `modified` or
 `restored_changed` event — in particular that a file carrying one is never recorded healthy — SHALL
 apply to it. A file with no recorded digest SHALL NOT be reported as corrupted: there is nothing to
@@ -133,6 +138,13 @@ compare against.
 
 - **WHEN** a file's bytes and modification time changed while its size did not
 - **THEN** the change SHALL be classified as an ordinary modification, not as corruption
+
+#### Scenario: A same-size change with no recorded date is not absorbed
+
+- **WHEN** a `churn` collection holds a record with a digest and a size but no modification time,
+  and the file's bytes change while its size does not
+- **THEN** the scan that hashes it SHALL record it `modified` with an unacknowledged `corrupted`
+  event rather than silently re-baselining it
 
 #### Scenario: A file with no recorded digest is not corrupted
 

@@ -907,8 +907,14 @@ async def scan_collection(
                             was_healthy = row.id not in unresolved_ids and row.status in ("ok", "new")
                             # Design D2: the digest moved while size AND mtime both equal the
                             # recorded ones — bit-rot, or a write that bypassed the file system's
-                            # bookkeeping. Never the routine editing `churn` exempts.
-                            is_corruption = row.size == size and row.mtime == mtime
+                            # bookkeeping. Never the routine editing `churn` exempts. A row with no
+                            # modification time on record (a manifest import that carried none) has
+                            # no evidence either way: a same-size digest change is then reported as
+                            # possible corruption rather than absorbed, because "the date moved" is
+                            # the only thing that makes a change an ordinary edit.
+                            is_corruption = row.size == size and (
+                                row.mtime is None or row.mtime == mtime
+                            )
                             row.size, row.mtime, row.sha256 = size, mtime, sha
                             row.last_checked = row.last_changed = now
                             # Content changed: re-queue for a fresh stamp (each distinct content

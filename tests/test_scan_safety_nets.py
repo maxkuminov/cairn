@@ -1184,3 +1184,41 @@ async def test_a_row_recorded_healthy_carries_no_kept_contents(cairn_env, alerts
     row = await _file(cid, "a.txt")
     assert row.status == "ok"
     assert (row.prior_sha256, row.prior_size, row.prior_mtime) == (None, None, None)
+
+
+# --- implementation review, scope A ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_same_size_change_with_no_recorded_date_is_not_absorbed(cairn_env):
+    """A record with a digest and a size but NO modification time (a manifest import that carried
+    none): a same-size digest change gives no evidence of an ordinary edit, so `churn` must not
+    absorb it."""
+    from sqlalchemy import select, update
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, Event, FileEntry
+    from src.services.scanner import scan_collection
+
+    root = cairn_env / "nodate"
+    root.mkdir()
+    (root / "a.bin").write_bytes(b"AAAA")
+    (root / "b.bin").write_bytes(b"bystander")
+    cid = await seed_collection(root, ots_mode="none", mode="churn")
+    async with get_sessionmaker()() as s:
+        await scan_collection(s, await s.get(Collection, cid))
+        await s.execute(update(FileEntry).where(FileEntry.relpath == "a.bin").values(mtime=None))
+        await s.commit()
+
+    (root / "a.bin").write_bytes(b"BBBB")
+    async with get_sessionmaker()() as s:
+        summary = await scan_collection(s, await s.get(Collection, cid))
+        row = await s.scalar(select(FileEntry).where(FileEntry.relpath == "a.bin"))
+        kinds = list(
+            await s.scalars(
+                select(Event.kind).where(Event.file_id == row.id, Event.acknowledged_at.is_(None))
+            )
+        )
+    assert row.status == "modified"
+    assert kinds == ["corrupted"]
+    assert summary.corrupted == 1

@@ -190,6 +190,15 @@ a pass whose walk was incomplete is recorded at its new path as an addition, and
 pass reports the old path missing instead of pairing them (a false alarm, cleared by accepting the
 deletion; the proof stays with the old record's history).
 
+Implementation review, scope A (prior contents, return, corruption): one fix — a same-size
+digest change on a record with no modification time is reported as possible corruption instead of
+being absorbed under `churn`. **Declined:** "a `new` file's first-seen digest should not be kept as
+the prior, because the operator never accepted it". Since `unify-issue-model` a new file is not
+work and is never accepted by hand — it is healthy from the scan that found it — so its first-seen
+contents are exactly what "the contents on record when the file was last healthy" means, and a
+return to them is a return. Refusing it would leave such a file's issue closable only by accepting
+a change the operator has just undone.
+
 ## Risks / Trade-offs
 
 - **A legitimately emptied collection now needs the CLI flag** → stated in the refusal reason.
