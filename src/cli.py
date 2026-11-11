@@ -180,7 +180,14 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 def _cmd_accept(args: argparse.Namespace) -> int:
     async def run() -> int:
         from .database import get_sessionmaker
-        from .services.collections import get_collection_by_name, list_collections
+        from sqlalchemy import text
+
+        from .services.collections import (
+            active_run,
+            blocking_run,
+            get_collection_by_name,
+            list_collections,
+        )
         from .services.scanner import accept_collection
 
         async with get_sessionmaker()() as session:
@@ -193,13 +200,36 @@ def _cmd_accept(args: argparse.Namespace) -> int:
                 collections = [collection]
             else:
                 collections = await list_collections(session)
+            refused = 0
             for collection in collections:
+                # Never accept under a running operation (the panel refuses too): a scan holds the
+                # rows it read when it started and would write over what this accept changes — a
+                # change it had just found could end up recorded healthy. Checked once before
+                # taking SQLite's writer lock (this may reclaim an abandoned claim, which writes
+                # from another connection) and once under it, where no claim can commit any more.
+                name, cid = collection.name, collection.id
+                busy = await blocking_run(session, cid) is not None
+                if not busy:
+                    await session.execute(
+                        text("UPDATE collections SET name = name WHERE id = :id"), {"id": cid}
+                    )
+                    busy = await active_run(session, cid) is not None
+                if busy:
+                    await session.rollback()
+                    refused += 1
+                    print(
+                        f"[{name}] refused: an operation is running on this collection; "
+                        "run accept again when it has finished",
+                        file=sys.stderr,
+                    )
+                    continue
                 r = await accept_collection(session, collection, uid)
                 print(
-                    f"[{collection.name}] accepted={r['accepted']} removed_missing={r['removed']} "
+                    f"[{name}] accepted={r['accepted']} removed_missing={r['removed']} "
                     f"events_acknowledged={r['events_ack']}"
                 )
-        return 0
+        # Like `cairn scan`: non-zero only when nothing at all could be done.
+        return 1 if collections and refused == len(collections) else 0
 
     return _run(run())
 

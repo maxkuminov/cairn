@@ -810,3 +810,96 @@ def test_cli_help_names_the_two_policies_in_plain_words(capsys):
     out = re.sub(r"\s+", " ", capsys.readouterr().out)
     assert "'locked'" in out and "'working'" in out
     assert "nothing should change" in out and "edits are normal" in out
+
+
+# --- an accept never runs under an operation (review round 2) --------------------------------
+
+
+async def _seed_running_scan(cairn_env, name: str) -> tuple[int, int]:
+    """A collection with one changed, unaccepted file and a LIVE running scan claimed on it."""
+    from datetime import datetime, timezone
+
+    from sqlalchemy import select
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry, Run
+    from src.services import scanner
+    from tests.conftest import seed_collection
+
+    root = cairn_env / name
+    root.mkdir()
+    (root / "a.txt").write_text("one")
+    cid = await seed_collection(root, ots_mode="none", mode="worm")
+    async with get_sessionmaker()() as s:
+        collection = await s.get(Collection, cid)
+        await scanner.scan_collection(s, collection)
+        (root / "a.txt").write_text("two, longer")
+        await scanner.scan_collection(s, collection)
+        fid = await s.scalar(select(FileEntry.id).where(FileEntry.collection_id == cid))
+        now = datetime.now(timezone.utc)
+        s.add(Run(collection_id=cid, kind="scan", result="running", started=now, heartbeat_at=now))
+        await s.commit()
+    return cid, fid
+
+
+def test_cli_accept_refuses_while_an_operation_is_running(cairn_env, capsys):
+    import asyncio
+
+    from sqlalchemy import func, select
+
+    from src.database import get_sessionmaker
+    from src.models.db import Event, FileEntry
+
+    cid, fid = asyncio.run(_seed_running_scan(cairn_env, "busy"))
+
+    assert _cli(["accept", "--collection", "busy"]) == 1
+    assert "refused" in capsys.readouterr().err
+
+    async def state():
+        async with get_sessionmaker()() as s:
+            status = await s.scalar(select(FileEntry.status).where(FileEntry.id == fid))
+            open_events = await s.scalar(
+                select(func.count()).select_from(Event).where(
+                    Event.collection_id == cid, Event.acknowledged_at.is_(None)
+                )
+            )
+            return status, open_events
+
+    assert asyncio.run(state()) == ("modified", 1)
+
+
+def test_the_panel_accept_rechecks_for_an_operation_under_the_write_lock(cairn_env, monkeypatch):
+    """The advisory pre-check runs before the writer lock is taken, so a scan can claim the
+    collection in between. With that pre-check blinded, the under-lock re-check must still refuse."""
+    import asyncio
+
+    from fastapi.testclient import TestClient
+    from sqlalchemy import select
+
+    from src.control_panel import routes
+    from src.database import get_sessionmaker
+    from src.main import app
+    from src.models.db import FileEntry
+
+    cid, fid = asyncio.run(_seed_running_scan(cairn_env, "window"))
+
+    async def no_run(session, collection_id):
+        return None
+
+    with TestClient(app) as client:
+        page = client.get(f"/collection/{cid}/review").text
+        fp = page.split('name="population_fp" value="')[1].split('"')[0]
+        token = page.split('name="csrf_token" value="')[1].split('"')[0]
+        monkeypatch.setattr(routes.collections_svc, "blocking_run", no_run)
+        r = client.post(
+            f"/collection/{cid}/review/adopt-changed",
+            data={"csrf_token": token, "population_fp": fp, "dir": "", "deep": "1"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 303 and "stale=1" in r.headers["location"]
+
+    async def status():
+        async with get_sessionmaker()() as s:
+            return await s.scalar(select(FileEntry.status).where(FileEntry.id == fid))
+
+    assert asyncio.run(status()) == "modified"

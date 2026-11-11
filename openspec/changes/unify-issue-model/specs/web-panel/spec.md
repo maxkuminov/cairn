@@ -67,8 +67,8 @@ files as notarized on the strength of being new.
 
 The panel SHALL offer exactly two resolving actions, one per kind of issue, each named for what
 happens: **Accept change** for a file whose contents changed, and **Accept deletion** for a file
-that is gone. It SHALL NOT offer a single control that acts on both kinds, nor one that also acts
-on files the view does not list. Each action SHALL be offered per file, on that file's row, and in
+that is gone. It SHALL NOT offer a single control that acts on both kinds, nor one that acts on
+files outside the scope it names. Each action SHALL be offered per file, on that file's row, and in
 bulk for a folder scope, labelled with **the number of files it acts on**; a bulk action whose
 population is empty SHALL NOT be rendered.
 

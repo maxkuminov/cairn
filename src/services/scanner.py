@@ -822,6 +822,26 @@ async def scan_collection(
                 elif row.id in current_ids and row.status in ("ok", "new"):
                     row.status = "modified"
                     reflagged_ids.add(row.id)
+            # ...and the same statement made against the DATABASE, not only against the rows this
+            # pass holds. A held row can already read `modified` while the stored row reads `ok`
+            # (an accept from another connection wrote it mid-pass); assigning `modified` to it
+            # again is no change as far as the ORM is concerned, so nothing would be written and a
+            # change this very pass has just recorded an alert for would commit as healthy. Flushed
+            # first, so the two cannot disagree about a row; chunked for the parameter ceiling.
+            if current_ids:
+                await session.flush()
+                ids = sorted(current_ids)
+                for i in range(0, len(ids), ACK_CHUNK):
+                    await session.execute(
+                        update(FileEntry)
+                        .where(
+                            FileEntry.collection_id == collection_id,
+                            FileEntry.id.in_(ids[i : i + ACK_CHUNK]),
+                            FileEntry.status.in_(("ok", "new")),
+                        )
+                        .values(status="modified")
+                        .execution_options(synchronize_session=False)
+                    )
             summary.reflagged = len(reflagged_ids)
             if summary.reflagged:
                 logging.getLogger("cairn.scanner").info(

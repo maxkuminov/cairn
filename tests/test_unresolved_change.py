@@ -455,3 +455,50 @@ async def test_a_manifest_import_does_not_mark_an_unaccepted_change_healthy(cair
     assert (await _file(cid, "b.txt")).status == "ok"
     still_open = [e for e in await _events(cid, file_id=a.id) if e.acknowledged_at is None]
     assert [e.kind for e in still_open] == ["modified"]
+
+
+@pytest.mark.asyncio
+async def test_a_change_found_while_an_accept_lands_from_another_connection_is_not_committed_healthy(
+    cairn_env, monkeypatch
+):
+    """Review round 2. A Locked file is `modified` with an open alert and changes AGAIN. While the
+    pass is hashing it, another connection acknowledges the old alert and writes `ok`. The pass
+    records an alert for the new change, but its held row already read `modified`, so assigning
+    `modified` again writes nothing — and the stored row would commit `ok` with an open alert.
+    The end of the pass states the rule against the database, not only against its own rows."""
+    from sqlalchemy import update
+
+    from src.database import get_sessionmaker
+    from src.models.db import Event, FileEntry
+    from src.services import scanner
+
+    root = cairn_env / "race"
+    root.mkdir()
+    (root / "a.txt").write_text("one")
+    cid = await seed_collection(root, ots_mode="none", mode="worm")
+    await _scan(cid)
+    (root / "a.txt").write_text("two, longer")
+    await _scan(cid)
+    fid = (await _file(cid, "a.txt")).id
+    assert (await _file(cid, "a.txt")).status == "modified"
+
+    (root / "a.txt").write_text("three, longer still")
+    real_hash = scanner._hash
+
+    async def hash_while_an_accept_lands(path):
+        async with get_sessionmaker()() as other:
+            await other.execute(
+                update(Event)
+                .where(Event.file_id == fid, Event.acknowledged_at.is_(None))
+                .values(acknowledged_at=datetime.now(timezone.utc))
+            )
+            await other.execute(update(FileEntry).where(FileEntry.id == fid).values(status="ok"))
+            await other.commit()
+        return await real_hash(path)
+
+    monkeypatch.setattr(scanner, "_hash", hash_while_an_accept_lands)
+    await _scan(cid)
+
+    still_open = [e for e in await _events(cid, file_id=fid) if e.acknowledged_at is None]
+    assert [e.kind for e in still_open] == ["modified"]  # the NEW change's alert
+    assert (await _file(cid, "a.txt")).status == "modified"

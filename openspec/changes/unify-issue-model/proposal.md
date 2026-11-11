@@ -76,7 +76,8 @@ revises the vocabulary half of §3's WORM/churn decision without touching its se
 - **No path rules, no history views, no per-file page.** Follow-on change.
 - **The verify card's wording** (which uses "recorded baseline" for the fingerprint on record) is
   not reworded here; it is reworked with the per-file history page.
-- **`cairn accept`** keeps its unscoped, collection-wide behavior.
+- **`cairn accept`** keeps its unscoped, collection-wide behavior. (It now refuses while an
+  operation is running on the collection, as the panel already did — found in review.)
 - No new dependency, no JavaScript framework; Slate tokens and existing components only.
 
 ## Capabilities

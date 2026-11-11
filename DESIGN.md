@@ -212,11 +212,10 @@ server-rendered htmx, so there was never a separate JSON API to mount. `api/`, `
   `kind='scan'` runs count toward freshness. `interrupted` is the reaper's terminal state (a
   restart killed the run), kept distinct from a genuine `error`.
 - `events(id, collection_id, file_id, kind[added|modified|missing|restored|moved|restored_changed],
-  detail, detected_at, acknowledged_at, acknowledged_by)` — nag-until-accept lifecycle + the panel's
-  feed. **Only the alarming kinds nag**: `missing`, WORM `modified`, and `restored_changed`. The
+  detail, detected_at, acknowledged_at, acknowledged_by)` — the history of what scans found (the
+  dashboard's recent-activity summary reads it). **Only the alarming kinds nag**: `missing`, WORM `modified`, and `restored_changed`. The
   informational kinds (`added`, `restored`, `moved`) are written *already acknowledged*
-  (`acknowledged_by` NULL = a system ack), so routine activity shows in the feed without inflating
-  "needs action". `detail` carries context — `"old → new"` for a move, both digests for a
+  (`acknowledged_by` NULL = a system ack), so they never keep an issue open. `detail` carries context — `"old → new"` for a move, both digests for a
   `restored_changed`. An alarming event stays open until the issue it belongs to is resolved
   (the file is accepted or restored); the panel never acknowledges an event by hand, and a scan
   keeps any file that carries an open `modified` / `restored_changed` event recorded `modified`,

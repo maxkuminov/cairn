@@ -33,7 +33,8 @@
       </div>
       <ul class="guide__list">
         <li>A <strong>missing</strong> file that comes back is re-read and compared against the
-          fingerprint recorded before it went missing. If it matches, the issue closes by itself.
+          fingerprint recorded before it went missing. If it matches, the missing alert closes by
+          itself (a file that also had an unaccepted change stays listed as changed).
           If it does not — the wrong snapshot, a truncated restore — the missing alert is closed
           and replaced by a new <em>came back different</em> issue for you to check.</li>
         <li>A <strong>changed</strong> file is compared against the newest contents Cairn recorded,

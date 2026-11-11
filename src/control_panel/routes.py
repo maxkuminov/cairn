@@ -1683,6 +1683,16 @@ async def _guarded_accept(
         await session.rollback()
         return stale
 
+    # 1b. Look for an operation again, now that nothing else can commit. The check above ran
+    #     before the lock, so a scan could have claimed the collection in between and already be
+    #     holding rows it read before this accept — which it would then write over. Under the lock
+    #     a claim either committed before us (seen here: refuse) or waits for our commit (and then
+    #     reads what we wrote). A plain read: reclaiming a stale claim writes from another
+    #     connection, which would wait on the lock this request is holding.
+    if await collections_svc.active_run(session, collection.id) is not None:
+        await session.rollback()
+        return stale
+
     # 2. Recompute inside this transaction, through the SAME single-statement read, the SAME slice
     #    and the SAME encoder the form was minted with.
     pop = await _read_population(

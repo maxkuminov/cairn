@@ -248,7 +248,15 @@ an accept while a scan runs, but `cairn accept` does not, so an alert can close 
 this rule alone held `modified` goes back to `ok` rather than being left flagged with nothing open
 behind it (found in implementation review; correcting the "cannot go stale" assumption above).
 `import-manifest`, the one other writer of `files.status`, applies the same rule when it updates an
-existing row. `RunSummary` counts the re-flagged files and the scan logs
+existing row.
+
+Review round 2 found the mirror image: a held row can already read `modified` while the stored row
+was set `ok` by an accept from another connection, so re-assigning `modified` writes nothing. Two
+changes close it. The end-of-pass sweep also issues the rule as an `UPDATE` against the database
+(after flushing, restricted to ids with an open change alert). And the race is removed at its
+source: `cairn accept` refuses while an operation is running — checked before and again under the
+write lock — and the panel's accept guard repeats its in-flight check under the lock it already
+takes, where a claim can no longer commit. `RunSummary` counts the re-flagged files and the scan logs
 one INFO line when the count is non-zero. It never touches a file that is `missing` (already an
 issue) and never a file with no open change event.
 

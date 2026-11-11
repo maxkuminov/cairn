@@ -145,3 +145,30 @@ alert recorded `modified`.
   accepted
 - **THEN** that file's status SHALL still be `modified` after the import, its change alert SHALL
   still be open, and the collection's other imported files SHALL be `ok`
+
+### Requirement: An accept never runs under an operation in flight
+
+The command-line accept SHALL refuse to act on a collection while a scan, stamp or upgrade
+operation is running on it, exactly as the panel's accept actions do, and SHALL say so. A scan
+holds the records it read when it began; an accept that lands underneath it is written over, and a
+change the scan had just found could be recorded healthy. The refusal SHALL be decided under the
+datastore's write lock, so that an operation cannot claim the collection between the check and the
+accept. Accepting several collections SHALL continue past a refused one, and the command SHALL exit
+non-zero only when every collection it was asked to accept was refused.
+
+A scan SHALL nevertheless not depend on that exclusion for its own correctness: at the end of a
+pass it SHALL establish the rule "a file with an open change alert is recorded `modified`" against
+the stored records, not only against the copies it holds.
+
+#### Scenario: The command-line accept is refused during a scan
+
+- **WHEN** `cairn accept` is run for a collection that has an operation in progress
+- **THEN** it SHALL change no file record and acknowledge no event, SHALL report that the
+  collection is busy, and SHALL exit non-zero
+
+#### Scenario: A change found while an accept lands elsewhere is not committed healthy
+
+- **WHEN** a file already recorded `modified` changes again, and during the scan that finds the new
+  change another connection acknowledges its earlier alert and records it `ok`
+- **THEN** after the scan the stored record SHALL be `modified` and the new change's alert SHALL be
+  open
