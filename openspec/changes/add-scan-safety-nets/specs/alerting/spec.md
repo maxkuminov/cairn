@@ -20,7 +20,13 @@ no more often than once in twenty-four hours per collection: a refused scan SHAL
 unless an earlier scan of the same collection was refused for an unreachable or empty root within
 the preceding twenty-four hours. The limit is on how often the alert is attempted, and it is
 deliberately not "once per outage": dispatch is best-effort, so an alert that failed to deliver is
-followed by another within a day, and an unrelated earlier scan error never suppresses it. A file that the scan reconciles as a move (see the
+followed by another within a day, and an unrelated earlier scan error never suppresses it.
+
+A scan that could not list one or more directories SHALL dispatch an alert under the same
+once-in-twenty-four-hours limit, naming the collection and how many folders could not be read and
+saying that the files beneath them are not being checked. Such a scan completes as `partial`, which
+the health check counts as a scan having run; without an alert a folder that stays unreadable
+would go unchecked indefinitely behind a collection that looks current. A file that the scan reconciles as a move (see the
 `integrity-scanning` move/rename requirement) is not a `missing` change and SHALL NOT trigger an
 alert. Alerts SHALL cover only changes newly detected in that scan, not the entire unacknowledged
 backlog, so the operator is not re-nagged on every scan.
@@ -93,6 +99,12 @@ backlog, so the operator is not re-nagged on every scan.
 - **WHEN** a scan is refused for an unreachable root and the only earlier refusals of that
   collection are more than twenty-four hours old
 - **THEN** an alert SHALL be dispatched
+
+#### Scenario: An unreadable folder alerts
+
+- **WHEN** a scan cannot list a directory under a collection's root
+- **THEN** an alert SHALL be dispatched saying that folders could not be read and their files are
+  not being checked, and a further such scan within twenty-four hours SHALL NOT repeat it
 
 #### Scenario: An unrelated earlier failure does not suppress the alert
 

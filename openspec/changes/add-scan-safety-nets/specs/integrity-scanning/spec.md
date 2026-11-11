@@ -27,11 +27,15 @@ could not be listed (a permission or input/output error during the walk), the sc
 "this folder's files are gone" from "this folder could not be read", so that pass SHALL NOT mark
 any file missing. It SHALL still record what it found in the directories it could read, SHALL
 count each unreadable directory among the run's errors with a diagnostic entry, and SHALL end
-`partial`.
+`partial`. This rule takes precedence over the empty-root refusal: a walk that saw no file because
+the directories holding them could not be listed is an unreadable folder, not an empty one, and
+SHALL be reported as such.
 
-A refused pass SHALL NOT count as a deep verification either: where the pass that was refused was
-a deep pass, the collection's record of when it was last deep-verified SHALL NOT advance, so the
-deep pass is still owed. The same SHALL hold for any deep pass that did not complete.
+A pass that did not cover the collection SHALL NOT count as a deep verification: where a deep pass
+was refused, ended in error, or could not list every directory, the collection's record of when it
+was last deep-verified SHALL NOT advance, so the deep pass is still owed. A deep pass that walked
+every directory and merely skipped individual files it could not read or store SHALL count, as it
+does today.
 
 #### Scenario: A root that does not exist
 
@@ -76,6 +80,20 @@ deep pass is still owed. The same SHALL hold for any deep pass that did not comp
 - **WHEN** the scheduler runs a collection's due deep pass and that pass is refused, or ends in
   error
 - **THEN** the collection's last-deep-verified time SHALL be unchanged
+
+#### Scenario: A deep pass that could not list a folder is still owed
+
+- **WHEN** a due deep pass ends `partial` because a directory could not be listed
+- **THEN** the collection's last-deep-verified time SHALL be unchanged
+- **AND WHEN** a due deep pass ends `partial` only because an individual file was skipped, the
+  time SHALL advance
+
+#### Scenario: Unreadable takes precedence over empty
+
+- **WHEN** every tracked file lies beneath a directory that cannot be listed, and the walk
+  therefore sees no file at all
+- **THEN** the run SHALL end `partial` with that directory diagnosed, SHALL NOT be reported as an
+  empty root, and no file SHALL be marked `missing`
 
 #### Scenario: A refused pass does not refresh freshness
 

@@ -8,8 +8,8 @@
 ## 2. Scanner
 
 - [ ] 2.1 Root check before the walk; empty-walk check before the missing sweep; `allow_empty` parameter; refusal finalised as `error` with the (prefixed) reason in `runs.error_sample`, nothing else written
-- [ ] 2.1b Walk `onerror`: any unreadable directory → no missing sweep and no move reconciliation this pass, directories counted and sampled in the run's errors, result `partial`
-- [ ] 2.1c Scheduler: advance `last_full_scan_at` only when the deep scan ended `ok` / `partial`
+- [ ] 2.1b Walk `onerror`: any unreadable directory → no missing sweep and no move reconciliation this pass, directories counted and sampled in the run's errors, result `partial`, `RunSummary.walk_incomplete`; checked before the empty-walk refusal; alert under the 24 h limit
+- [ ] 2.1c Scheduler: advance `last_full_scan_at` only when the deep scan ended `ok` / `partial` **and** its walk was complete
 - [ ] 2.2 Corruption signature → `corrupted` event + `modified` in both modes; `corrupted` joins the change-alert kinds
 - [ ] 2.3 Prior contents: set on healthy → `modified` (worm change, corruption, came back different, mass conversion); never overwritten while `modified`; cleared by all three accepts and by `import-manifest` when it leaves a row `ok`
 - [ ] 2.4 Return detection in the hash-compare branch and the reappearance branch (order: recorded, prior, different); system-acknowledge the file's open change alerts in the same commit; informational `restored` event; `RunSummary.reverted`

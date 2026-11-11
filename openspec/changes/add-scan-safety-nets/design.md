@@ -44,8 +44,10 @@ no batch had anything to commit. Freshness is untouched — `compute_health` key
 `ok`/`partial` scans, so the collection goes stale on schedule (the dead-man's switch still works).
 
 The refusal alert is rate-limited, not deduplicated: it is dispatched unless an earlier scan of
-the collection was refused for the same class of reason within the previous 24 hours (the reason
-entries carry a fixed prefix, so the check is one query over `runs`). Dispatch is best-effort, so
+the collection was refused — for either reason, unreachable or empty — within the previous 24
+hours (the reason entries carry a fixed prefix, so the check is one query over `runs`). A pass
+with unreadable directories alerts under the same limit, keyed on earlier passes with unreadable
+directories. Dispatch is best-effort, so
 "once per outage" could lose the only alert to one SMTP hiccup; a daily repeat cannot. It carries
 no paths and links to the collection page.
 
@@ -54,11 +56,15 @@ errors by default; the walk gets an `onerror` hook that records each unreadable 
 with any such error skips the missing sweep and move reconciliation entirely, counts the
 directories in `runs.errors` with diagnostic entries, and ends `partial`. Files in readable
 directories are classified as usual (batches already committed stand — they are true statements
-about files the pass did read).
+about files the pass did read). Walk errors are checked **before** the empty-walk refusal: no file
+seen because nothing could be listed is "unreadable", not "empty". `RunSummary.walk_incomplete`
+records it.
 
-**A deep pass that did not complete is still owed.** The scheduler advances `last_full_scan_at`
-only when the deep scan it ran ended `ok` or `partial`; today it advances it whenever it called
-one. *Alternative considered:* a sentinel file
+**A deep pass that did not cover the collection is still owed.** The scheduler advances
+`last_full_scan_at` only when the deep scan it ran ended `ok` or `partial` **and its walk was
+complete**; today it advances it whenever it called one. (A `partial` caused only by individual
+files that could not be read or stored still counts — the reference deployment has a collection
+that is `partial` on every scan for exactly that reason, and it must not be re-hashed every tick.) *Alternative considered:* a sentinel file
 that must exist under the root. Rejected: it asks every operator to plant a file in folders Cairn
 promises never to need write access to.
 
@@ -176,6 +182,13 @@ still owed, the refusal alert is rate-limited rather than once-per-outage, the m
 limit is stated in the requirement. **Declined:** specifying a new outcome for the reappearance of
 a file that never had a digest on record — pre-existing behaviour under its own requirement, and
 nothing in this change can compare bytes that were never hashed.
+
+Spec round 2: unreadable takes precedence over empty; an incomplete walk is not a deep
+verification (while a per-file `partial` still is); an incomplete walk alerts, since `partial`
+keeps the collection "fresh"; the alert key aligned. **Accepted limitation:** a file moved during
+a pass whose walk was incomplete is recorded at its new path as an addition, and the next complete
+pass reports the old path missing instead of pairing them (a false alarm, cleared by accepting the
+deletion; the proof stays with the old record's history).
 
 ## Risks / Trade-offs
 
