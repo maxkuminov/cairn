@@ -2466,6 +2466,12 @@ _RULE_REFUSALS = {
         "is what its policy says: set the collection's policy to Working."
     ),
     "duplicate": "This collection already has that rule.",
+    # A stored entry with this pattern that the scanner ignores (an effect this version does not
+    # know): not "already a rule" — nothing is being silenced — but it does occupy the pattern.
+    "duplicate_ignored": (
+        "This collection has a stored entry with that pattern that is not recognised and is "
+        "ignored. Remove it on the rules page, then add the rule."
+    ),
     "too_many": (
         f"This collection already has {rules_svc.MAX_RULES} rules, the most it can hold. "
         "Remove one first."
@@ -2482,7 +2488,9 @@ def _legal_relpath(path: str) -> bool:
     anything else is dropped, never shown and never split into proposals."""
     if not path or len(path.encode("utf-8", "replace")) > RULE_START_PATH_MAX:
         return False
-    if path.startswith("/") or any(ch in path for ch in "\x00\n\r"):
+    # A line break is legal in a file name (macOS writes `Icon\r` into folders), so it is legal
+    # here: such a name cannot be a pattern, but its folder can, and the page still starts from it.
+    if path.startswith("/") or "\x00" in path:
         return False
     return all(segment not in ("", ".", "..") for segment in path.split("/"))
 
@@ -2530,8 +2538,9 @@ def _rule_check(collection: Collection, raw: str) -> tuple[str | None, dict[str,
     except rules_svc.RuleError as exc:
         return None, _rule_refusal(exc.reason, str(exc))
     existing = rules_svc.list_rules(collection)
-    if any(entry["pattern"] == pattern for entry in existing):
-        return None, _rule_refusal("duplicate")
+    for entry in existing:
+        if entry["pattern"] == pattern:
+            return None, _rule_refusal("duplicate" if entry["recognised"] else "duplicate_ignored")
     if len(existing) >= rules_svc.MAX_RULES:
         return None, _rule_refusal("too_many")
     return pattern, None
@@ -2568,14 +2577,19 @@ async def rule_new(
     collection = await _get_owned_collection(session, collection_id, user)
     start = path if _legal_relpath(path) else ""
     proposals = _rule_proposals(start)
-    existing = {entry["pattern"] for entry in rules_svc.list_rules(collection)}
+    stored_entries = rules_svc.list_rules(collection)
+    existing = {entry["pattern"] for entry in stored_entries if entry["recognised"]}
+    ignored = {entry["pattern"] for entry in stored_entries if not entry["recognised"]}
 
     custom: dict[str, Any] | None = None
     if pattern is not None:
         # Present but blank is a submission too: it is refused, with the reason, like any other.
         typed = pattern[:RULE_TYPED_MAX]
         stored, refusal = _rule_check(collection, typed)
-        custom = {"typed": typed.strip(), "pattern": stored, "refusal": refusal}
+        # `typed` is what the operator typed, kept verbatim for the field and for a refusal;
+        # `pattern` is what would be stored. The card of an accepted pattern shows `pattern` —
+        # never `typed` — so the text beside "Add this rule" is exactly what that button stores.
+        custom = {"typed": typed, "pattern": stored, "refusal": refusal}
         # The operator's own pattern is shown once, as theirs.
         proposals = [p for p in proposals if p["pattern"] != stored]
 
@@ -2586,6 +2600,7 @@ async def rule_new(
     for p in proposals:
         p["reach"] = reach[p["pattern"]]
         p["exists"] = p["pattern"] in existing
+        p["ignored"] = p["pattern"] in ignored
     if custom and custom["pattern"]:
         custom["reach"] = reach[custom["pattern"]]
 

@@ -386,4 +386,8 @@ def _alarm_path(detail: str | None, file_relpath: str | None) -> str | None:
         path = parsed.get("path")
         if isinstance(path, str):
             return path
+    elif file_relpath is None and detail:
+        # The file's record is gone (its deletion was accepted): the accept kept the path it was
+        # about as the event's plain-text detail, which is the only record of it left.
+        return detail
     return file_relpath

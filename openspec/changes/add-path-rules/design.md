@@ -138,6 +138,45 @@ Also folded in from round 1: `**` only as a whole segment,
 the trailing-slash reading stated, the ninety-day figure defined by event-time path and labelled
 for what it is, and the existing mass-change requirement modified explicitly.
 
+**Implementation review, round 2** (verification of the fixes, plus the panel routes): the
+matcher agreed with the reviewer's own reference matcher over ~106,000 comparisons and no probe
+took more than a millisecond. Two MAJOR on the rule page, both fixed — a proposal for a path that
+itself contains `*` or `?` was labelled "Only this file" (it is now labelled as a pattern, with
+its reach), and an accepted typed pattern was displayed stripped of characters the stored
+pattern keeps (the card now shows exactly what its button stores). One MINOR declined, below.
+
+**Independent panel tests** (written by an agent that did not write the panel) found three
+defects, all fixed: a file name containing a line break was offered a rule link that opened an
+empty page (the starting path is now accepted and its folder proposed); accepting a deletion
+dropped that file's earlier alarms from the ninety-day figure (the path the accept keeps in the
+event is now read); and a stored entry the scanner ignores was shown as "Already a rule". The
+row's link was renamed from "Stop flagging this…" to "Don't flag future changes…" — the change
+already listed stays listed.
+
+## Accepted limitations
+
+- **No rule for deletions.** Cut in spec review (see above); a missing file is always an issue.
+- **A file directly in the collection's folder cannot be named alone**: a pattern with no slash is
+  a name in any folder. The page offers that one proposal and states its reach.
+- **A path containing `*` or `?` cannot be named exactly** — the grammar has no escape. Such a
+  proposal is labelled as a pattern and its reach is stated.
+- **A rule in a Working collection is stored and does nothing**; both rule pages, the
+  confirmation and the collection page say so.
+- **A stored entry with an effect this version does not know is inert but occupies its pattern**
+  until removed on the rules page. Reachable only by hand-editing the column or by a rollback
+  across a version that adds an effect.
+- **The ninety-day figure** matches alarms raised before `add-scan-safety-nets` by the file's
+  present path (they recorded none), so a file renamed since is counted under its new name.
+- **Declined (review round 2, MINOR):** a browser that sends a hand-made `cairn_done=rule:N`
+  cookie sees the "Rule added" confirmation. The cookie selects and authorises nothing, and the
+  only person it can mislead is the one who forged it; the same holds for the accept
+  confirmations it was modelled on.
+- **The "Rule removed" notice rides a query flag** (`?gone=1`) and repeats if the page is
+  reloaded. It changes nothing.
+- **Two sessions adding rules at the same instant** can lose one of the two (the column is
+  re-read before each write, which narrows the window and does not close it). The rules page
+  shows what is stored.
+
 ## Risks / Trade-offs
 
 - **A rule too broad silences real edits** → no match-all patterns; reach stated before creation

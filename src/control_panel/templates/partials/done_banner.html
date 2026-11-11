@@ -10,13 +10,17 @@
       {% if done.kind == "changes" %}Accepted <strong>{{ "{:,}".format(done.count) }}</strong> change{{ "" if done.count == 1 else "s" }}.
       {% elif done.kind == "rule" %}
         {# A rule resolves nothing. The sentence a hurried reader keeps must be that one. #}
-        <strong>Rule added.</strong> It applies from the next scan.
+        <strong>Rule added.</strong>{% if not (c is defined and c and c.policy.value == "churn") %} It applies from the next scan.{% endif %}
         {% if done.count %}
           <strong>{{ "{:,}".format(done.count) }}</strong> changed file{{ "" if done.count == 1 else "s" }} listed here match{{ "es" if done.count == 1 else "" }} it and {{ "is" if done.count == 1 else "are" }} still listed — a rule does not accept anything; use <strong>Accept change</strong> for {{ "it" if done.count == 1 else "them" }}.
         {% else %}
           No changed file listed here matches it.
         {% endif %}
-        {% if c is defined and c %}<a href="/collection/{{ c.id }}/rules">See this collection's rules</a>{% endif %}
+        {% if c is defined and c %}
+          {# Under Working, ordinary edits are quiet everywhere: the rule is stored and does nothing. #}
+          {% if c.policy.value == "churn" %}This collection's policy is Working, so the rule changes nothing while that stands.{% endif %}
+          <a href="/collection/{{ c.id }}/rules">See this collection's rules</a>
+        {% endif %}
       {% else %}Accepted <strong>{{ "{:,}".format(done.count) }}</strong> deletion{{ "" if done.count == 1 else "s" }} — {{ "its record was" if done.count == 1 else "their records were" }} removed; nothing on disk was touched.{% endif %}
     </div>
   </div>

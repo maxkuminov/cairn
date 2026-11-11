@@ -1089,6 +1089,8 @@
 .rule-card__pattern { margin-top: 5px; display: inline-block; padding: 3px 8px; font-size: 12.5px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow-wrap: anywhere; word-break: break-all; }
 .rule-card__form { margin: 0; flex-shrink: 0; }
 .rule-card__exists { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--ok); }
+.rule-card__exists--warn { color: var(--warn); text-decoration: none; max-width: 320px; text-align: right; }
+.rule-card__exists--warn:hover { text-decoration: underline; }
 .rule-reach { margin: 12px 0 0; padding-left: 18px; font-size: 12.5px; line-height: 1.65; color: var(--text-2); }
 .rule-reach strong { color: var(--text); }
 .rule-card__warn { display: flex; align-items: flex-start; gap: 7px; margin-top: 9px; font-size: 12px; line-height: 1.5; color: var(--warn); }

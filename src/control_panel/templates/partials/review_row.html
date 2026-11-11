@@ -91,7 +91,7 @@
        the page it opens shows what a rule would match before anything is stored. #}
     {% if it.kind == 'changed' %}
       <a class="review-row__rule" href="/collection/{{ r.collection_id }}/rules/new?path={{ it.relpath | urlencode }}"
-         title="This file changes as part of normal work? Create a rule so ordinary changes to it, or to files like it, are not flagged. You see what the rule matches before it is created.">Stop flagging this…</a>
+         title="This file changes as part of normal work? Create a rule so ordinary changes to it, or to files like it, are not flagged from the next scan. This change stays listed until you accept it, and a deletion or possible corruption is always flagged. You see what the rule matches before it is created.">Don’t flag future changes…</a>
     {% endif %}
   </div>
 </div>
