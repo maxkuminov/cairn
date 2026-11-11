@@ -153,6 +153,11 @@ def _excluded(relpath: str, globs: list[str]) -> bool:
     return False
 
 
+def _beneath(relpath: str, dirs: list[str]) -> bool:
+    """True when ``relpath`` lies under one of ``dirs`` (collection-relative, literal prefix)."""
+    return any(relpath.startswith(d + "/") for d in dirs)
+
+
 def iter_relpaths(root: Path, globs: list[str], walk_errors: list[OSError] | None = None):
     """Yield POSIX relpaths of files under root, pruning excluded dirs; no symlink following.
 
@@ -580,6 +585,10 @@ async def scan_collection(
         # Directory-listing errors from the walk (design D1). Any one makes the walk incomplete:
         # no missing sweep, no move reconciliation, result `partial`.
         walk_errors: list[OSError] = []
+        # Collection-relative directories the walk could not list, and whether one of them was the
+        # root itself (or could not be placed under it).
+        unreadable_dirs: list[str] = []
+        unreadable_all = False
         # Files the walk yielded at all (before any per-file skip) — "did the walk see any file".
         walked_files = 0
         # Ids of files found back at the contents kept before an unaccepted change (design D3).
@@ -903,7 +912,19 @@ async def scan_collection(
                         # either way, and for a changed reappearance the alarm rides on the
                         # unacknowledged `restored_changed` event, which says strictly more.
                         restored_ids.append(row.id)
-                    elif deep or row.size != size or row.mtime != mtime or row.sha256 is None:
+                    elif (
+                        deep
+                        or row.size != size
+                        or row.mtime != mtime
+                        or row.sha256 is None
+                        # A file with an unaccepted change is re-read on EVERY pass, not only when
+                        # its size or date moved: a restore that preserves metadata (restic,
+                        # `rsync -a`, `cp -p`) puts the original bytes back under the very size and
+                        # mtime that are on record — for a corrupted file they never differed — and
+                        # the quick pass would otherwise never notice that the issue closed itself.
+                        # Bounded: only open issues carry a prior.
+                        or row.prior_sha256 is not None
+                    ):
                         # Deep pass re-hashes every file; a normal pass only when size/mtime moved or
                         # no prior hash exists. Either way the sha comparison below classifies it.
                         sha = await _hash(full)
@@ -979,6 +1000,9 @@ async def scan_collection(
                     summary.errors += 1
                     if len(error_entries) < RUN_ERROR_SAMPLE_MAX:
                         error_entries.append(_render_skip("hash", relpath))
+                    # Present (so never missing) but its bytes were not read in this pass: nothing
+                    # may treat it as verified — in particular a deep pass must not graduate it.
+                    unexamined.add(relpath)
                     continue
 
                 processed += 1
@@ -991,23 +1015,41 @@ async def scan_collection(
             # sampled FIRST, ahead of any per-file skip, so the alert rate limit can key on the
             # sample's first entry.
             if walk_errors:
-                summary.walk_incomplete = True
                 summary.errors += len(walk_errors)
                 walk_entries = []
-                for err in walk_errors[:RUN_ERROR_SAMPLE_MAX]:
+                for err in walk_errors:
                     where = getattr(err, "filename", None)
                     try:
                         rel = os.path.relpath(os.fsdecode(where), root) if where else "?"
                     except (TypeError, ValueError):
                         rel = "?"
-                    walk_entries.append(_render_skip(WALK_UNREADABLE, rel))
+                    rel = rel.replace(os.sep, "/")
+                    if rel in ("?", ".") or rel.startswith(".."):
+                        # The root itself, or a directory we cannot place: nothing under the root
+                        # can be vouched for.
+                        unreadable_all = True
+                    else:
+                        unreadable_dirs.append(rel)
+                    if len(walk_entries) < RUN_ERROR_SAMPLE_MAX:
+                        walk_entries.append(_render_skip(WALK_UNREADABLE, rel))
                 error_entries[:0] = walk_entries
                 del error_entries[RUN_ERROR_SAMPLE_MAX:]
+                # What an unreadable directory takes away is knowledge of the files BENEATH it —
+                # nothing else. So only those are shielded from the missing sweep, and the pass is
+                # "incomplete" (not a deep verification, worth an alert) only when a tracked file
+                # actually lies beneath one. A root-owned `lost+found` or a NAS recycle folder that
+                # this process can never list, with nothing tracked inside, must not switch off
+                # deletion detection for the whole collection or keep its deep pass owed forever.
+                summary.walk_incomplete = unreadable_all or any(
+                    row.status != "missing" and _beneath(relpath, unreadable_dirs)
+                    for relpath, row in existing.items()
+                )
                 logging.getLogger("cairn.scanner").warning(
-                    "collection %s: %d director(y/ies) under the root could not be listed — this "
-                    "pass marks no file missing and reconciles no moves; run is partial",
+                    "collection %s: %d director(y/ies) under the root could not be listed — files "
+                    "beneath them are not marked missing by this pass%s; run is partial",
                     collection_id,
                     len(walk_errors),
+                    "" if summary.walk_incomplete else " (no tracked file lies beneath them)",
                 )
             elif walked_files == 0 and tracked_at_start > 0 and not allow_empty:
                 # An empty mount point is the usual shape of a volume that did not mount, and it is
@@ -1044,15 +1086,18 @@ async def scan_collection(
                 )
 
             # Files in the DB but no longer on disk → candidate deletions (skip ones already missing).
-            # An incomplete walk cannot tell "gone" from "could not be read", so it has none: no
-            # file is marked missing and no move is reconciled by this pass (design D1).
+            # Beneath a directory that could not be listed, "gone" cannot be told from "could not
+            # be read": those files are no candidates (design D1). Everything else is judged as
+            # usual — one unreadable folder does not blind the pass to the rest of the collection.
             newly_missing = (
                 []
-                if summary.walk_incomplete
+                if unreadable_all
                 else [
                     row
                     for relpath, row in existing.items()
-                    if relpath not in seen and row.status != "missing"
+                    if relpath not in seen
+                    and row.status != "missing"
+                    and not _beneath(relpath, unreadable_dirs)
                 ]
             )
 
@@ -1165,6 +1210,7 @@ async def scan_collection(
             for row in existing.values():
                 if row.id in reflagged_ids and row.id not in current_ids and row.status == "modified":
                     row.status = "ok"
+                    _clear_prior(row)  # a healthy row never carries a prior
                     reflagged_ids.discard(row.id)
                 elif row.id in current_ids and row.status in ("ok", "new"):
                     row.status = "modified"
@@ -1466,6 +1512,15 @@ async def scan_collection(
                     collection_id,
                 )
             if due:
+                # Marked BEFORE dispatch: the limit is on attempts, and an attempt that raises
+                # must still count, or a broken channel would be retried on every scan.
+                try:
+                    await _safety_alert_mark(session, collection_id, prefixes, now)
+                except Exception:
+                    await session.rollback()
+                    logging.getLogger("cairn.scanner").exception(
+                        "recording the alert attempt failed for collection %s", collection_id
+                    )
                 await _dispatch_alert(
                     session,
                     collection,
@@ -1491,6 +1546,12 @@ async def scan_collection(
     return summary
 
 
+def _safety_alert_key(collection_id: int, prefixes: tuple[str, ...]) -> str:
+    """Where the time of the last refusal / unreadable-folder alert ATTEMPT is kept."""
+    klass = "unreadable" if prefixes == (WALK_UNREADABLE,) else "refusal"
+    return f"safety_alert_at:{collection_id}:{klass}"
+
+
 async def _safety_alert_due(
     session: AsyncSession,
     collection_id: int,
@@ -1500,27 +1561,44 @@ async def _safety_alert_due(
 ) -> bool:
     """Whether a refused-root / unreadable-folder alert is due (design D1).
 
-    Not due when an EARLIER scan run of the same collection, started within the previous
-    :data:`SAFETY_ALERT_INTERVAL_SECONDS`, carries an ``error_sample`` whose first entry starts with
-    one of ``prefixes``. An unrelated earlier failure (any other sample) never suppresses it.
+    Not due when such an alert was last ATTEMPTED for this collection within
+    :data:`SAFETY_ALERT_INTERVAL_SECONDS`. Keyed on the attempt, not on earlier refused runs: with
+    scans more frequent than the interval a refused run always exists inside the window, so keying
+    on runs would send exactly one alert per outage — and dispatch is best-effort, so that one can
+    be lost. Keyed on the attempt, a lasting outage is re-announced once a day. The time is a row
+    in the `app_settings` key-value table (no schema of its own; nothing else reads the key).
     """
-    from datetime import timedelta
+    from ..models.db import AppSetting
 
-    cutoff = now - timedelta(seconds=SAFETY_ALERT_INTERVAL_SECONDS)
-    # `error_sample` is `json.dumps` output, so a first entry "<prefix>: …" serialises as
-    # `["<prefix>: …`. The prefixes contain no LIKE wildcards.
-    earlier = await session.scalar(
-        select(func.count())
-        .select_from(Run)
-        .where(
-            Run.collection_id == collection_id,
-            Run.id != run_id,
-            Run.kind == "scan",
-            Run.started > cutoff,
-            or_(*[Run.error_sample.like(f'["{p}: %') for p in prefixes]),
+    last = await session.scalar(
+        select(AppSetting.value).where(
+            AppSetting.key == _safety_alert_key(collection_id, prefixes)
         )
     )
-    return not earlier
+    if not last:
+        return True
+    try:
+        attempted = datetime.fromisoformat(last)
+    except ValueError:
+        return True
+    if attempted.tzinfo is None:
+        attempted = attempted.replace(tzinfo=timezone.utc)
+    return (now - attempted).total_seconds() >= SAFETY_ALERT_INTERVAL_SECONDS
+
+
+async def _safety_alert_mark(
+    session: AsyncSession, collection_id: int, prefixes: tuple[str, ...], now: datetime
+) -> None:
+    """Record that a refusal / unreadable-folder alert was attempted now."""
+    from ..models.db import AppSetting
+
+    key = _safety_alert_key(collection_id, prefixes)
+    row = await session.get(AppSetting, key)
+    if row is None:
+        session.add(AppSetting(key=key, value=now.isoformat()))
+    else:
+        row.value = now.isoformat()
+    await session.commit()
 
 
 async def _dispatch_alert(

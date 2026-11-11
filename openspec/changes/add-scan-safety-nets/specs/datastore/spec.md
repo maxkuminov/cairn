@@ -9,8 +9,10 @@ boolean `auto_baseline_new` (default false) controlling whether the deep-verify 
 {ok,new,modified,missing} and `ots_state` ∈ {none,pending,incomplete,complete}. `files` SHALL also
 carry a nullable `ots_digest` TEXT column recording the digest the proof stored at `ots_path`
 commits to, and three nullable columns — `prior_sha256`, `prior_size`, `prior_mtime` —
-holding the contents that were on record before an unaccepted change (all NULL for a file that is
-not `modified`). `events.kind` SHALL
+holding the contents that were on record before an unaccepted change (all NULL for a file with
+no unaccepted change; a changed file that has since gone missing keeps them). The time a
+root-refusal or unreadable-folder alert was last attempted for a collection SHALL be kept as a
+row of the existing key-value settings table, not as a new column. `events.kind` SHALL
 be constrained to {added,modified,missing,restored,moved,restored_changed,corrupted}, and `events` SHALL carry
 a nullable `detail` TEXT column (used to record the old → new path of a `moved` file, both
 digests of a `restored_changed` file, and — as a JSON object carrying the path and the contents

@@ -16,7 +16,7 @@ import os
 import shutil
 import sqlite3
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -322,7 +322,11 @@ async def test_an_unreadable_subfolder_does_not_read_as_deleted_files(
 
 @needs_permissions
 @pytest.mark.asyncio
-async def test_an_incomplete_walk_reconciles_no_moves(cairn_env, alerts, unlistable):
+async def test_an_incomplete_walk_still_reconciles_a_move_between_readable_folders(
+    cairn_env, alerts, unlistable
+):
+    """An unreadable folder shields only what lies beneath it: a rename elsewhere in the
+    collection is still seen for what it is, and nothing is reported missing."""
     root, cid = await _collection(
         cairn_env, "nomove", {"a/unique.txt": "unique-content", "locked/x.txt": "x"}
     )
@@ -331,8 +335,29 @@ async def test_an_incomplete_walk_reconciles_no_moves(cairn_env, alerts, unlista
 
     summary = await _scan(cid)
 
-    assert summary.walk_incomplete and summary.moved == 0 and summary.missing == 0
-    assert (await _file(cid, "a/unique.txt")).status == "new", "not marked missing"
+    assert summary.walk_incomplete and summary.moved == 1 and summary.missing == 0
+    files = await _files(cid)
+    assert "renamed.txt" in files and "a/unique.txt" not in files
+    assert files["locked/x.txt"].status == "new", "beneath the unreadable folder: not missing"
+
+
+@needs_permissions
+@pytest.mark.asyncio
+async def test_a_file_moved_out_of_an_unreadable_folder_is_not_called_missing(
+    cairn_env, alerts, unlistable
+):
+    """The old path lies beneath the unreadable folder, so it is no candidate: the new path is
+    recorded as an addition and nothing is reported missing by this pass."""
+    root, cid = await _collection(
+        cairn_env, "moveout", {"locked/unique.txt": "unique-content", "open/y.txt": "y"}
+    )
+    (root / "locked" / "unique.txt").rename(root / "open" / "unique.txt")
+    unlistable(root / "locked")
+
+    summary = await _scan(cid)
+
+    assert summary.walk_incomplete and summary.missing == 0 and summary.moved == 0
+    assert (await _file(cid, "locked/unique.txt")).status == "new"
 
 
 @needs_permissions
@@ -1008,6 +1033,15 @@ async def _age_runs(cid: int, hours: float) -> None:
             .where(Run.collection_id == cid)
             .values(started=_utcnow() - timedelta(hours=hours))
         )
+        # The alert limit is keyed on the last alert ATTEMPT (an `app_settings` row), so "time
+        # passing" has to age that as well as the runs.
+        from src.models.db import AppSetting
+
+        await s.execute(
+            update(AppSetting)
+            .where(AppSetting.key.like(f"safety_alert_at:{cid}:%"))
+            .values(value=(_utcnow() - timedelta(hours=hours)).isoformat())
+        )
         await s.commit()
 
 
@@ -1358,3 +1392,188 @@ async def test_a_file_cairn_cannot_track_does_not_make_an_empty_root_pass(cairn_
 
     assert summary.refused == scanner.REFUSAL_EMPTY and summary.result == "error"
     assert statuses == {"new"}
+
+
+# ================================================================================================
+# Verifier round: gaps found by the independent audit
+# ================================================================================================
+
+
+@pytest.mark.asyncio
+async def test_a_file_whose_bytes_could_not_be_read_is_not_graduated(cairn_env, monkeypatch):
+    """Failing media: the name lists, `stat` works, reading the bytes raises. The file is present
+    (never missing) and was NOT verified — a deep pass must not graduate it from `new`."""
+    from sqlalchemy import select
+    from sqlalchemy import update as sa_update
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry
+    from src.services import scanner
+
+    root, cid = await _collection(cairn_env, "eio", {"bad.bin": "payload", "fine.txt": "fine"})
+    async with get_sessionmaker()() as s:
+        await s.execute(sa_update(Collection).values(auto_baseline_new=True))
+        await s.commit()
+
+    real_hash = scanner._hash
+
+    async def eio(path):
+        if str(path).endswith("bad.bin"):
+            raise OSError(5, "Input/output error", str(path))
+        return await real_hash(path)
+
+    monkeypatch.setattr(scanner, "_hash", eio)
+    summary = await _scan(cid, deep=True)
+
+    async with get_sessionmaker()() as s:
+        statuses = dict((await s.execute(select(FileEntry.relpath, FileEntry.status))).all())
+    assert statuses == {"bad.bin": "new", "fine.txt": "ok"}
+    assert summary.result == "partial" and summary.errors == 1 and summary.missing == 0
+
+
+@pytest.mark.asyncio
+async def test_a_continuous_outage_is_re_announced_once_a_day(cairn_env, alerts):
+    """Scans more frequent than the limit: a refused run always exists inside the window, so the
+    limit must be keyed on the last alert ATTEMPT. Hourly refusals for 26 hours → two alerts."""
+    import shutil
+
+    root, cid = await _collection(cairn_env, "hourly", {"a.txt": "a"})
+    shutil.rmtree(root)
+    alerts.clear()
+
+    for _hour in range(26):
+        await _scan(cid)
+        await _age_runs_by(cid, hours=1)
+
+    assert len(alerts) == 2
+    assert all("refused" in a.summary for a in alerts)
+
+
+async def _age_runs_by(cid: int, *, hours: float) -> None:
+    """Shift every run of the collection, and its alert-attempt marker, `hours` further back."""
+    from sqlalchemy import select
+
+    from src.database import get_sessionmaker
+    from src.models.db import AppSetting, Run
+
+    async with get_sessionmaker()() as s:
+        for run in await s.scalars(select(Run).where(Run.collection_id == cid)):
+            run.started = run.started - timedelta(hours=hours)
+        for row in await s.scalars(
+            select(AppSetting).where(AppSetting.key.like(f"safety_alert_at:{cid}:%"))
+        ):
+            row.value = (datetime.fromisoformat(row.value) - timedelta(hours=hours)).isoformat()
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_preserving_restore_of_a_corrupted_file_closes_on_a_quick_scan(
+    cairn_env, alerts
+):
+    """restic / `rsync -a` put the original bytes back under the ORIGINAL size and mtime — which,
+    for a corrupted file, are exactly what is on record. A quick scan must still re-read it."""
+    root, cid, fid = await _corrupted(cairn_env, "c-preserve")
+    assert (await _file(cid, "x.bin")).status == "modified"
+
+    _corrupt(root / "x.bin", "ORIGINAL-1")  # original bytes, size and mtime untouched
+    alerts.clear()
+    summary = await _scan(cid)  # a quick pass — "Scan now"
+
+    row = await _file(cid, "x.bin")
+    assert row.status == "ok" and row.prior_sha256 is None
+    assert summary.reverted == 1
+    assert await _open_events(cid, fid) == []
+    assert alerts == []
+
+
+@needs_permissions
+@pytest.mark.asyncio
+async def test_an_unreadable_folder_shields_only_the_files_beneath_it(cairn_env, unlistable, alerts):
+    """One folder that cannot be listed takes away knowledge of the files BENEATH it and nothing
+    else: a deletion elsewhere in the collection is still found by the same pass."""
+    root, cid = await _collection(
+        cairn_env, "narrow",
+        {"locked/a.txt": "a", "locked/deep/b.txt": "b", "open/gone.txt": "g", "open/stays.txt": "s"},
+    )
+    (root / "open" / "gone.txt").unlink()
+    unlistable(root / "locked")
+    alerts.clear()
+    summary = await _scan(cid)
+
+    statuses = {relpath: f.status for relpath, f in (await _files(cid)).items()}
+    assert statuses["open/gone.txt"] == "missing"
+    assert statuses["locked/a.txt"] != "missing" and statuses["locked/deep/b.txt"] != "missing"
+    assert summary.missing == 1 and summary.walk_incomplete is True and summary.result == "partial"
+    # Two alerts, about two different things: the deletion, and the folder that is not checked.
+    assert sorted("could not be read" in a.summary for a in alerts) == [False, True]
+
+
+@needs_permissions
+@pytest.mark.asyncio
+async def test_an_unreadable_folder_with_nothing_tracked_in_it_changes_nothing_else(
+    cairn_env, unlistable, alerts
+):
+    """A root-owned `lost+found`, a NAS recycle folder: never listable by this process, nothing
+    tracked inside. It must not switch off deletion detection, keep the deep pass owed, or alert."""
+    root, cid = await _collection(cairn_env, "lostfound", {"a.txt": "a", "b.txt": "b"})
+    (root / "lost+found").mkdir()
+    unlistable(root / "lost+found")
+    (root / "b.txt").unlink()
+    alerts.clear()
+    summary = await _scan(cid, deep=True)
+
+    statuses = {relpath: f.status for relpath, f in (await _files(cid)).items()}
+    assert statuses == {"a.txt": "new", "b.txt": "missing"}
+    # Reported (the run is partial and names the folder) — but the tracked files were all covered.
+    assert summary.result == "partial" and summary.errors == 1
+    assert summary.walk_incomplete is False
+    assert [a for a in alerts if "could not be read" in a.summary] == []
+    run = await _last_run(cid)
+    assert "unreadable" in (run.error_sample or "")
+
+
+@pytest.mark.asyncio
+async def test_a_deep_pass_that_did_not_complete_is_retried_a_day_later_not_every_tick(
+    cairn_env, monkeypatch
+):
+    """A collection whose deep pass cannot complete must not take the one deep slot on every tick
+    (starving the others) or re-hash itself every cadence: it backs off for a day."""
+    import time as _time
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection
+    from src.services import scheduler
+    from src.services.scanner import RunSummary
+
+    monkeypatch.setattr(scheduler, "_DEEP_RETRY_AFTER", {})
+    _root_a, broken = await _collection(cairn_env, "abroken", {"a.txt": "a"})
+    _root_b, healthy = await _collection(cairn_env, "bhealthy", {"b.txt": "b"})
+    async with get_sessionmaker()() as s:
+        for c in await s.scalars(select(Collection)):
+            c.verify_cadence_seconds = 604800
+            c.last_full_scan_at = None  # both owe a deep pass
+        await s.commit()
+
+    calls: list[tuple[int, bool]] = []
+
+    async def fake_scan(session, collection, *, deep=False):
+        calls.append((collection.id, deep))
+        if collection.id == broken and deep:
+            return RunSummary(collection_id=collection.id, result="error", refused="unreachable")
+        return RunSummary(collection_id=collection.id)
+
+    monkeypatch.setattr(scheduler.scanner, "scan_collection", fake_scan)
+
+    async with get_sessionmaker()() as s:
+        await scheduler.run_due_scans(s, {}, _time.monotonic())
+    async with get_sessionmaker()() as s:
+        await scheduler.run_due_scans(s, {}, _time.monotonic())
+
+    deep_calls = [cid for cid, deep in calls if deep]
+    # The broken collection got exactly one deep attempt; the healthy one got its deep pass on the
+    # next tick instead of being starved.
+    assert deep_calls.count(broken) == 1
+    assert deep_calls.count(healthy) == 1
+    async with get_sessionmaker()() as s:
+        assert (await s.get(Collection, broken)).last_full_scan_at is None
+        assert (await s.get(Collection, healthy)).last_full_scan_at is not None

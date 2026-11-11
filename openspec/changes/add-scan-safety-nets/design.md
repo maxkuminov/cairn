@@ -29,7 +29,8 @@ Two checks, both before the pass has changed anything about a file:
 
 - **Before the walk:** the root must be an existing directory. (`collections.validate_root` already
   enforces this at create/edit time; nothing re-checks it at scan time.)
-- **After the walk, before the missing sweep:** if the walk saw **no file at all** and the
+- **After the walk, before the missing sweep:** if the walk found **no file Cairn can track** (a
+  regular file with a storable name — a symlink or an un-storable name does not count) and the
   collection holds at least one record that is not `missing`, the pass refuses. An empty mount
   point is the common shape of a volume that failed to mount, and it is indistinguishable from
   "the operator deleted everything" — so the safe reading wins and the rare one gets an explicit
@@ -43,22 +44,39 @@ stays 0 (it counts skipped files). Nothing was written before the refusal: with 
 no batch had anything to commit. Freshness is untouched — `compute_health` keys on completed
 `ok`/`partial` scans, so the collection goes stale on schedule (the dead-man's switch still works).
 
-The refusal alert is rate-limited, not deduplicated: it is dispatched unless an earlier scan of
-the collection was refused — for either reason, unreachable or empty — within the previous 24
-hours (the reason entries carry a fixed prefix, so the check is one query over `runs`). A pass
-with unreadable directories alerts under the same limit, keyed on earlier passes with unreadable
-directories. Dispatch is best-effort, so
+The refusal alert is rate-limited, not deduplicated: it is dispatched unless such an alert was
+**last attempted** for the collection within the previous 24 hours. The attempt time is a row in
+`app_settings` (`safety_alert_at:<collection>:<refusal|unreadable>`), written before dispatch so a
+channel that raises still counts as an attempt. (The first design keyed the limit on earlier
+refused *runs*; with hourly scans one always exists inside the window, which made it once per
+outage — the verifier's 26-hourly-scans probe sent a single alert.) An incomplete pass alerts
+under the same limit with its own key. Dispatch is best-effort, so
 "once per outage" could lose the only alert to one SMTP hiccup; a daily repeat cannot. It carries
 no paths and links to the collection page.
 
-**A walk that did not complete marks nothing missing.** `os.walk` swallows directory-listing
-errors by default; the walk gets an `onerror` hook that records each unreadable directory. A pass
-with any such error skips the missing sweep and move reconciliation entirely, counts the
-directories in `runs.errors` with diagnostic entries, and ends `partial`. Files in readable
+**An unreadable directory shields what lies beneath it — and only that.** `os.walk` swallows
+directory-listing errors by default; the walk gets an `onerror` hook that records each unreadable
+directory. Rows beneath such a directory are not candidates for the missing sweep (and so not for
+move reconciliation); everything else is judged as usual. The pass counts the directories in
+`runs.errors` with diagnostic entries and ends `partial`; it is *incomplete*
+(`RunSummary.walk_incomplete`: not a deep verification, worth an alert) only when a tracked file
+lies beneath one — or when the root itself could not be listed, in which case nothing is marked
+missing. (The first design suppressed the whole sweep on any listing error. The container runs
+unprivileged, so one root-owned `lost+found` or recycle folder under a collection root would have
+switched off deletion detection for that collection permanently and kept its deep pass owed on
+every tick.) Files in readable
 directories are classified as usual (batches already committed stand — they are true statements
 about files the pass did read). Walk errors are checked **before** the empty-walk refusal: no file
 seen because nothing could be listed is "unreadable", not "empty". `RunSummary.walk_incomplete`
 records it.
+
+**A file that is listed but not examined is present, not verified.** A name the walk returned
+whose metadata or bytes could not be read is added to `seen` (never missing) and to `unexamined`
+(never auto-graduated, never counted as re-read).
+
+**A deep pass that cannot complete backs off for a day** (in memory, per collection): otherwise a
+permanently refused or incomplete collection takes the single deep slot on every tick — starving
+the others — and re-hashes itself every cadence.
 
 **A deep pass that did not cover the collection is still owed.** The scheduler advances
 `last_full_scan_at` only when the deep scan it ran ended `ok` or `partial` **and its walk was
@@ -118,6 +136,12 @@ reappearance branch, its `missing` alerts, as today), one informational `restore
 `RunSummary.reverted` counts it, and no alarm is raised. The id leaves the pass's open-alert set so
 D12's helper and end-of-pass sweep agree. In a `perfile` collection the row is queued for a stamp
 like any change of contents (the proof at its path commits to the changed bytes).
+
+**A row with a kept prior is hashed on every pass**, quick or deep. A metadata-preserving restore
+(restic, `rsync -a`) puts the original back under the recorded size and mtime — which for a
+corrupted file never differed — so the size+mtime fast path alone would leave the issue open until
+the next deep pass while the panel says "restore it and scan". The cost is bounded by the number
+of open issues.
 
 This is what makes the panel's promise true for changed files: put the original back and the issue
 closes by itself; and a restore-from-backup of the *original* after an unaccepted change no longer
@@ -185,10 +209,10 @@ nothing in this change can compare bytes that were never hashed.
 
 Spec round 2: unreadable takes precedence over empty; an incomplete walk is not a deep
 verification (while a per-file `partial` still is); an incomplete walk alerts, since `partial`
-keeps the collection "fresh"; the alert key aligned. **Accepted limitation:** a file moved during
-a pass whose walk was incomplete is recorded at its new path as an addition, and the next complete
-pass reports the old path missing instead of pairing them (a false alarm, cleared by accepting the
-deletion; the proof stays with the old record's history).
+keeps the collection "fresh"; the alert key aligned. **Accepted limitation (narrowed by the verifier round):** a file moved *out of*
+a folder that the same pass could not list is recorded at its new path as an addition, and a later
+pass that can list the folder reports the old path missing instead of pairing them (a false alarm,
+cleared by accepting the deletion). Moves between readable folders are reconciled as usual.
 
 Implementation review, scope A (prior contents, return, corruption): one fix — a same-size
 digest change on a record with no modification time is reported as possible corruption instead of
@@ -218,6 +242,15 @@ healthy row never carries a prior" holds on every path, not only the accepts. A 
 the stamp tail as well, so it really does change no file record. Counts: corrupted and
 mass-converted files are included in `runs.modified` (the convention `restored_changed` already
 follows) and named separately in the alert text.
+
+Independent verification (after the adversarial rounds) found three blocking gaps and one
+practical one, all fixed with tests: a file whose bytes could not be read was still graduated by a
+deep pass; the alert limit was once per outage in practice; a corrupted file restored with its
+metadata preserved stayed an issue until the next deep pass; and any unlistable directory disabled
+deletion detection collection-wide. **Accepted limitation:** issues that were already open when
+this version is deployed have no kept contents (the columns did not exist when they were found),
+so putting such a file back does not close it — it is accepted as before. The guidance text is
+true for every change found from this version on.
 
 ## Risks / Trade-offs
 

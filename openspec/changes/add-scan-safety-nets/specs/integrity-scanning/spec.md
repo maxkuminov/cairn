@@ -23,25 +23,35 @@ scans started from the panel SHALL never run with it.
 
 A root that is reachable and holds some files SHALL be scanned normally, however many tracked
 files it no longer holds: a folder that was deleted, or a nested volume that is gone, is reported
-as missing files — **provided the walk itself completed**. Where any directory under the root
+as missing files — **provided the walk itself completed**. Where a directory under the root
 could not be listed (a permission or input/output error during the walk), the scan cannot tell
 "this folder's files are gone" from "this folder could not be read", so that pass SHALL NOT mark
-any file missing. It SHALL still record what it found in the directories it could read, SHALL
-count each unreadable directory among the run's errors with a diagnostic entry, and SHALL end
-`partial`. The same holds one level down: a file whose name the walk listed but which could not be examined
+missing any file that lies **beneath that directory**. Files elsewhere in the collection SHALL be
+judged as usual — an unreadable folder takes away knowledge of what is inside it and nothing else,
+and a directory this process can never list (a root-owned `lost+found`, a storage appliance's
+recycle folder) must not switch off deletion detection for the whole collection. Where the
+unreadable directory is the root itself, or cannot be placed under it, no file SHALL be marked
+missing. The pass SHALL still record what it found in the directories it could read, SHALL count
+each unreadable directory among the run's errors with a diagnostic entry, and SHALL end `partial`.
+A pass is **incomplete** when a tracked file lies beneath a directory it could not list. The same holds one level down: a file whose name the walk listed but which could not be examined
 (its metadata could not be read) is present, not deleted, and SHALL NOT be marked missing — it is
-counted among the files the run skipped. A file that was listed but not examined SHALL NOT be treated as verified by that pass either: in
-particular a deep pass SHALL NOT graduate it from `new`.
+counted among the files the run skipped. A file that was listed but not examined — its metadata could not be read, or reading its bytes
+failed — SHALL NOT be treated as verified by that pass either: in particular a deep pass SHALL NOT
+graduate it from `new`.
 
 This rule takes precedence over the empty-root refusal: a walk that saw no file because
 the directories holding them could not be listed is an unreadable folder, not an empty one, and
 SHALL be reported as such.
 
 A pass that did not cover the collection SHALL NOT count as a deep verification: where a deep pass
-was refused, ended in error, or could not list every directory, the collection's record of when it
-was last deep-verified SHALL NOT advance, so the deep pass is still owed. A deep pass that walked
-every directory and merely skipped individual files it could not read or store SHALL count, as it
-does today.
+was refused, ended in error, or was incomplete, the collection's record of when it was last
+deep-verified SHALL NOT advance, so the deep pass is still owed. A deep pass that covered every
+tracked file's directory and merely skipped individual files it could not read or store SHALL
+count, as it does today — and so SHALL one whose only unreadable directories hold nothing tracked.
+A deep pass that is still owed for this reason SHALL NOT be retried on every scheduler tick: it
+SHALL be attempted again no sooner than a day later, so that a collection whose deep pass cannot
+complete neither re-hashes itself on every cadence nor keeps the other collections from their own
+deep passes.
 
 #### Scenario: A root that does not exist
 
@@ -77,9 +87,34 @@ does today.
 
 - **WHEN** a directory under the root cannot be listed during the walk, and tracked files lie
   beneath it
-- **THEN** no file SHALL be marked `missing` by that pass, the run SHALL end `partial` with the
-  unreadable directory counted and sampled among its errors, and changes found in readable
-  directories SHALL still be recorded
+- **THEN** none of the files beneath it SHALL be marked `missing` by that pass, the run SHALL end
+  `partial` with the unreadable directory counted and sampled among its errors, and changes found
+  in readable directories SHALL still be recorded
+
+#### Scenario: A deletion elsewhere is still found
+
+- **WHEN** one folder of a collection cannot be listed, and a tracked file in a different, readable
+  folder has been deleted
+- **THEN** that file SHALL be marked `missing` by the same pass
+
+#### Scenario: An unreadable folder holding nothing tracked changes nothing else
+
+- **WHEN** a directory under the root cannot be listed and no tracked file lies beneath it
+- **THEN** the pass SHALL be reported `partial` naming that directory, SHALL NOT be incomplete,
+  SHALL detect deletions as usual, and — if it was a deep pass — SHALL count as one
+
+#### Scenario: A file whose bytes could not be read is not graduated
+
+- **WHEN** a deep pass over a collection that graduates new files fails to read the bytes of a
+  file recorded `new`
+- **THEN** that file SHALL stay `new`, and SHALL NOT be marked `missing`
+
+#### Scenario: A deep pass that cannot complete backs off
+
+- **WHEN** a collection's due deep pass is refused or incomplete, and another collection also owes
+  a deep pass
+- **THEN** on the next scheduler tick the first collection SHALL be scanned without a deep pass,
+  and the other collection SHALL receive its deep pass
 
 #### Scenario: A file that is listed but cannot be examined is not missing
 
@@ -112,7 +147,8 @@ does today.
 
 #### Scenario: A deep pass that could not list a folder is still owed
 
-- **WHEN** a due deep pass ends `partial` because a directory could not be listed
+- **WHEN** a due deep pass ends `partial` because a directory holding tracked files could not be
+  listed
 - **THEN** the collection's last-deep-verified time SHALL be unchanged
 - **AND WHEN** a due deep pass ends `partial` only because an individual file was skipped, the
   time SHALL advance
@@ -216,7 +252,11 @@ had changed and then gone missing was restored from a copy of the original — t
 the file `ok` with what it found, discard what was kept, acknowledge every open change alert of
 that file as a system acknowledgement in the same committed transaction, and write one
 informational event saying the file returned to the contents on record before it changed. It SHALL
-raise no alarm. Equality of digests is the only test: a matching size or name SHALL NOT be treated
+raise no alarm. A file for which contents are kept SHALL be re-read by **every** pass, quick or
+deep, whether or not its size or modification time moved: a restore that preserves metadata puts
+the original bytes back under the very size and time already on record — for a corrupted file they
+never differed — and a pass that trusted them would never see that the issue had closed itself.
+Equality of digests is the only test: a matching size or name SHALL NOT be treated
 as a return. On reappearance the order of tests SHALL be: equals the recorded digest (the file is
 back as it was last seen); equals the kept digest (the file is back as it was before it changed);
 otherwise it came back different. A record with no digest on record has nothing to be compared
@@ -241,6 +281,12 @@ file that reappears with different bytes is not reported as restored".
 - **THEN** the file SHALL be `ok`, nothing SHALL be kept for it any more, its open change alerts
   SHALL be acknowledged with no acknowledging user, an informational event SHALL record the return,
   and no alert SHALL be dispatched
+
+#### Scenario: A restore that preserves the file's size and date closes on a quick scan
+
+- **WHEN** a file found possibly corrupted is replaced by its original bytes with its original
+  size and modification time, and a quick (non-deep) scan runs
+- **THEN** the file SHALL be `ok` after that scan, and its `corrupted` event SHALL be acknowledged
 
 #### Scenario: A changed file that was deleted and restored from the original closes too
 

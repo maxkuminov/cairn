@@ -16,15 +16,19 @@ the contents on record before it changed SHALL NOT trigger an alert.
 
 A scan that is refused because its root is unreachable or empty SHALL dispatch an alert saying so
 and naming the collection, with no file paths. While the outage lasts the alert SHALL be repeated
-no more often than once in twenty-four hours per collection: a refused scan SHALL dispatch it
-unless an earlier scan of the same collection was refused for an unreachable or empty root within
-the preceding twenty-four hours. The limit is on how often the alert is attempted, and it is
-deliberately not "once per outage": dispatch is best-effort, so an alert that failed to deliver is
-followed by another within a day, and an unrelated earlier scan error never suppresses it.
+once in twenty-four hours per collection: a refused scan SHALL dispatch it unless such an alert
+was **last attempted** for that collection — for either reason, unreachable or empty — within the
+preceding twenty-four hours. The limit is keyed on the last attempt, never on the existence of
+earlier refused scans: with scans more frequent than a day an earlier refusal always exists, and a
+limit keyed on it would send one alert per outage. Dispatch is best-effort, so an alert that failed
+to deliver is followed by another within a day, and an unrelated earlier scan error never
+suppresses it.
 
-A scan that could not list one or more directories SHALL dispatch an alert under the same
-once-in-twenty-four-hours limit, naming the collection and how many folders could not be read and
-saying that the files beneath them are not being checked. Such a scan completes as `partial`, which
+A scan that was incomplete — it could not list a directory beneath which tracked files lie —
+SHALL dispatch an alert under the same once-in-twenty-four-hours limit, naming the collection and
+how many folders could not be read and saying that the files beneath them are not being checked. A
+scan whose only unreadable directories hold nothing tracked SHALL NOT alert; it is reported on the
+collection as a partial scan. Such a scan completes as `partial`, which
 the health check counts as a scan having run; without an alert a folder that stays unreadable
 would go unchecked indefinitely behind a collection that looks current. A file that the scan reconciles as a move (see the
 `integrity-scanning` move/rename requirement) is not a `missing` change and SHALL NOT trigger an
@@ -93,6 +97,12 @@ backlog, so the operator is not re-nagged on every scan.
   collection is refused for the same reason an hour later
 - **THEN** exactly one alert SHALL have been dispatched, saying the folder is unreachable and
   listing no files
+
+#### Scenario: A continuous outage is re-announced once a day
+
+- **WHEN** a collection is scanned every hour and every scan is refused for an unreachable root,
+  for twenty-six hours
+- **THEN** exactly two alerts SHALL have been dispatched
 
 #### Scenario: A lasting outage is repeated daily
 
