@@ -59,11 +59,16 @@ revises the vocabulary half of §3's WORM/churn decision without touching its se
   recent activity by day and collection in place of the per-event feed with its buttons.
 - **Status pills say what is wrong** ("2 changed", "377 missing") instead of "Attention" / "Alert".
 - Alert e-mails say "Review and resolve" instead of "Review and acknowledge".
+- **An unresolved change stays an issue.** Today a changed file that is then deleted and restored,
+  or renamed, ends up `ok` with its change alert still open — visible only as an "unreviewed"
+  count with no row behind it. With that count gone the file would vanish, so each scan now ends by
+  re-flagging any file that carries an open change alert and is not listed as changed or missing.
 
 ## Non-goals
 
-- **No scanner change and no schema change.** How a change, a deletion or a new file is detected,
-  classified, stamped and alerted on is untouched. `events.acknowledged_at` keeps being written by
+- **No change to detection and no schema change.** How a change, a deletion or a new file is
+  detected, classified at detection, stamped and alerted on is untouched; the one scanner addition
+  is the end-of-scan re-flagging above, which raises no new event and sends no alert. `events.acknowledged_at` keeps being written by
   the accept and restore paths exactly as today; it is simply no longer an operator control.
 - **No promise that a changed file's issue closes itself when the original is restored.** That
   needs the pre-change fingerprint, which the scanner does not keep; it is the follow-on scanner
@@ -88,7 +93,8 @@ _None._
   baseline action and gains the folder scope.
 - `integrity-scanning`: the accept requirement gains an accept over an explicit set of file records
   (what the panel's folder-scoped verbs call), with the same per-file consequences and the same
-  scoped acknowledgement as the existing scoped accept.
+  scoped acknowledgement as the existing scoped accept; and a scan keeps a file with an open change
+  alert listed as changed.
 - `corpus-management`: the CLI accepts `locked` / `working` as names for the two change policies.
 
 
@@ -103,7 +109,8 @@ _None._
   deleted `partials/_event_row.html`, `event_ack.html`, `events_feed.html`, `_events_controls.html`,
   `review_ack_row.html`, `_review_open_pill.html`.
 - `src/control_panel/static/css/panel.css` — review groups, needs-you list, activity list.
-- `src/services/scanner.py` — new `accept_files` (explicit id set); no change to scanning.
+- `src/services/scanner.py` — new `accept_files` (explicit id set); the end-of-scan re-flagging of
+  files with an open change alert.
 - `src/cli.py` — `--mode` aliases and help text. `src/notify/smtp.py` — one string.
 - Tests: `tests/test_ux_review.py`, `test_fleet_review.py`, `test_ux_dashboard.py`,
   `test_panel.py`, `test_ux_docs.py`, `test_alert_links.py` and neighbours — acknowledge and

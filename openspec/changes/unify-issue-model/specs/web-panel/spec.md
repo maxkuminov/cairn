@@ -20,7 +20,10 @@ events, all of a collection's events — and the address that baselined new file
 request to any of them SHALL mutate nothing.
 
 An issue SHALL leave the count only by being resolved: accepted from a review view, or cleared by a
-scan that finds the file restored. Viewing an issue SHALL change nothing.
+scan that finds the file restored. Viewing an issue SHALL change nothing. Because issues are the
+only thing the panel counts, a change that was never accepted SHALL remain an issue through
+whatever happens to the file next (the scan guarantees this — see the integrity-scanning
+capability), so that removing the event count removes no unresolved change from view.
 
 A file that is merely new SHALL NOT be presented as outstanding work: no surface SHALL describe it
 as waiting for a baseline, and no surface SHALL offer an action to baseline it. A new file is
@@ -69,9 +72,11 @@ population is empty SHALL NOT be rendered.
 
 Each action SHALL state, in the operator's terms, what is kept and what is lost:
 
-- Accepting a change treats the current contents as correct from now on. Cairn recorded and
-  notarized the new contents when it detected the change; accepting clears the issue, and this
-  change will not be reported again.
+- Accepting a change treats the current contents as correct from now on. Cairn recorded the new
+  contents when it detected the change; accepting clears the issue, and this change will not be
+  reported again. The hint SHALL NOT say the new contents were notarized: stamping is queued only
+  in a notarized collection and may still be pending, and the file's proof state is reported by
+  its own badge.
 - Accepting a deletion permanently removes the file from Cairn's records — its path, its first-seen
   date, and the link to its timestamp proof. **Nothing on disk is deleted and the proof file stays
   in the proof store**, but Cairn will no longer list the file under Verify. To get it back the
@@ -156,8 +161,16 @@ that sit directly in that common folder. Each group SHALL name its folder, state
 files changed and how many are gone, state when they were found (one day, or a range), and offer
 one bulk action per kind present, acting on that group only. A large group SHALL be collapsed by
 default, SHALL say how many files it holds beyond those it shows, and SHALL offer a link that opens
-that folder as the view's scope — the same view, restricted to that folder and grouped one level
-deeper — from which the operator can return to the wider scope. Where every listed file lies in one
+that group as the view's scope — the same view, restricted to exactly the files the group held and
+grouped one level deeper — from which the operator can return to the wider scope. Following that
+link SHALL NOT widen the population: the scope it opens for a group of the files directly in a
+folder SHALL exclude that folder's subfolders.
+
+A bulk action MAY cover files the view does not show — a group or a scope past its row limit —
+because an incident of thousands of files cannot be listed in full. It SHALL NOT do so silently:
+wherever an action's population is larger than the rows shown for it, the control's hint and its
+confirmation SHALL state how many of the files it acts on are not shown on the page, and the view
+SHALL link to where the full set can be listed. Where every listed file lies in one
 folder the view SHALL render a single list rather than a group of one. Groups SHALL be ordered
 newest finding first.
 
@@ -249,6 +262,18 @@ nothing has been checked yet, which is not the same thing and SHALL NOT be prese
 - **WHEN** a group holds more files than the view shows for it
 - **THEN** the group SHALL be collapsed by default, SHALL state how many more files it holds, and
   SHALL link to the view scoped to that folder
+
+#### Scenario: Opening a direct-files group does not widen it
+
+- **WHEN** a group of the files directly in a folder is opened as the view's scope, and that
+  folder also has issues in a subfolder
+- **THEN** the scoped view SHALL list only the files directly in the folder
+
+#### Scenario: An action over files that are not shown says so
+
+- **WHEN** a group or scope holds more issue files than the view renders for it
+- **THEN** its bulk action's hint and confirmation SHALL state how many of the files it acts on are
+  not shown on the page
 
 #### Scenario: A scoped view acts only inside its scope and offers the way back
 
@@ -526,7 +551,10 @@ collection with missing files.
 The panel SHALL name a collection's change policy in plain words wherever it shows it — **Locked**
 for a collection where nothing should change, **Working** for one where edits are normal — and
 SHALL NOT present the stored policy value as the label. Wherever the policy is shown with room for
-it, the panel SHALL say what that policy flags.
+it, the panel SHALL say what that policy flags, and SHALL say it accurately: under Locked every
+change and every deletion is flagged; under Working ordinary edits are not flagged, while
+deletions are, and so is a file that comes back different after going missing. It SHALL NOT
+describe Working as flagging deletions only.
 
 A collection's status indicator SHALL state the fact rather than a grade: that the collection is
 all clear, how many of its files changed, how many are missing, or both. It SHALL NOT label a
@@ -538,6 +566,11 @@ collection that has indexed no files SHALL be labelled as such and SHALL NOT rea
 - **WHEN** a collection page is rendered for a collection stored with either policy
 - **THEN** the page SHALL show "Locked" or "Working" and SHALL NOT show the stored value as the
   policy's label
+
+#### Scenario: The Working policy is not described as deletions-only
+
+- **WHEN** the panel describes what the Working policy flags
+- **THEN** the description SHALL include a file that comes back different after going missing
 
 #### Scenario: The status states what is wrong
 

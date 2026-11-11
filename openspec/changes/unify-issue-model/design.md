@@ -33,7 +33,8 @@ wording, and the Slate visual language.
 
 **Non-Goals:**
 
-- Scanner, alert-dispatch or schema changes (follow-on change).
+- Changes to detection, alert dispatch or the schema (follow-on change). The one scanner addition
+  is D12, which this change needs in order to remove the event count safely.
 - Rules, history, per-file pages (follow-on change).
 - Rewording the verify card.
 
@@ -47,12 +48,26 @@ template renders a count of unacknowledged events, and no route's only effect is
 
 `events.acknowledged_at` stays in the schema and keeps being written by `accept_*` and by the
 scanner's restore path. It now means "the issue this event belongs to was resolved (or the event was
-informational)". An open event on a file that is no longer an issue — reachable today through
-`modified → missing → restored`, or a modified file later reconciled as a move — is neither shown
-nor counted. *Alternative considered:* keep a "dismiss" control for exactly those leftovers. Rejected:
-it is the acknowledge verb again, for a case the follow-on scanner change closes at the source (the
-unresolved change must survive the round trip as an issue, not as a stray log entry).
-**Accepted limitation until then:** such a leftover is invisible in the panel.
+informational)".
+
+That only holds if every open *change* alert has an issue behind it, and today two scanner paths
+break it: a `modified` file that goes missing and comes back with the bytes on record (the restore
+branch sets `ok` and closes only the `missing` events), and a `modified` file later reconciled as a
+move (`_reconcile_moves` sets `ok`). Both leave an unaccepted change on an `ok` file, and the only
+trace is the open `modified` event — which today shows as an "unreviewed" count with no row behind
+it (the reference deployment has exactly one). With that count gone the file would read all clear.
+
+So the scan enforces the invariant itself (**D12**): before it commits its final batch, every file
+of the collection that carries an open `modified` or `restored_changed` event and whose status is
+`ok` or `new` is set back to `modified`. It is one read of the affected ids plus an in-memory status
+write on the rows the scan already holds; it writes no event and raises no alert (the alert went out
+when the change was found). It runs after the missing sweep, move reconciliation and auto-baseline,
+so none of them can undo it, and it heals data left by earlier versions on the first scan after
+deploy. *Alternatives considered:* (a) keep a "dismiss" control for the leftovers — the acknowledge
+verb again; (b) widen the panel's definition of an issue to "status or open change event" — that
+puts a second definition into every count, the population read and the fingerprint; (c) patch the
+two branches — correct today, silent again the next time a third path appears. An open `missing`
+event needs no such rule: the restore path closes it in the same transaction that sets `ok`.
 
 ### D2 — Verbs and their styling
 
@@ -63,8 +78,10 @@ unresolved change must survive the round trip as an issue, not as a stray log en
 
 Hints, in the operator's terms:
 
-- *Accept change* — "This is the file now. Cairn recorded and stamped the new contents when it found
-  the change; accepting clears the issue and this change is not reported again."
+- *Accept change* — "This is the file now. Cairn recorded the new contents when it found the
+  change; accepting clears the issue and this change is not reported again." Nothing here claims a
+  proof: stamping is queued only in notarized collections and can still be pending, and the row's
+  proof badge is what reports it.
 - *Accept deletion* — "Cairn forgets the file: its record, first-seen date and the link to its
   timestamp proof are removed. Nothing on disk is touched and the proof file stays in the proof
   store, but the file is no longer listed under Verify."
@@ -97,7 +114,8 @@ directly. That is a scanner change; it belongs to the follow-on.
 ### D5 — Policy names
 
 `worm` renders as **Locked** ("nothing here should change — every change or deletion is flagged"),
-`churn` as **Working** ("edits are normal — only deletions are flagged"). One helper maps the stored
+`churn` as **Working** ("edits are normal and are not flagged — deletions are, and so is a file that
+comes back different after going missing"). One helper maps the stored
 value to label and description; templates never print the stored value. `cairn add-collection --mode`
 accepts `locked` / `working` and normalizes to the stored values.
 
@@ -143,9 +161,20 @@ plus — when some files sit directly in `A` — one group for those (scope `(A,
 
 Each group shows its path, counts per kind, when its issues were found (one date, or a range), one
 bulk action per kind present, and its rows. A group of up to 8 files is open; a larger one is a
-collapsed `<details>` showing its first 50 rows and a link that opens the folder as its own scope
-(`?dir=`), where the same rule groups one level deeper. Groups are ordered newest finding first,
-then by path. The page-level toolbar acts on the page scope `(scope, deep)`.
+collapsed `<details>` holding up to 200 rows and a link that opens the group as the page's own
+scope (`?dir=…` plus `deep=0` for a direct-files group, so the link never widens what the group
+held), where the same rule groups one level deeper. Groups are ordered newest finding first, then
+by path. The page-level toolbar acts on the page scope.
+
+A bulk action may cover files the page does not show — a group past its row cap, or a scope past
+the page's. The action stays (an incident of tens of thousands of files cannot be listed in full,
+and the guard already hashes the whole population rather than the visible rows), but it never
+hides that: where the covered count exceeds the rows shown, the control's hint and its confirmation
+state how many files are **not shown on this page**, and the group links to the scoped view and to
+the file browser filtered to issues. *Alternative considered:* withhold the action until every
+covered file is on screen. Rejected: it turns one decision about a deleted folder into paging
+through it, and it would make the panel's bulk verbs unusable in exactly the incidents they exist
+for.
 
 "When it was found" is the newest open event's `detected_at` for the file, taken from the same
 snapshot as the row; a file with no open event (legacy data) falls back to `last_changed`, then
@@ -196,6 +225,14 @@ considered:* keep the per-event feed without buttons. Rejected: twenty rows of o
 say less than one line, and the per-file detail belongs to the review page (issues) and the
 follow-on history view (everything else).
 
+### D12 — The scan keeps an unresolved change listed
+
+See D1. Implemented at the end of `scan_collection`'s main pass, in the same transaction as the
+final batch, on the ORM rows the scan holds (not a bulk `UPDATE` — a later flush of a stale
+in-memory status would overwrite it). `RunSummary` counts the re-flagged files and the scan logs
+one INFO line when the count is non-zero. It never touches a file that is `missing` (already an
+issue) and never a file with no open change event.
+
 ### D11 — Status wording
 
 The collection status pill states the fact: "All clear", "N changed", "N missing", or
@@ -206,8 +243,9 @@ unchanged (amber triangle for changed, red minus-circle for missing).
 
 - **The acknowledge-only state disappears** → an operator who wants "seen it, still restoring" keeps
   the issue open; nothing is lost but a quieter counter. A snooze can be added later if wanted.
-- **Leftover open events on healthy files become invisible** (D1) → documented limitation; closed
-  at the source by the follow-on scanner change.
+- **A file with an open change alert must stay an issue** (D1/D12) → enforced by the scan itself;
+  data left by earlier versions heals on the first scan after deploy. Until that scan runs such a
+  file is not listed (at most one scan cadence).
 - **Folder scope is new attack surface on a destructive endpoint** → bound into the fingerprint,
   recomputed under the write lock from the submitted scope, and the mutation is by the hashed ids
   (D6). Gets the adversarial review.

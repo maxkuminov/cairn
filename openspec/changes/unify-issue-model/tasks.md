@@ -2,6 +2,8 @@
 
 - [ ] 1.1 Add `scanner.accept_files(session, collection, file_ids, user_id)`: chunked by id, re-asserting collection and status per statement; `missing` → detach + path backfill + delete, `modified`/`new` → `ok`; closes only those files' open events; one transaction
 - [ ] 1.2 Tests in `tests/test_scanner.py`: named records only, mixed kinds, foreign-collection id ignored, already-`ok` id ignored, set larger than the bound-parameter ceiling
+- [ ] 1.3 End-of-scan re-flagging (design D12): after the missing sweep, move reconciliation and auto-baseline, set `modified` on every held row that is `ok`/`new` with an open `modified`/`restored_changed` event; no event, no alert; `RunSummary.reflagged` + one INFO line
+- [ ] 1.4 Tests: changed → missing → restored stays `modified`; changed → renamed stays `modified`; no event/alert written; accepted change not re-flagged; legacy `ok`+open-event row healed; `missing` left alone; both policies
 
 ## 2. Guard: folder scope, baseline form removed
 
