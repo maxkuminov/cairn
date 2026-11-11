@@ -965,6 +965,8 @@
 .notice { margin-bottom: 16px; display: flex; align-items: flex-start; gap: 10px; padding: 14px 16px; }
 .notice--warn { border-color: color-mix(in oklch, var(--warn) 35%, var(--border)); background: color-mix(in oklch, var(--warn-soft) 40%, var(--surface)); }
 .notice__icon { color: var(--warn); flex-shrink: 0; display: flex; }
+.notice--ok { border-color: color-mix(in oklch, var(--ok) 35%, var(--border)); background: color-mix(in oklch, var(--ok-soft) 45%, var(--surface)); }
+.notice--ok .notice__icon { color: var(--ok); }
 .notice__body { flex: 1; font-size: 13px; line-height: 1.55; color: var(--text-2); }
 
 /* "Showing only <folder>" */

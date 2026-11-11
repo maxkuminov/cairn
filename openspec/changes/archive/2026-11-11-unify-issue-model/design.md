@@ -295,6 +295,17 @@ verifier's non-blocking list: the help card names "Accept deletion" on a changed
 general guide, and the control exists one page away); the learn page does not restate what each
 policy flags.
 
+## Usability pass (pre-merge, on a copy of production data)
+
+No blockers; every action touched exactly what its label said. Folded in before merge: a one-shot
+confirmation after an accept (a short-lived cookie parsed against a strict pattern — it can only
+produce "Accepted N changes/deletions"); scroll position kept across an accept; no bulk action on
+a group the page lists nothing of; the Working policy text now says that a content change found by
+a deep verify with size and date untouched is not yet flagged (the scanner fix is the next change);
+a tooltip on the card's "N new". Left for the follow-on changes: accepted proofs are kept but not
+reachable from the panel; no durable record of who accepted what; "Healthy" beside "Needs you";
+touch targets under 44 px; policy chips explained only on hover.
+
 ## Accepted limitations
 
 Found during implementation and test review; none crosses the guard, each is recorded rather than
@@ -314,6 +325,9 @@ polished.
   one render; neither authorises anything.
 - **The collection card's status-bar label still says "modified"** where the legend beside it says
   "changed" — the label's wording is pinned by an existing requirement and left alone.
+- **The accept confirmation is shown by the next review page rendered**, not necessarily the one
+  the accept returned to: with two tabs it can appear on another collection's review page, up to a
+  minute late. It names a count, not a collection; it authorises nothing.
 - **Until the first scan after deploy**, a record left `ok` with an open change alert by an earlier
   version is not listed (D12 heals it on that scan).
 

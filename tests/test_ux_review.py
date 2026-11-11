@@ -1553,9 +1553,10 @@ def test_findings_on_more_days_than_the_summary_names_are_still_all_counted(cair
 def test_a_group_past_the_page_row_budget_keeps_its_header_and_says_its_files_are_not_listed(
     cairn_env, monkeypatch
 ):
-    """Rows are budgeted per page; counts, groups and actions are not. A group the budget never
-    reached still names its folder, its counts and its action (with what that action leaves
-    unseen), says its files are not listed, and links to itself as the page's scope."""
+    """Rows are budgeted per page; counts and groups are not. A group the budget never reached
+    still names its folder and its counts, says its files are not listed, and links to itself as
+    the page's scope — but it offers NO bulk action: that would be the one place a click removes
+    what the operator cannot see at all. The action is offered where its rows are."""
     from src.control_panel import routes
 
     monkeypatch.setattr(routes, "REVIEW_ROW_LIMIT", 2)
@@ -1568,25 +1569,41 @@ def test_a_group_past_the_page_row_budget_keeps_its_header_and_says_its_files_ar
     with _make_client(cairn_env, seed) as client:
         body, r = _review(client)
 
-    assert (r["total"], r["shown"], r["truncated"]) == (4, 2, True)
-    assert [(g["dir"], g["shown"], g["total"]) for g in r["groups"]] == [("new", 2, 2), ("old", 0, 2)]
-    old = next(s for s in _group_sections(body) if 'value="old"' in s)
-    assert 'class="review-row"' not in old
-    assert "1 missing" in _text(old) and "1 changed" in _text(old)
-    assert "These 2 files are not listed on this page — open old/ to see them." in _text(old)
-    assert 'href="/collection/1/review?dir=old"' in old
-    changes, deletions = _bulk_forms(old)
+        assert (r["total"], r["shown"], r["truncated"]) == (4, 2, True)
+        assert [(g["dir"], g["shown"], g["total"]) for g in r["groups"]] == [("new", 2, 2), ("old", 0, 2)]
+        new = next(s for s in _group_sections(body) if 'value="new"' in s)
+        old = next(s for s in _group_sections(body) if "old/" in _text(s))
+        # The group with nothing listed: header, counts, the statement and the link — no form.
+        assert 'class="review-row"' not in old
+        assert "1 missing" in _text(old) and "1 changed" in _text(old)
+        assert "These 2 files are not listed on this page — open old/ to see them." in _text(old)
+        assert 'href="/collection/1/review?dir=old"' in old
+        assert _forms(old) == [], "a group that lists none of its files must offer no action"
+        assert "Accept" not in _text(old)
+        # The group that IS listed keeps its action.
+        assert [f["button"] for f in _bulk_forms(new)] == ["Accept 2 deletions"]
+        # The page says how much of the whole it is showing, and where the rest can be listed.
+        notice = body[body.index('id="review-truncated"') :].split("</div>")[0]
+        assert "Showing 2 of 4 files on this page" in _text(notice)
+        assert 'href="/collection/1?view=list&amp;filter=issues"' in notice
+        # The summary and the page-wide actions still describe all four — and those say what they
+        # reach beyond the page.
+        assert _summary(body).startswith("1 changed and 3 missing files in photos")
+        page_changes, page_deletions = _bulk_forms(_toolbar(body))
+        assert (page_changes["button"], page_deletions["button"]) == ("Accept 1 change", "Accept 3 deletions")
+        assert "includes 1 not shown here" in page_changes["text"]
+        assert "includes 1 not shown here" in page_deletions["text"]
+
+        # The page the group links to DOES offer the action — beside the rows it acts on.
+        scoped_body, scoped = _review(client, "/collection/1/review?dir=old")
+
+    assert sorted(it["relpath"] for it in scoped["rows"]) == ["old/c.jpg", "old/d.txt"]
+    assert len(_row_forms(scoped_body)) == 2
+    changes, deletions = _bulk_forms(_toolbar(scoped_body))
     assert (changes["button"], deletions["button"]) == ("Accept 1 change", "Accept 1 deletion")
     for f in (changes, deletions):
-        assert "includes 1 not shown here" in f["text"]
-        assert "1 of them is not shown on this page." in f["attrs"]["onsubmit"]
-    # The page says how much of the whole it is showing, and where the rest can be listed.
-    notice = body[body.index('id="review-truncated"') :].split("</div>")[0]
-    assert "Showing 2 of 4 files on this page" in _text(notice)
-    assert 'href="/collection/1?view=list&amp;filter=issues"' in notice
-    # The summary and the page-wide actions still describe all four.
-    assert _summary(body).startswith("1 changed and 3 missing files in photos")
-    assert [f["button"] for f in _bulk_forms(_toolbar(body))] == ["Accept 1 change", "Accept 3 deletions"]
+        assert (f["fields"]["dir"], f["fields"]["deep"]) == ("old", "1")
+        assert "not shown" not in f["text"]
 
 
 # --- the ways in -----------------------------------------------------------------------------
@@ -1689,11 +1706,14 @@ def test_recovery_guidance_names_both_outcomes_of_a_rescan(cairn_env):
     help_html, _body = _guidance(cairn_env)
     text = _text(help_html)
 
-    # Healthy only where the bytes match what was recorded...
+    # Healthy only where the bytes match what was recorded — and what closes is the MISSING
+    # alert: a file that also had an unaccepted change is not cleared by coming back.
     assert (
         "A missing file that comes back is re-read and compared against the fingerprint recorded "
-        "before it went missing. If it matches, the issue closes by itself."
+        "before it went missing. If it matches, the missing alert closes by itself (a file that "
+        "also had an unaccepted change stays listed as changed)."
     ) in text
+    assert "the issue closes by itself" not in text
     # ...and otherwise the obsolete missing alert is closed and replaced by a new issue.
     assert (
         "If it does not — the wrong snapshot, a truncated restore — the missing alert is closed "
@@ -2169,3 +2189,176 @@ def test_review_actions_are_scoped_to_the_viewers_own_collections(cairn_env, mon
 
     assert _files(2) == {"bobs/secret.txt": "missing", "bobs/edit.txt": "modified"}
     assert _files(1) == {"my.txt": "missing"}
+
+
+# --- "it worked": the one-shot confirmation after an accept ----------------------------------
+
+DONE_ONE_CHANGE = "Accepted 1 change."
+DONE_ONE_DELETION = "Accepted 1 deletion — its record was removed; nothing on disk was touched."
+
+
+def _done_banner(body: str) -> str | None:
+    """The confirmation's visible text, or ``None`` when the page renders none."""
+    m = re.search(r'<div[^>]*id="done-banner"[^>]*>(.*?)</div>\s*</div>', body, re.S)
+    if m is None:
+        assert "done-banner" not in body
+        return None
+    assert 'role="status"' in m.group(0)
+    return _text(m.group(1))
+
+
+def _row_form(body: str, file_id: int) -> dict:
+    return _row_forms(_row_html(body, file_id) + "</form>")[0]
+
+
+def test_an_accept_is_confirmed_once_on_the_page_it_returns_to(cairn_env):
+    """After a successful accept the page it lands on says what was done — once.
+
+    The only sign an accept worked used to be a smaller number somewhere on the page. Each verb
+    states its own outcome, in the singular and the plural, and a reload does not say it again (it
+    would read as a second accept).
+    """
+    seed = _photos(cairn_env, [
+        ("e/1.txt", "modified"), ("e/2.txt", "modified"), ("e/3.txt", "modified"), ("e/4.txt", "modified"),
+        ("g/5.jpg", "missing"), ("g/6.jpg", "missing"), ("g/7.jpg", "missing"),
+        ("h/8.jpg", "missing"),
+        ("i/9.txt", "modified"),
+    ])
+
+    def accept(client, form, expected):
+        resp = _submit(client, form)
+        assert resp.status_code == 303
+        landed = client.get(resp.headers["location"]).text
+        assert _done_banner(landed) == expected
+        # Shown once: the same address again carries no confirmation.
+        again = client.get(resp.headers["location"]).text
+        assert _done_banner(again) is None
+        return again
+
+    with _make_client(cairn_env, seed) as client:
+        body, _r = _review(client)
+        assert _done_banner(body) is None, "nothing was accepted yet"
+
+        # One file, from its own row — a change, then a deletion.
+        body = accept(client, _row_form(body, 1), DONE_ONE_CHANGE)
+        body = accept(client, _row_form(body, 5), DONE_ONE_DELETION)
+        # A group's bulk action over ONE file reads in the singular too.
+        h = next(s for s in _group_sections(body) if 'name="dir" value="h"' in s)
+        body = accept(client, _bulk_forms(h)[0], DONE_ONE_DELETION)
+        i = next(s for s in _group_sections(body) if 'name="dir" value="i"' in s)
+        body = accept(client, _bulk_forms(i)[0], DONE_ONE_CHANGE)
+        # ...and over several, in the plural, with the count the service reported.
+        e = next(s for s in _group_sections(body) if 'name="dir" value="e"' in s)
+        body = accept(client, _bulk_forms(e)[0], "Accepted 3 changes.")
+        # The last accept empties the page: the confirmation is what explains the all-clear.
+        (last,) = _bulk_forms(_toolbar(body))
+        assert last["button"] == "Accept 2 deletions"
+        resp = _submit(client, last)
+        landed = client.get(resp.headers["location"]).text
+        assert _done_banner(landed) == (
+            "Accepted 2 deletions — their records were removed; nothing on disk was touched."
+        )
+        assert "All clear" in landed
+        assert landed.index('id="done-banner"') < landed.index("All clear")
+        assert _done_banner(client.get(resp.headers["location"]).text) is None
+
+    assert set(_files().values()) == {"ok"} and len(_files()) == 5
+
+
+def test_the_confirmation_follows_a_scoped_accept_to_the_scoped_view(cairn_env):
+    seed = _photos(cairn_env, [("a/x.jpg", "missing"), ("a/y.jpg", "missing"), ("b/z.jpg", "missing")])
+
+    with _make_client(cairn_env, seed) as client:
+        body, _r = _review(client, "/collection/1/review?dir=a")
+        resp = _submit(client, _row_form(body, 1))
+        assert resp.headers["location"] == "/collection/1/review?dir=a"
+        landed = client.get(resp.headers["location"]).text
+        assert _done_banner(landed) == DONE_ONE_DELETION
+        # It sits above the list it explains, not below the instructions.
+        assert landed.index('id="done-banner"') < landed.index('class="review-row"')
+        assert _done_banner(client.get("/collection/1/review").text) is None
+
+
+def test_a_refused_accept_is_not_confirmed(cairn_env):
+    """A refusal sets nothing: the page it lands on says the action was NOT applied, and nothing on
+    it — then or on a later visit — says anything was accepted."""
+    seed = _photos(cairn_env, [("a/x.jpg", "missing"), ("a/y.txt", "modified")])
+
+    with _make_client(cairn_env, seed) as client:
+        body, _r = _review(client)
+        attempts = [
+            (_row_form(body, 1), {"population_fp": "0" * 64}),   # a fingerprint that does not reproduce
+            (_row_form(body, 2), {"population_fp": ""}),          # no fingerprint at all
+            (_bulk_forms(_toolbar(body))[0], {"population_fp": "f" * 64}),
+            (_bulk_forms(_toolbar(body))[1], {"dir": "/not-a-scope"}),
+        ]
+        for form, tamper in attempts:
+            resp = _submit(client, form, **tamper)
+            assert resp.status_code == 303 and resp.headers["location"].endswith("stale=1")
+            assert "cairn_done" not in resp.headers.get("set-cookie", "")
+            landed = client.get(resp.headers["location"]).text
+            assert STALE_LEAD in landed
+            assert _done_banner(landed) is None
+            assert "Accepted" not in _text(landed.split('id="review-toolbar"')[0])
+        assert _done_banner(client.get("/collection/1/review").text) is None
+
+    assert _files() == {"a/x.jpg": "missing", "a/y.txt": "modified"}
+
+
+FORGED_DONE = [
+    "<script>alert(1)</script>",
+    "deletions:99999999",          # eight digits: over the bound
+    "foo:3",                       # not a verb this panel has
+    "changes:",
+    "changes:-1",
+    "changes:1e3",
+    "CHANGES:3",
+    "deletions:3:extra",
+    "changes:3<b>",
+    "%3Cscript%3E",
+]
+
+
+@pytest.mark.parametrize("forged", FORGED_DONE)
+def test_a_forged_confirmation_cookie_renders_nothing(cairn_env, forged):
+    """The cookie is client-held, so it is matched against a strict pattern: anything else renders
+    no confirmation and is reflected nowhere in the page."""
+    seed = _photos(cairn_env, [("a/x.jpg", "missing"), ("a/y.txt", "modified")])
+
+    with _make_client(cairn_env, seed) as client:
+        clean = client.get("/collection/1/review").text
+        for url in ("/collection/1/review", "/collection/1/review?dir=a", "/collection/1/review?stale=1"):
+            body = client.get(url, headers={"Cookie": f"cairn_done={forged}"}).text
+            assert _done_banner(body) is None, url
+            assert "Accepted" not in _text(body.split('id="review-toolbar"')[0]), url
+            for fragment in (forged, html_lib.escape(forged), "alert(1)", "99999999", "foo:3"):
+                assert fragment not in body, (url, fragment)
+        # ...and apart from the per-request CSRF token it changes nothing about the page.
+        forged_body = client.get(
+            "/collection/1/review", headers={"Cookie": f"cairn_done={forged}"}
+        ).text
+
+    def stable(page: str) -> str:
+        page = re.sub(r'name="csrf_token" value="[^"]*"', "", page)
+        return re.sub(r'name="csrf-token" content="[^"]*"', "", page)
+
+    assert stable(forged_body) == stable(clean)
+
+
+def test_a_well_formed_confirmation_cookie_only_ever_produces_the_sentence(cairn_env):
+    """Even a cookie that matches the pattern selects nothing and authorises nothing: it yields the
+    one sentence, with a number, and the collection is exactly as it was."""
+    seed = _photos(cairn_env, [("a/x.jpg", "missing"), ("a/y.txt", "modified")])
+
+    with _make_client(cairn_env, seed) as client:
+        body = client.get("/collection/1/review", headers={"Cookie": "cairn_done=deletions:1234567"}).text
+        assert _done_banner(body) == (
+            "Accepted 1,234,567 deletions — their records were removed; nothing on disk was touched."
+        )
+        body, r = _review(client)
+        assert _done_banner(body) is None
+        assert (r["missing"], r["modified"]) == (1, 1)
+
+    assert _files() == {"a/x.jpg": "missing", "a/y.txt": "modified"}
+    assert _open_event_files() == [1, 2]
+

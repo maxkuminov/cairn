@@ -14,6 +14,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -278,8 +279,9 @@ _POLICY = {
         "label": "Working",
         "short": "Edits are normal",
         "flags": (
-            "Ordinary edits are not flagged. Deletions are, and so is a file that comes back "
-            "different after going missing."
+            "Ordinary edits are not flagged — nor, yet, is a change of contents that a deep "
+            "verify finds with the size and date untouched. Deletions are flagged, and so is a "
+            "file that comes back different after going missing."
         ),
     },
 }
@@ -1639,8 +1641,13 @@ async def _guarded_accept(
     origin: str = "",
     folder: _Scope | None = _ROOT_SCOPE,
     return_scope: _Scope | None = None,
+    outcome: dict[str, int] | None = None,
 ) -> RedirectResponse | None:
     """Run ``form``'s accept only if its population still matches ``submitted_fp`` (design D14).
+
+    ``outcome``, if given, receives the service's counts (``accepted`` / ``removed``) on success —
+    what the confirmation shown after the redirect states. It is filled only after the mutation
+    committed, so a refusal leaves it empty.
 
     Returns ``None`` when the accept was performed (the caller then redirects to its own success
     target), or the fail-closed refusal response — a 303 to the review surface the submission came
@@ -1719,12 +1726,43 @@ async def _guarded_accept(
         if fe is None or fe.collection_id != collection.id:
             await session.rollback()
             return stale
-        await scanner_svc.accept_file(session, collection, fe, user.id)
-        return None
-    await scanner_svc.accept_files(
-        session, collection, [f.id for f in narrowed.files], user.id
-    )
+        result = await scanner_svc.accept_file(session, collection, fe, user.id)
+    else:
+        result = await scanner_svc.accept_files(
+            session, collection, [f.id for f in narrowed.files], user.id
+        )
+    if outcome is not None:
+        outcome.update(result)
     return None
+
+
+# --- "it worked" (a one-shot confirmation after an accept) -----------------------------------
+# An accept answers with a redirect to a freshly rendered review page. The only sign that it
+# worked used to be a smaller number somewhere on that page. The route now leaves a short-lived
+# cookie stating what the service reported, and the next review render shows it once and clears it.
+# The cookie is client-held, so it is parsed against a strict pattern and can only ever produce
+# the sentence "Accepted N change(s)/deletion(s)" — it selects nothing and authorises nothing.
+_DONE_COOKIE = "cairn_done"
+_DONE_RE = re.compile(r"^(changes|deletions):([0-9]{1,7})$")
+
+
+def _set_done(response: RedirectResponse, outcome: dict[str, int]) -> None:
+    accepted, removed = int(outcome.get("accepted", 0)), int(outcome.get("removed", 0))
+    if removed > 0:
+        value = f"deletions:{removed}"
+    elif accepted > 0:
+        value = f"changes:{accepted}"
+    else:
+        return
+    response.set_cookie(_DONE_COOKIE, value, max_age=60, httponly=True, samesite="lax", path="/")
+
+
+def _take_done(request: Request) -> dict[str, Any] | None:
+    """The confirmation to show on this render, or ``None``. Never trusts the cookie's shape."""
+    match = _DONE_RE.match(request.cookies.get(_DONE_COOKIE, ""))
+    if match is None:
+        return None
+    return {"kind": match.group(1), "count": int(match.group(2))}
 
 
 # --- issue review + recovery ----------------------------------------------------------------
@@ -2141,9 +2179,14 @@ async def collection_review(
             "copy_count": len(copy_relpaths),
             "copy_truncated": model["total"] > len(copy_relpaths),
             "stale": stale == "1",
+            # Never beside the refusal notice: the two would be about different clicks.
+            "done": None if stale == "1" else _take_done(request),
         }
     )
-    return templates.TemplateResponse(request, "collection_review.html", ctx)
+    response = templates.TemplateResponse(request, "collection_review.html", ctx)
+    if ctx["done"] is not None:
+        response.delete_cookie(_DONE_COOKIE, path="/")
+    return response
 
 
 @router.get("/review", response_class=HTMLResponse)
@@ -2192,9 +2235,14 @@ async def fleet_review(
             "total_issues": sum(s["total"] for s in sections),
             "row_from": "fleet",
             "stale": stale == "1",
+            # Never beside the refusal notice: the two would be about different clicks.
+            "done": None if stale == "1" else _take_done(request),
         }
     )
-    return templates.TemplateResponse(request, "review_fleet.html", ctx)
+    response = templates.TemplateResponse(request, "review_fleet.html", ctx)
+    if ctx["done"] is not None:
+        response.delete_cookie(_DONE_COOKIE, path="/")
+    return response
 
 
 # The two bulk verbs, one route each. The addresses are unchanged from before the verbs were
@@ -2216,6 +2264,7 @@ async def _bulk_accept(
 ) -> RedirectResponse:
     collection = await _get_owned_collection(session, collection_id, user)
     return_scope = _parse_scope(return_dir, return_deep)
+    outcome: dict[str, int] = {}
     refused = await _guarded_accept(
         session,
         collection,
@@ -2225,10 +2274,13 @@ async def _bulk_accept(
         origin=origin,
         folder=_parse_scope(dir, deep),
         return_scope=return_scope,
+        outcome=outcome,
     )
     if refused is not None:
         return refused
-    return RedirectResponse(_review_return(collection_id, origin, return_scope), status_code=303)
+    response = RedirectResponse(_review_return(collection_id, origin, return_scope), status_code=303)
+    _set_done(response, outcome)
+    return response
 
 
 @router.post(
@@ -2322,14 +2374,17 @@ async def collection_file_accept(
     if owner_id is not None and owner_id != collection.id:
         raise HTTPException(status_code=404, detail="file not found")
     return_scope = _parse_scope(return_dir, return_deep)
+    outcome: dict[str, int] = {}
     refused = await _guarded_accept(
         session, collection, user, "accept-file", population_fp,
-        file_id=file_id, origin=origin, return_scope=return_scope,
+        file_id=file_id, origin=origin, return_scope=return_scope, outcome=outcome,
     )
     if refused is not None:
         return refused
     # Success and refusal land on the SAME surface and scope.
-    return RedirectResponse(_review_return(collection_id, origin, return_scope), status_code=303)
+    response = RedirectResponse(_review_return(collection_id, origin, return_scope), status_code=303)
+    _set_done(response, outcome)
+    return response
 
 
 @router.post("/collection/{collection_id}/stamp-all", response_class=HTMLResponse, dependencies=[Depends(verify_csrf)])

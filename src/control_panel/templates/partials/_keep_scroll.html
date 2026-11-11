@@ -1,0 +1,25 @@
+{# Keep the operator's place across an accept: the form posts, the page is re-rendered from the
+   top, and working down a long list meant re-scrolling after every click. The position is stored
+   only for a submit that actually went ahead (a cancelled confirm prevents it), and restored only
+   on the page it was stored for. #}
+<script>
+  (function () {
+    var KEY = "cairnReviewScroll";
+    function here() { return location.pathname + location.search.replace(/([?&])stale=1(&|$)/, "$1").replace(/[?&]$/, ""); }
+    document.addEventListener("submit", function (e) {
+      var f = e.target;
+      if (e.defaultPrevented || !f || !f.matches || !f.matches("form.bulk-accept, .review-row form")) return;
+      try { sessionStorage.setItem(KEY, JSON.stringify({ at: here(), y: window.scrollY })); } catch (err) {}
+    });
+    try {
+      var raw = sessionStorage.getItem(KEY);
+      if (raw) {
+        sessionStorage.removeItem(KEY);
+        var saved = JSON.parse(raw);
+        if (saved && saved.at === here() && saved.y > 0) {
+          window.addEventListener("load", function () { window.scrollTo(0, saved.y); });
+        }
+      }
+    } catch (err) {}
+  })();
+</script>

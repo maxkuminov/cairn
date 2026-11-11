@@ -14,7 +14,8 @@
       {% if g.dir or row_from|default("") == "fleet" %}
         <div class="issues__where">
           <span class="mono">{{ (g.dir ~ "/") if g.dir else "" }}</span>
-          {% if row_from|default("") == "fleet" %}
+          {# Not for a single file: its row's own button is the same action. #}
+          {% if row_from|default("") == "fleet" and r.total > 1 and g.shown > 0 %}
             <span class="issue-group__actions">
               {{ m.bulk_accept("changes", r.accept_changes, r, r.collection_name, from_q, csrf_token) }}
               {{ m.bulk_accept("deletions", r.accept_deletions, r, r.collection_name, from_q, csrf_token) }}
@@ -44,6 +45,10 @@
             </span>
             {% if g.found %}<span class="issue-group__found">found {{ g.found }}</span>{% endif %}
           </div>
+          {# No bulk action over a group this page lists NOTHING of (its row budget is spent): that
+             would be the one place a click removes what the operator cannot see at all. The
+             group's line below points at the folder, where the action is offered beside its rows. #}
+          {% if g.shown > 0 %}
           <div class="issue-group__actions">
             {# On the fleet page two collections can both have a `shared/`: the confirm names the
                collection as well as the folder. #}
@@ -51,6 +56,7 @@
             {{ m.bulk_accept("changes", g.accept_changes, r, g_where, from_q, csrf_token) }}
             {{ m.bulk_accept("deletions", g.accept_deletions, r, g_where, from_q, csrf_token) }}
           </div>
+          {% endif %}
         </div>
         {% if g.shown == 0 %}
           {# Nothing of this group fits in the page's row budget: say so and point at the group. #}

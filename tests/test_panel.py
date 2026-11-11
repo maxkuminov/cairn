@@ -927,7 +927,7 @@ def test_review_recovery_copy_matches_what_a_changed_restore_actually_does(cairn
         assert "instead of clearing the old one" not in body
         # And the one promise the page may make about a restore is made for MISSING files only:
         # an identical file coming back closes its own issue; a changed file put back does not.
-        assert "If it matches, the issue closes by itself." in body
+        assert "If it matches, the missing alert closes by itself" in body
         assert "putting an earlier version back shows up as one more change" in body
 
 

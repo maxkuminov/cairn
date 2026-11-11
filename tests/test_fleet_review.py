@@ -558,7 +558,10 @@ def test_no_control_on_the_fleet_page_acts_on_more_than_one_collection(cairn_env
 
     # Only the POSTing forms are in scope: the chrome's top-bar search is a GET navigation.
     posts = _forms(body)
-    assert len(posts) == 4 + 3 + 1, "one per row, plus the group and folder-line bulk actions"
+    # One per row, plus collection one's group actions (x/: deletions; y/: changes and deletions).
+    # Collection two is a single file: its row's own button IS the action, so no bulk form.
+    assert len(posts) == 4 + 3
+    assert _bulk_forms(_section_html(body, 2)) == [] and len(_row_forms(_section_html(body, 2))) == 1
     for f in posts:
         # Every form's address is under exactly one collection, and is one of the three verbs,
         # bound to the fleet surface.
@@ -895,6 +898,11 @@ def test_a_single_folder_section_offers_its_bulk_action_on_the_folder_line(cairn
             assert f["attrs"]["data-where"] == "single"
         # They are the only bulk forms of the section, and the rows follow them.
         assert len(_bulk_forms(section)) == 2 and len(_row_forms(section)) == 3
+        # A section of ONE file offers none: its row's own button is the same action.
+        bystander = _section_html(body, 2)
+        assert '<span class="mono">only/</span>' in bystander
+        assert _bulk_forms(bystander) == []
+        assert [f["button"] for f in _row_forms(bystander)] == ["Accept deletion"]
 
         r = _submit(client, deletions)
         assert r.status_code == 303 and r.headers["location"] == "/review"
@@ -1089,6 +1097,10 @@ def test_a_collection_past_the_total_budget_is_still_listed_with_its_counts(cair
 
     with _make_client(cairn_env, seed) as client:
         body, sections = _fleet(client)
+        # Where the unlisted group's link leads: the collection's own page, scoped to that folder.
+        with _capture_context() as captured:
+            scoped_body = client.get(f"/collection/{n_full + 1}/review?dir=gone").text
+        scoped = [c for n, c in captured if n == "collection_review.html"][0]["r"]
 
     assert len(sections) == n_full + 1
     assert sum(s["shown"] for s in sections) == TOTAL
@@ -1109,9 +1121,10 @@ def test_a_collection_past_the_total_budget_is_still_listed_with_its_counts(cair
     assert section.count('<section class="issue-group">') == 2
     assert f'href="/collection/{cid}/review?dir=gone"' in section
     assert f"{CAP - 1} missing" in _text(section) and "1 changed" in _text(section)
-    gone = next(f for f in _bulk_forms(section) if f["fields"]["dir"] == "gone")
-    assert gone["button"] == f"Accept {CAP - 1} deletions"
-    assert f"includes {CAP - 1} not shown here" in gone["text"]
+    # A group that lists NONE of its files offers no action: that would be the one place a click
+    # removes what the operator cannot see at all.
+    assert _forms(section) == []
+    assert "Accept" not in _text(section)
     # A section with ZERO rows is not "showing the first 0" — that describes a listing, and this is
     # a listing that could not start. It says what happened and points at the page that can.
     text = _text(section)
@@ -1122,6 +1135,14 @@ def test_a_collection_past_the_total_budget_is_still_listed_with_its_counts(cair
     assert f"These {CAP - 1} files are not listed on this page — open gone/ to see them." in text
     assert "This file is not listed on this page — open edited/ to see it." in text
     assert "Showing 0 of" not in text and "Showing the first 0" not in text
+    # ...and that page DOES offer the action, beside the rows it acts on.
+    assert scoped["collection_id"] == cid and (scoped["total"], scoped["shown"]) == (CAP - 1, CAP - 1)
+    assert len(_row_forms(scoped_body)) == CAP - 1
+    toolbar = scoped_body[scoped_body.index('id="review-toolbar"') :].split('class="card card--flush issues"')[0]
+    (offered,) = _bulk_forms(toolbar)
+    assert offered["button"] == f"Accept {CAP - 1} deletions"
+    assert (offered["fields"]["dir"], offered["fields"]["deep"]) == ("gone", "1")
+    assert "not shown" not in offered["text"]
 
 
 def test_a_single_folder_section_past_the_budget_does_not_describe_a_listing_of_zero(
@@ -1144,6 +1165,7 @@ def test_a_single_folder_section_past_the_budget_does_not_describe_a_listing_of_
 
     with _make_client(cairn_env, seed) as client:
         body, sections = _fleet(client)
+        own = client.get("/collection/2/review").text
 
     assert _names(sections) == ["first", "second"]
     assert sections[1]["shown"] == 0 and sections[1]["flat"] is True
@@ -1153,10 +1175,16 @@ def test_a_single_folder_section_past_the_budget_does_not_describe_a_listing_of_
     assert "Showing 0 of" not in text
     assert section.count('class="review-list__more"') == 1
     assert 'class="review-row"' not in section
-    # Its header, counts, folder line and action are all still there.
+    # Its header, counts and folder line are still there — but no action over files the page
+    # lists none of; the section that IS listed keeps its own.
     assert "second Locked 3 missing 0 changed" in _text(_section_head(body, 2))
-    (bulk,) = _bulk_forms(section)
-    assert bulk["button"] == "Accept 3 deletions" and "includes 3 not shown here" in bulk["text"]
+    assert '<span class="mono">only/</span>' in section
+    assert _forms(section) == [] and "Accept" not in _text(section)
+    assert [f["button"] for f in _bulk_forms(_section_html(body, 1))] == ["Accept 2 deletions"]
+    # The page its notice links to offers the action, beside its three rows.
+    assert 'href="/collection/2/review"' in section
+    assert [f["button"] for f in _bulk_forms(own)] == ["Accept 3 deletions"]
+    assert len(_row_forms(own)) == 3
 
 
 def test_a_group_cut_short_by_the_budget_still_says_what_its_action_leaves_unseen(cairn_env, monkeypatch):
@@ -1446,6 +1474,144 @@ def test_the_fleet_guidance_names_only_controls_the_fleet_page_renders(cairn_env
     # ...and that page is linked from every section, and does carry the control.
     assert 'href="/collection/1/review"' in _section_head(body, 1)
     assert 'data-copy="rel"' in own and "Copy paths" in own
+
+
+# --- "it worked": the one-shot confirmation, on the page the accept returns to -----------------
+
+
+def _done_banner(body: str) -> str | None:
+    """The confirmation's visible text, or ``None`` when the page renders none."""
+    m = re.search(r'<div[^>]*id="done-banner"[^>]*>(.*?)</div>\s*</div>', body, re.S)
+    if m is None:
+        assert "done-banner" not in body
+        return None
+    assert 'role="status"' in m.group(0)
+    return _text(m.group(1))
+
+
+def test_an_accept_from_the_fleet_page_is_confirmed_once_on_the_fleet_page(cairn_env):
+    """An accept submitted from `/review` returns there, and that is where it is confirmed — once,
+    for each of the three controls, in the singular and the plural."""
+    seed, _everything = _two_collections_with_the_same_folders(cairn_env)
+
+    def accept(client, form, expected):
+        assert form["action"].endswith("?from=fleet")
+        r = _submit(client, form)
+        assert r.status_code == 303 and r.headers["location"] == "/review"
+        landed = client.get("/review").text
+        assert _done_banner(landed) == expected
+        # It sits above the sections, and a reload does not say it again.
+        assert landed.index('id="done-banner"') < landed.index('id="fleet-collection-')
+        again = client.get("/review").text
+        assert _done_banner(again) is None
+        return again
+
+    with _make_client(cairn_env, seed) as client:
+        body, _sections = _fleet(client)
+        assert _done_banner(body) is None
+
+        # A single row (collection one's `other/c.jpg`, file id 4).
+        row = next(f for f in _row_forms(body) if f["action"] == "/collection/1/file/4/accept?from=fleet")
+        body = accept(
+            client, row, "Accepted 1 deletion — its record was removed; nothing on disk was touched."
+        )
+        # A bulk deletion, several files. (With `other/` resolved, collection one's issues all
+        # sit in `shared/`: the section is a single list and its actions are on the folder line.)
+        group = next(
+            f for f in _bulk_forms(_section_html(body, 1)) if "stop-tracking" in f["action"]
+        )
+        assert group["button"] == "Accept 2 deletions"
+        body = accept(
+            client, group,
+            "Accepted 2 deletions — their records were removed; nothing on disk was touched.",
+        )
+        # What is left of collection one is a single changed file: its row's own button.
+        row = next(f for f in _row_forms(_section_html(body, 1)))
+        assert row["button"] == "Accept change"
+        body = accept(client, row, "Accepted 1 change.")
+        assert 'id="fleet-collection-1"' not in body
+        # Collection two, a group's changes — one file, so the singular.
+        group = next(
+            f for f in _bulk_forms(_section_html(body, 2))
+            if f["fields"]["dir"] == "shared" and "adopt-changed" in f["action"]
+        )
+        accept(client, group, "Accepted 1 change.")
+
+    assert _statuses(1) == [("shared/edit.txt", "ok")]
+    assert _statuses(2) == [
+        ("other/c.jpg", "missing"), ("shared/a.jpg", "missing"),
+        ("shared/b.jpg", "missing"), ("shared/edit.txt", "ok"),
+    ]
+
+
+def test_several_changes_accepted_from_the_fleet_page_are_confirmed_in_the_plural(cairn_env):
+    root = cairn_env / "plural"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [
+            ("docs/a.txt", "modified"), ("docs/b.txt", "modified"), ("docs/c.txt", "modified"),
+        ]))
+
+    with _make_client(cairn_env, seed) as client:
+        body, _sections = _fleet(client)
+        (bulk,) = _bulk_forms(body)
+        assert bulk["button"] == "Accept 3 changes"
+        r = _submit(client, bulk)
+        assert r.headers["location"] == "/review"
+        landed = client.get("/review").text
+        assert _done_banner(landed) == "Accepted 3 changes."
+        # Nothing is left to review, and the confirmation is what explains the empty page.
+        assert "No open issues" in landed
+        assert _done_banner(client.get("/review").text) is None
+
+
+def test_a_refused_fleet_accept_is_not_confirmed(cairn_env):
+    """A refusal sets nothing: the fleet page says the action was NOT applied and confirms nothing."""
+    seed, everything = _two_collections_with_the_same_folders(cairn_env)
+
+    with _make_client(cairn_env, seed) as client:
+        body, _sections = _fleet(client)
+        row = next(f for f in _row_forms(body))
+        group = next(f for f in _bulk_forms(body))
+        for form in (row, group):
+            r = _submit(client, form, population_fp="0" * 64)
+            assert r.status_code == 303 and r.headers["location"] == "/review?stale=1"
+            assert "cairn_done" not in r.headers.get("set-cookie", "")
+            landed = client.get("/review?stale=1").text
+            assert STALE_LEAD in landed
+            assert _done_banner(landed) is None
+        assert _done_banner(client.get("/review").text) is None
+
+    assert _statuses(1) == everything and _statuses(2) == everything
+
+
+@pytest.mark.parametrize(
+    "forged",
+    ["<script>alert(1)</script>", "deletions:99999999", "foo:3", "changes:", "Deletions:2"],
+)
+def test_a_forged_confirmation_cookie_renders_nothing_on_the_fleet_page(cairn_env, forged):
+    """The cookie is client-held: unless it matches the strict pattern it renders no confirmation
+    and is reflected nowhere in the page."""
+    import html as html_lib
+
+    root = cairn_env / "forged"
+    root.mkdir()
+
+    async def seed():
+        cid = await seed_collection(root)
+        await _with_session(lambda s: _mk_files(s, cid, [("a/gone.jpg", "missing"), ("b/edit.txt", "modified")]))
+
+    with _make_client(cairn_env, seed) as client:
+        for url in ("/review", "/review?stale=1"):
+            body = client.get(url, headers={"Cookie": f"cairn_done={forged}"}).text
+            assert _done_banner(body) is None, url
+            assert "Accepted" not in _text(body.split('id="fleet-collection-')[0]), url
+            for fragment in (forged, html_lib.escape(forged), "alert(1)", "99999999", "foo:3"):
+                assert fragment not in body, (url, fragment)
+
+    assert _statuses(1) == [("a/gone.jpg", "missing"), ("b/edit.txt", "modified")]
 
 
 # --- 2.26 / D14: the last-activity tile says what it actually found ---------------------------

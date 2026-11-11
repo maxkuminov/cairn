@@ -172,7 +172,15 @@ A bulk action MAY cover files the view does not show — a group or a scope past
 because an incident of thousands of files cannot be listed in full. It SHALL NOT do so silently:
 wherever an action's population is larger than the rows shown for it, the control's hint and its
 confirmation SHALL state how many of the files it acts on are not shown on the page, and the view
-SHALL link to where the full set can be listed. Where every listed file lies in one
+SHALL link to where the full set can be listed. A group of which the page lists **no** file at all
+SHALL NOT offer its bulk action there: it SHALL name the folder, state its counts, and link to the
+folder's own view, where the action is offered beside its rows.
+
+After an accept is performed, the review surface the operator is returned to SHALL confirm it once
+— what was accepted and how many files — and SHALL NOT repeat that confirmation on a later visit.
+A refused accept SHALL produce no such confirmation. The confirmation SHALL be derived from what
+the accept reported, and nothing a client supplies SHALL be able to make it state anything other
+than a count of changes or deletions accepted. Where every listed file lies in one
 folder the view SHALL render a single list rather than a group of one. Groups SHALL be ordered
 newest finding first.
 
@@ -276,6 +284,24 @@ nothing has been checked yet, which is not the same thing and SHALL NOT be prese
 - **WHEN** a group or scope holds more issue files than the view renders for it
 - **THEN** its bulk action's hint and confirmation SHALL state how many of the files it acts on are
   not shown on the page
+
+#### Scenario: A group the page lists nothing of offers no bulk action there
+
+- **WHEN** a group's files are all beyond the page's row budget, so none of them is listed
+- **THEN** the group SHALL render its folder, its counts and a link to its own view, and SHALL NOT
+  render a bulk action on this page
+
+#### Scenario: An accept is confirmed once
+
+- **WHEN** the operator accepts files and is returned to a review surface
+- **THEN** that page SHALL state what was accepted and how many, and loading the page again SHALL
+  NOT show the statement again
+
+#### Scenario: A refused accept is not confirmed
+
+- **WHEN** an accept is refused because its population changed
+- **THEN** the page the operator is returned to SHALL show the refusal notice and SHALL NOT show a
+  confirmation
 
 #### Scenario: A scoped view acts only inside its scope and offers the way back
 

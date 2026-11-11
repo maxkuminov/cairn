@@ -56,9 +56,9 @@
           {% if c.counts.modified > 0 %}<span class="legend__stat">{{ m.dot("var(--warn)", size=7) }}{{ c.counts.modified }} changed</span>{% endif %}
           <span class="legend__cta">Review {{ m.icon("chevronR", size=12) }}</span>
         </span>
-        {% if c.counts.new > 0 %}<span class="legend__stat">{{ m.dot("var(--accent)", size=7) }}{{ c.counts.new }} new</span>{% endif %}
+        {% if c.counts.new > 0 %}<span class="legend__stat" title="Added since the last full verification. Already watched — nothing to do.">{{ m.dot("var(--accent)", size=7) }}{{ c.counts.new }} new</span>{% endif %}
       {% elif c.counts.new > 0 %}
-        <span class="legend__stat">{{ m.dot("var(--accent)", size=7) }}{{ c.counts.new }} new</span>
+        <span class="legend__stat" title="Added since the last full verification. Already watched — nothing to do.">{{ m.dot("var(--accent)", size=7) }}{{ c.counts.new }} new</span>
       {% elif c.is_empty %}
         <span class="legend__stat">{{ m.dot("var(--text-3)", size=7) }}No files indexed yet</span>
       {% else %}
