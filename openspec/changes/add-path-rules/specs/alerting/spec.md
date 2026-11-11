@@ -11,9 +11,9 @@ is not reported as restored"), a
 any mode), or the files of a **mass change** in a churn corpus (see the `integrity-scanning`
 requirements of those names). The alert's summary SHALL name each of these kinds it contains with
 its own count, and SHALL say when a count of modified files is a mass change. Informational
-`added`, `restored`, and `moved` events, ordinary churn re-baselines, a change or a disappearance
-that a path rule makes quiet, and a file that returned to the contents on record before it changed
-SHALL NOT trigger an alert.
+`added`, `restored`, and `moved` events, ordinary churn re-baselines, an ordinary change that a
+path rule makes quiet, and a file that returned to the contents on record before it changed SHALL
+NOT trigger an alert.
 
 A scan that is refused because its root is unreachable or empty SHALL dispatch an alert saying so
 and naming the collection, with no file paths. While the outage lasts the alert SHALL be repeated
@@ -123,14 +123,12 @@ backlog, so the operator is not re-nagged on every scan.
   refused for an unreachable root
 - **THEN** the unreachable-folder alert SHALL be dispatched
 
-#### Scenario: A rule-covered change or removal does not alert
+#### Scenario: A rule-covered change does not alert
 
-- **WHEN** a scan re-records a change that a rule makes quiet, or retires a file under a
-  comes-and-goes rule
+- **WHEN** a scan re-records a change that a path rule makes quiet
 - **THEN** no alert SHALL be dispatched on its account
 
 #### Scenario: A rule does not silence what it never covers
 
-- **WHEN** a file matched by a rule shows possible corruption, or a mass of quiet removals is
-  refused
+- **WHEN** a file matched by a rule goes missing, or shows possible corruption
 - **THEN** an alert SHALL be dispatched as it would be without the rule

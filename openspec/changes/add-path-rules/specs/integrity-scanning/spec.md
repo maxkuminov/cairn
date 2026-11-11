@@ -2,46 +2,44 @@
 
 ### Requirement: Path rules decide which ordinary changes are flagged
 
-A scan SHALL consult the collection's rules when it classifies a file. An **ordinary** content
-change to a file that a rule matches SHALL be re-recorded and queued for stamping exactly as a
-change in a `churn` collection is, and SHALL NOT be flagged, whatever the collection's mode. A
-tracked file that the walk did not find, that is not reconciled as a move, and that a **comes and
-goes** rule matches SHALL be retired quietly: its events SHALL be detached, each keeping the path
-it was about, and acknowledged, and its record SHALL be removed — the consequence of accepting its
-deletion, with no alarm.
+A scan SHALL consult the collection's rules when it classifies a changed file. An **ordinary**
+content change to a file that a rule matches SHALL be re-recorded and queued for stamping exactly
+as a change in a `churn` collection is, and SHALL NOT be flagged, whatever the collection's mode.
+The rules in force for a pass SHALL be those the collection held when the pass began.
 
 A rule changes what is flagged and never what is watched: a matching file SHALL still be tracked,
-compared, re-hashed by a deep pass, and stamped where the collection is notarized.
+compared on every pass, re-hashed by a deep pass, and stamped where the collection is notarized.
 
-**A rule never covers a finding that is not routine.** Regardless of any rule, the scan SHALL
-flag: possible corruption; a file that reappears with different bytes; and a file that carries an
-open change alert, which SHALL stay recorded `modified`. A refused pass, and a file beneath a
-folder that could not be listed, are unaffected by rules.
-
-**A rule has a ceiling in both directions.** The mass-change rule SHALL count rule-covered quiet
-changes together with `churn` re-baselines, and SHALL therefore apply to rule-covered changes in a
-`worm` collection as well. Quiet removals SHALL have the same ceiling, with the same two settings:
-where the files a pass would retire quietly number at least the configured minimum and at least
-the configured share of the files the collection tracks, the pass SHALL retire none of them and
-SHALL record every one `missing` and alarm, as it would without the rule. A rule says that some
-files change or come and go; it does not say that most of a collection may vanish overnight.
+**A rule covers ordinary changes and nothing else.** Regardless of any rule, a scan SHALL flag, as
+it would without the rule: a file that is no longer on disk; possible corruption; a file that
+reappears with different bytes; and a mass change (the ceiling counts rule-covered changes). A
+file that carries an open change alert SHALL stay recorded `modified` through a rule-covered
+change, and a file found back at the contents kept from before an unaccepted change SHALL close
+its issue, exactly as without the rule. A rule SHALL NOT cause any record to be removed, any alert
+to be acknowledged, or any open issue to be resolved — neither when a scan applies it nor when it
+is added to or removed from the collection.
 
 #### Scenario: A rule-covered change in a worm collection is not flagged
 
-- **WHEN** a `worm` collection has a changes-expected rule matching a file, and that file's bytes
-  and modification time change
+- **WHEN** a `worm` collection has a rule matching a file, and that file's bytes and modification
+  time change
 - **THEN** the file SHALL stay `ok` with its new digest, no unacknowledged event SHALL be written
-  for it, and in a notarized collection it SHALL be queued for a stamp
+  for it, no alert SHALL be raised, and in a notarized collection it SHALL be queued for a stamp
 
 #### Scenario: A file the rule does not match is still flagged
 
-- **WHEN** the same collection's other file changes
+- **WHEN** another file of the same collection changes
 - **THEN** it SHALL be recorded `modified` with an unacknowledged `modified` event
 
 #### Scenario: A rule-covered file is still watched
 
 - **WHEN** a deep pass runs over a collection with a rule
 - **THEN** the files the rule matches SHALL be re-hashed like every other tracked file
+
+#### Scenario: A deletion is flagged in spite of a rule
+
+- **WHEN** a file matched by a rule is no longer on disk
+- **THEN** it SHALL be recorded `missing` with an unacknowledged `missing` event
 
 #### Scenario: Corruption is flagged in spite of a rule
 
@@ -50,91 +48,20 @@ files change or come and go; it does not say that most of a collection may vanis
 
 #### Scenario: A changed reappearance is flagged in spite of a rule
 
-- **WHEN** a file matched by a changes-expected rule goes missing and reappears with bytes that
-  match neither the recorded digest nor any kept one
+- **WHEN** a file matched by a rule goes missing and reappears with bytes that match neither the
+  recorded digest nor any kept one
 - **THEN** it SHALL be recorded `modified` with an unacknowledged `restored_changed` event
 
 #### Scenario: An open change alert survives a rule-covered edit
 
-- **WHEN** a file matched by a rule carries an open `corrupted` event and is then edited
-- **THEN** it SHALL stay `modified`
+- **WHEN** a file matched by a rule carries an open `modified` or `corrupted` event and is then
+  edited again
+- **THEN** it SHALL stay `modified`, and its alert SHALL stay open
 
-#### Scenario: A comes-and-goes file is retired quietly
+#### Scenario: Adding a rule resolves nothing
 
-- **WHEN** a file matched by a comes-and-goes rule is no longer on disk
-- **THEN** its record SHALL be removed, its events SHALL be detached with the path kept and
-  acknowledged, no unacknowledged `missing` event SHALL exist for it, and no alert SHALL be
-  dispatched
-
-#### Scenario: A changes-expected rule does not cover a deletion
-
-- **WHEN** a file matched only by a changes-expected rule is no longer on disk
-- **THEN** it SHALL be recorded `missing` with an unacknowledged `missing` event
-
-#### Scenario: A renamed comes-and-goes file is a move, not a removal
-
-- **WHEN** a file matched by a comes-and-goes rule is renamed and the scan reconciles the move
-- **THEN** the record SHALL be kept under its new path, as for any move
-
-#### Scenario: A mass of rule-covered changes becomes issues
-
-- **WHEN** a pass over a `worm` collection finds rule-covered changes numbering at least the
-  minimum and at least the configured share of the collection
-- **THEN** every one of those files SHALL be recorded `modified` with an unacknowledged event
-
-#### Scenario: A mass of quiet removals is not absorbed
-
-- **WHEN** the files a pass would retire under comes-and-goes rules number at least the minimum
-  and at least the configured share of the collection
-- **THEN** none SHALL be retired, and every one SHALL be recorded `missing` with an unacknowledged
-  `missing` event
-
-#### Scenario: A few quiet removals in a large collection are retired
-
-- **WHEN** the quiet removals of a pass are below the minimum, or below the share
-- **THEN** they SHALL be retired quietly
-
-### Requirement: A new rule resolves the open issues it covers
-
-When a rule is added to a collection, the open issues it covers SHALL be resolved in the same
-operation, so that saying "this is normal" does not leave the operator accepting by hand the very
-files they just described. A file recorded `modified` whose path the rule matches SHALL be
-accepted — recorded `ok`, its alerts acknowledged, the contents kept from before the change
-discarded — **only where every open alert on it is an ordinary modification**: a file that carries
-a possible-corruption alert, a came-back-different alert, or an alert written by the mass-change
-rule SHALL be left as it is. Under a comes-and-goes rule, a file recorded `missing` whose path the
-rule matches SHALL be retired as an accepted deletion is. Nothing the rule does not match SHALL be
-touched, and removing a rule SHALL change no record.
-
-The operation SHALL be refused while a scan, stamp or upgrade is running on the collection, and
-SHALL be applied in one transaction with the storing of the rule.
-
-#### Scenario: Open changes the rule covers are accepted
-
-- **WHEN** a changes-expected rule is added that matches two of a collection's three `modified`
-  files, each carrying only ordinary modification alerts
-- **THEN** those two SHALL be `ok` with their alerts acknowledged, and the third SHALL be unchanged
-
-#### Scenario: A corrupted file is not resolved by a rule
-
-- **WHEN** a rule is added that matches a `modified` file carrying an open `corrupted` event
-- **THEN** that file SHALL stay `modified` and its alert SHALL stay open
-
-#### Scenario: A mass-change issue is not resolved by a rule
-
-- **WHEN** a rule is added that matches a file made an issue by the mass-change rule
-- **THEN** that file SHALL stay `modified`
-
-#### Scenario: A changes-expected rule leaves missing files alone
-
-- **WHEN** a changes-expected rule is added that matches a `missing` file
-- **THEN** that file SHALL stay `missing`
-
-#### Scenario: A comes-and-goes rule retires the missing files it covers
-
-- **WHEN** a comes-and-goes rule is added that matches three of a collection's `missing` files
-- **THEN** those three records SHALL be removed with their events detached, path kept and
-  acknowledged, and the other missing files SHALL be unchanged
+- **WHEN** a rule is added that matches a file already recorded `modified`
+- **THEN** that file SHALL still be `modified` with its alert open, until it is accepted
 
 #### Scenario: Removing a rule changes no record
 
@@ -142,10 +69,10 @@ SHALL be applied in one transaction with the storing of the rule.
 - **THEN** no file record and no event SHALL change, and a later change to a file it matched SHALL
   be flagged according to the collection's mode
 
-#### Scenario: A rule is not added under a running operation
+#### Scenario: A rule added during a scan applies from the next one
 
-- **WHEN** a rule is submitted while a scan is running on the collection
-- **THEN** it SHALL be refused, no rule SHALL be stored and no record SHALL change
+- **WHEN** a rule is added while a scan of the collection is running
+- **THEN** that scan SHALL classify by the rules it started with
 
 ## MODIFIED Requirements
 
@@ -153,8 +80,8 @@ SHALL be applied in one transaction with the storing of the rule.
 
 In `worm` mode a content modification SHALL raise an unacknowledged `modified` event (a nag). In
 `churn` mode an ordinary content modification SHALL silently re-baseline the stored hash/size/mtime
-with no nag event. A path rule (see "Path rules decide which ordinary changes are flagged") can make an
-ordinary modification quiet for the files it matches under `worm` as well. Two findings are NOT ordinary modifications and SHALL NOT be absorbed by `churn`
+with no nag event. A path rule (see "Path rules decide which ordinary changes are flagged") makes an ordinary
+modification quiet, in the same way, for the files it matches under `worm`. Two findings are NOT ordinary modifications and SHALL NOT be absorbed by `churn`
 mode: a change that carries the corruption signature (see "Possible corruption is its own
 finding") and a change that is part of an unusually large change in one scan (see "A mass change
 is not absorbed"). A `missing` file SHALL raise an unacknowledged event in BOTH modes, and so SHALL a file
@@ -188,3 +115,61 @@ kinds `added` and `restored` SHALL NOT nag in either mode — they are written a
 - **WHEN** a scan in either mode writes an `added` or `restored` event
 - **THEN** the event SHALL be acknowledged at creation and SHALL NOT increase the corpus's count
   of unacknowledged events
+
+### Requirement: A mass change is not absorbed
+
+A scan SHALL NOT silently accept an unusually large change. Where the content changes a pass
+would re-baseline silently — under the `churn` policy, or because a path rule matches them, in a
+collection of either policy — number at least a configured minimum **and** at
+least a configured share of the files the collection tracks, the scan SHALL instead record every
+one of them `modified`, keep the contents each replaced, write an unacknowledged `modified` event
+for each that states how many files changed in that pass, and raise an alarm. Below either
+threshold the pass SHALL behave as before. The policy, or a rule, tells the system to
+expect edits; it does not tell it to expect the whole collection to be rewritten overnight, and
+an exemption with no ceiling absorbs a disaster as readily as a typo.
+
+The rule is evaluated once per pass, on the changes that pass itself re-baselined. It does not
+accumulate across passes: a pass that is interrupted has absorbed what it had already committed,
+and the pass that follows counts only what it finds changed. This limit is part of the
+requirement, not an oversight — it is what the rule guarantees.
+
+The share SHALL be computed over the records the collection tracked when the pass began, missing
+ones excluded. Setting the share to zero SHALL disable the rule. The rule SHALL NOT apply to
+changes that are reported anyway — in a `worm` collection, every change no path rule matches — nor
+to deletions, which are already reported file by file.
+
+#### Scenario: A burst over both thresholds becomes issues
+
+- **WHEN** a pass over a `churn` collection finds changed files numbering at least the minimum and
+  at least the configured share of the collection
+- **THEN** every one of those files SHALL be `modified` with an unacknowledged `modified` event,
+  and the scan SHALL count them as a mass change
+
+#### Scenario: A burst under the share is absorbed
+
+- **WHEN** the changed files reach the minimum count but not the configured share
+- **THEN** they SHALL be re-baselined silently, as ordinary edits
+
+#### Scenario: A burst under the minimum is absorbed
+
+- **WHEN** most of a small collection changes but the number of changed files is below the minimum
+- **THEN** they SHALL be re-baselined silently
+
+#### Scenario: The rule can be disabled
+
+- **WHEN** the configured share is zero
+- **THEN** no number of changes in one pass SHALL be converted
+
+#### Scenario: Converted files keep what they replaced
+
+- **WHEN** the mass-change rule converts a file
+- **THEN** its record SHALL hold the digest it had before the pass, so putting it back closes the
+  issue
+
+#### Scenario: A mass of rule-covered changes in a worm collection becomes issues
+
+- **WHEN** a pass over a `worm` collection finds changes that a path rule makes quiet, numbering at
+  least the minimum and at least the configured share of the collection
+- **THEN** every one of those files SHALL be recorded `modified` with an unacknowledged `modified`
+  event, and the scan SHALL count them as a mass change
+
