@@ -14,9 +14,13 @@ its own count, and SHALL say when a count of modified files is a mass change. In
 `added`, `restored`, and `moved` events, ordinary churn re-baselines, and a file that returned to
 the contents on record before it changed SHALL NOT trigger an alert.
 
-A scan that is refused because its root is unreachable or empty SHALL dispatch one alert saying so
-and naming the collection, with no file paths. It SHALL be sent when the refusal begins and SHALL
-NOT be repeated by each further refused scan of the same outage. A file that the scan reconciles as a move (see the
+A scan that is refused because its root is unreachable or empty SHALL dispatch an alert saying so
+and naming the collection, with no file paths. While the outage lasts the alert SHALL be repeated
+no more often than once in twenty-four hours per collection: a refused scan SHALL dispatch it
+unless an earlier scan of the same collection was refused for an unreachable or empty root within
+the preceding twenty-four hours. The limit is on how often the alert is attempted, and it is
+deliberately not "once per outage": dispatch is best-effort, so an alert that failed to deliver is
+followed by another within a day, and an unrelated earlier scan error never suppresses it. A file that the scan reconciles as a move (see the
 `integrity-scanning` move/rename requirement) is not a `missing` change and SHALL NOT trigger an
 alert. Alerts SHALL cover only changes newly detected in that scan, not the entire unacknowledged
 backlog, so the operator is not re-nagged on every scan.
@@ -77,9 +81,21 @@ backlog, so the operator is not re-nagged on every scan.
 - **WHEN** a scan finds that a changed file is back as it was before it changed
 - **THEN** no alert SHALL be dispatched on its account
 
-#### Scenario: An unreachable root alerts once
+#### Scenario: An unreachable root alerts, and not on every scan
 
-- **WHEN** a scan is refused because the root is unreachable, and the next scheduled scan is
-  refused for the same reason
+- **WHEN** a scan is refused because the root is unreachable, and a further scan of the same
+  collection is refused for the same reason an hour later
 - **THEN** exactly one alert SHALL have been dispatched, saying the folder is unreachable and
   listing no files
+
+#### Scenario: A lasting outage is repeated daily
+
+- **WHEN** a scan is refused for an unreachable root and the only earlier refusals of that
+  collection are more than twenty-four hours old
+- **THEN** an alert SHALL be dispatched
+
+#### Scenario: An unrelated earlier failure does not suppress the alert
+
+- **WHEN** a collection's previous scan ended in error for some other reason, and its next scan is
+  refused for an unreachable root
+- **THEN** the unreachable-folder alert SHALL be dispatched

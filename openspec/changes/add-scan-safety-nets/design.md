@@ -43,8 +43,22 @@ stays 0 (it counts skipped files). Nothing was written before the refusal: with 
 no batch had anything to commit. Freshness is untouched — `compute_health` keys on completed
 `ok`/`partial` scans, so the collection goes stale on schedule (the dead-man's switch still works).
 
-One alert per outage: dispatched when the collection's previous scan run did **not** end `error`.
-It carries no paths and links to the collection page. *Alternative considered:* a sentinel file
+The refusal alert is rate-limited, not deduplicated: it is dispatched unless an earlier scan of
+the collection was refused for the same class of reason within the previous 24 hours (the reason
+entries carry a fixed prefix, so the check is one query over `runs`). Dispatch is best-effort, so
+"once per outage" could lose the only alert to one SMTP hiccup; a daily repeat cannot. It carries
+no paths and links to the collection page.
+
+**A walk that did not complete marks nothing missing.** `os.walk` swallows directory-listing
+errors by default; the walk gets an `onerror` hook that records each unreadable directory. A pass
+with any such error skips the missing sweep and move reconciliation entirely, counts the
+directories in `runs.errors` with diagnostic entries, and ends `partial`. Files in readable
+directories are classified as usual (batches already committed stand — they are true statements
+about files the pass did read).
+
+**A deep pass that did not complete is still owed.** The scheduler advances `last_full_scan_at`
+only when the deep scan it ran ended `ok` or `partial`; today it advances it whenever it called
+one. *Alternative considered:* a sentinel file
 that must exist under the root. Rejected: it asks every operator to plant a file in folders Cairn
 promises never to need write access to.
 
@@ -73,11 +87,14 @@ change at all and is unaffected.
 Three nullable columns on `files`: `prior_sha256`, `prior_size`, `prior_mtime`. "Prior" means *the
 contents on record when the file was last healthy*.
 
-- **Set** when a change takes a row from healthy (`ok` / `new`) to `modified` — a `worm` change, a
-  `corrupted` finding, a mass-change conversion (D4) — to the values the row held before the scan
-  overwrote them; and when a missing file reappears different (`restored_changed`), to the digest
-  recorded when it went missing. **Not overwritten** by further changes while the row stays
-  `modified`: they are still unaccepted changes away from the same healthy state.
+- **Set only when nothing is kept yet** (`prior_sha256 IS NULL`) and a change takes the row out of
+  the healthy state — a `worm` change, a `corrupted` finding, a mass-change conversion (D4) — to
+  the values the row held before the scan overwrote them; and when a file that was healthy when it
+  went missing reappears different (`restored_changed`), to the digest recorded when it went
+  missing. **Never overwritten** while set: later changes, a disappearance, a reappearance as a
+  third version are all still unaccepted changes away from the same last-accepted contents. (If
+  the file was already `modified` when it went missing, the digest on record at that moment is the
+  unaccepted version — adopting it as "prior" would let that version close the issue later.)
 - **Cleared** by every accept (`accept_collection`, `accept_file`, `accept_files`) and by a return
   (below). A healthy row never carries them.
 
@@ -149,6 +166,16 @@ alert.
 
 `ALTER TABLE files ADD COLUMN` ×3 (no rebuild); batch rebuild of `events` to extend the kind CHECK
 (as 0005 / 0011). Downgrade refuses while any `corrupted` event exists, and drops the columns.
+
+## Review record
+
+Spec round 1 (Codex): one contradiction (a corrupted file restored to its original must close, not
+stay), and gaps folded in — keep the existing prior digest across a disappearance, walk errors must
+not read as deletions, the failure reason must come from the failed run, a refused deep pass is
+still owed, the refusal alert is rate-limited rather than once-per-outage, the mass rule's per-pass
+limit is stated in the requirement. **Declined:** specifying a new outcome for the reappearance of
+a file that never had a digest on record — pre-existing behaviour under its own requirement, and
+nothing in this change can compare bytes that were never hashed.
 
 ## Risks / Trade-offs
 

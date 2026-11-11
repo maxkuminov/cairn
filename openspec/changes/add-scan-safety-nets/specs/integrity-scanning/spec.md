@@ -22,7 +22,16 @@ scans started from the panel SHALL never run with it.
 
 A root that is reachable and holds some files SHALL be scanned normally, however many tracked
 files it no longer holds: a folder that was deleted, or a nested volume that is gone, is reported
-as missing files.
+as missing files — **provided the walk itself completed**. Where any directory under the root
+could not be listed (a permission or input/output error during the walk), the scan cannot tell
+"this folder's files are gone" from "this folder could not be read", so that pass SHALL NOT mark
+any file missing. It SHALL still record what it found in the directories it could read, SHALL
+count each unreadable directory among the run's errors with a diagnostic entry, and SHALL end
+`partial`.
+
+A refused pass SHALL NOT count as a deep verification either: where the pass that was refused was
+a deep pass, the collection's record of when it was last deep-verified SHALL NOT advance, so the
+deep pass is still owed. The same SHALL hold for any deep pass that did not complete.
 
 #### Scenario: A root that does not exist
 
@@ -53,6 +62,20 @@ as missing files.
 - **WHEN** a collection's root holds some of its tracked files and not others
 - **THEN** the pass SHALL complete, the absent files SHALL be reported `missing`, and the run SHALL
   NOT be refused
+
+#### Scenario: An unreadable subfolder does not read as deleted files
+
+- **WHEN** a directory under the root cannot be listed during the walk, and tracked files lie
+  beneath it
+- **THEN** no file SHALL be marked `missing` by that pass, the run SHALL end `partial` with the
+  unreadable directory counted and sampled among its errors, and changes found in readable
+  directories SHALL still be recorded
+
+#### Scenario: A refused deep pass is still owed
+
+- **WHEN** the scheduler runs a collection's due deep pass and that pass is refused, or ends in
+  error
+- **THEN** the collection's last-deep-verified time SHALL be unchanged
 
 #### Scenario: A refused pass does not refresh freshness
 
@@ -101,8 +124,15 @@ compare against.
 #### Scenario: A corrupted file stays an issue
 
 - **WHEN** a file with an open `corrupted` event is renamed, or deleted and restored with the
-  recorded bytes
+  corrupted bytes that were recorded when the corruption was found
 - **THEN** it SHALL still be recorded `modified` after the scan that sees it
+
+#### Scenario: Restoring a corrupted file's original bytes closes it
+
+- **WHEN** a file with an open `corrupted` event is replaced by, or deleted and restored with, the
+  bytes it had before the corruption was found
+- **THEN** it SHALL be recorded `ok` and its `corrupted` event SHALL be acknowledged, under the
+  return rule of "The contents on record before an unaccepted change are kept"
 
 ### Requirement: The contents on record before an unaccepted change are kept
 
@@ -110,8 +140,11 @@ When a scan finds that a healthy file has changed and records it `modified`, it 
 digest, size and modification time that were on record before the change, alongside the new ones,
 until the change is accepted. Further changes to a file that is already `modified` SHALL NOT
 replace what was kept: they are further unaccepted changes away from the same last-healthy state.
-Where a missing file reappears with different bytes, what is kept SHALL be the digest recorded
-when it went missing. Every accept of the file SHALL discard what was kept, and a healthy file
+Where a missing file reappears with different bytes and nothing is yet kept for it — it was
+healthy when it went missing — what is kept SHALL be the digest recorded when it went missing.
+Where something is already kept, it SHALL be left as it is: the digest recorded when the file went
+missing is then itself an unaccepted change, and adopting it as "the contents before the change"
+would let that unaccepted version close the issue later as a return. Every accept of the file SHALL discard what was kept, and a healthy file
 SHALL never carry any.
 
 Each `modified` and `corrupted` event SHALL record what the file was and what it became — digest,
@@ -127,7 +160,9 @@ informational event saying the file returned to the contents on record before it
 raise no alarm. Equality of digests is the only test: a matching size or name SHALL NOT be treated
 as a return. On reappearance the order of tests SHALL be: equals the recorded digest (the file is
 back as it was last seen); equals the kept digest (the file is back as it was before it changed);
-otherwise it came back different.
+otherwise it came back different. A record with no digest on record has nothing to be compared
+with and nothing kept; its reappearance is governed, unchanged, by the existing requirement "A
+file that reappears with different bytes is not reported as restored".
 
 #### Scenario: A change keeps what it replaced
 
@@ -162,6 +197,14 @@ otherwise it came back different.
 - **THEN** the file SHALL be `modified`, and what was kept SHALL still be the digest from before the
   change
 
+#### Scenario: A changed file that vanished and came back as a third version keeps the original
+
+- **WHEN** a file is found changed and not accepted, then found missing, then found again with
+  bytes matching neither the changed version nor the original, and is later put back as the
+  changed version
+- **THEN** the file SHALL stay `modified` throughout, what is kept SHALL still be the digest from
+  before the first change, and only a return to that digest SHALL close the issue
+
 #### Scenario: Something else again is still a change
 
 - **WHEN** a `modified` file changes to bytes that match neither the recorded digest nor the kept
@@ -190,6 +233,11 @@ for each that states how many files changed in that pass, and raise an alarm. Be
 threshold the pass SHALL behave as before. The policy tells the system to expect edits; it does not
 tell it to expect the whole collection to be rewritten overnight, and a rule with no ceiling
 absorbs a disaster as readily as a typo.
+
+The rule is evaluated once per pass, on the changes that pass itself re-baselined. It does not
+accumulate across passes: a pass that is interrupted has absorbed what it had already committed,
+and the pass that follows counts only what it finds changed. This limit is part of the
+requirement, not an oversight — it is what the rule guarantees.
 
 The share SHALL be computed over the records the collection tracked when the pass began, missing
 ones excluded. Setting the share to zero SHALL disable the rule. The rule SHALL NOT apply to

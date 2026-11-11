@@ -2,8 +2,9 @@
 
 ### Requirement: A scan that could not run says why
 
-Where the panel reports that a collection's latest scan failed, it SHALL state the reason the scan
-recorded, in the operator's terms, next to that report — in particular that the collection's
+Where the panel reports that a collection's latest scan failed, it SHALL state the reason that
+same run recorded — the run the failure report is about, never an earlier completed scan's
+diagnostics — in the operator's terms, next to that report — in particular that the collection's
 folder is unreachable, or empty while files are tracked. A bare "failed, check the logs" leaves an
 operator who is looking at a perfectly quiet collection with no way to know that it is quiet
 because nothing is being read.
@@ -16,6 +17,13 @@ changed files.
 - **WHEN** a collection's latest scan was refused because its root is unreachable
 - **THEN** the collection's card and its page SHALL say that the folder is unreachable, and SHALL
   NOT describe the collection's files as missing
+
+#### Scenario: The reason shown belongs to the failed run
+
+- **WHEN** a collection's last completed scan skipped some files, and a later scan was refused for
+  an unreachable root
+- **THEN** the failure note SHALL state the unreachable-folder reason, and the completed scan's
+  skipped-file sample SHALL NOT be presented as the reason for the failure
 
 #### Scenario: Recent activity names possible corruption
 
