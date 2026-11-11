@@ -183,6 +183,8 @@ async def import_manifest(
             select(FileEntry).where(FileEntry.collection_id == collection.id)
         )
     }
+    # Files that carry an open, unaccepted change alert (see `scanner._unresolved_change_ids`).
+    unresolved_ids = await scanner._unresolved_change_ids(session, collection.id)
     root = Path(collection.root)
     now = scanner._utcnow()
 
@@ -233,7 +235,10 @@ async def import_manifest(
                 entry.size = row.size
             if row.mtime is not None:
                 entry.mtime = row.mtime
-            entry.status = "ok"
+            # An import re-seeds the recorded digest; it does not accept anything. A row that still
+            # carries an open, unaccepted change alert stays `modified` (unify-issue-model D12) —
+            # the file's status is the only thing the panel counts, so `ok` here would hide it.
+            entry.status = "modified" if entry.id in unresolved_ids else "ok"
             entry.last_checked = now
             result.updated += 1
 

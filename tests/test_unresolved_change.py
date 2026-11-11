@@ -376,3 +376,82 @@ async def test_auto_baseline_does_not_promote_a_new_row_with_an_open_change(cair
     assert (await _file(cid, "plain.txt")).status == "ok"
     assert summary.baselined == 1, "only the clean new file graduates"
     assert summary.reflagged == 1
+
+
+# --- review round: the two writers of `files.status` the first pass missed -------------------
+
+
+@pytest.mark.asyncio
+async def test_an_alert_acknowledged_during_the_pass_does_not_leave_the_file_flagged(
+    cairn_env, monkeypatch
+):
+    """`cairn accept` is not excluded by a running scan, so the open-alert set read at the start of
+    a pass can go stale. A file the pass held `modified` on the strength of that read must be
+    healthy at the end if its alert was acknowledged meanwhile — otherwise the panel shows an issue
+    the operator already accepted, with no open event behind it and nothing to clear it with."""
+    from sqlalchemy import update
+
+    from src.database import get_sessionmaker
+    from src.models.db import Event
+    from src.services import scanner
+
+    root = cairn_env / "stale"
+    root.mkdir()
+    (root / "a.txt").write_text("one")
+    cid = await seed_collection(root, ots_mode="none", mode="churn")
+    await _scan(cid)
+    fid = (await _file(cid, "a.txt")).id
+    await _set_status(fid, "modified")
+    await _add_open_event(cid, fid, "restored_changed")
+
+    # An ordinary edit, so the churn branch goes through the at-the-write layer...
+    (root / "a.txt").write_text("two, longer")
+    real_hash = scanner._hash
+
+    async def hash_then_accept(path):
+        # ...and, while the pass is running, the alert is acknowledged from another connection.
+        async with get_sessionmaker()() as other:
+            await other.execute(
+                update(Event)
+                .where(Event.file_id == fid)
+                .values(acknowledged_at=datetime.now(timezone.utc))
+            )
+            await other.commit()
+        return await real_hash(path)
+
+    monkeypatch.setattr(scanner, "_hash", hash_then_accept)
+    summary = await _scan(cid)
+
+    assert (await _file(cid, "a.txt")).status == "ok"
+    assert summary.reflagged == 0
+
+
+@pytest.mark.asyncio
+async def test_a_manifest_import_does_not_mark_an_unaccepted_change_healthy(cairn_env, tmp_path):
+    """`import-manifest` re-seeds digests; it accepts nothing. Re-running it over a collection with
+    an unaccepted change must leave that file listed as changed."""
+    from src.database import get_sessionmaker
+    from src.models.db import Collection
+    from src.services import manifest
+
+    root = cairn_env / "imp"
+    root.mkdir()
+    (root / "a.txt").write_text("one")
+    (root / "b.txt").write_text("bee")
+    cid = await seed_collection(root, ots_mode="none", mode="worm")
+    await _scan(cid)
+    (root / "a.txt").write_text("two, longer")
+    await _scan(cid)
+    a, b = await _file(cid, "a.txt"), await _file(cid, "b.txt")
+    assert a.status == "modified"
+
+    tsv = tmp_path / "manifest.tsv"
+    tsv.write_text("".join(f"{f.sha256}\t{f.relpath}\n" for f in (a, b)))
+    async with get_sessionmaker()() as s:
+        result = await manifest.import_manifest(s, await s.get(Collection, cid), tsv)
+    assert result.updated == 2
+
+    assert (await _file(cid, "a.txt")).status == "modified"
+    assert (await _file(cid, "b.txt")).status == "ok"
+    still_open = [e for e in await _events(cid, file_id=a.id) if e.acknowledged_at is None]
+    assert [e.kind for e in still_open] == ["modified"]

@@ -243,7 +243,12 @@ through one helper that returns `modified` for an id in that set. Batches commit
 so this is what keeps every *committed* state honest, including the state an aborted scan leaves.
 **At the end:** one sweep over the held ORM rows in the same transaction as the final batch (not a
 bulk `UPDATE` — a later flush of a stale in-memory status would overwrite it), for paths nobody
-listed and for rows left by earlier versions. `RunSummary` counts the re-flagged files and the scan logs
+listed and for rows left by earlier versions. The sweep re-reads the set first: the panel refuses
+an accept while a scan runs, but `cairn accept` does not, so an alert can close mid-pass, and a row
+this rule alone held `modified` goes back to `ok` rather than being left flagged with nothing open
+behind it (found in implementation review; correcting the "cannot go stale" assumption above).
+`import-manifest`, the one other writer of `files.status`, applies the same rule when it updates an
+existing row. `RunSummary` counts the re-flagged files and the scan logs
 one INFO line when the count is non-zero. It never touches a file that is `missing` (already an
 issue) and never a file with no open change event.
 

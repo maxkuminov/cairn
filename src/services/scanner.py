@@ -806,11 +806,22 @@ async def scan_collection(
             # may read `ok`/`new`. On the ORM objects, never a bulk UPDATE — a later flush of a
             # stale in-memory status would overwrite it. Catches paths nobody routed through
             # `_healthy_status` and rows left `ok` by earlier versions. `missing` is never touched.
-            if unresolved_ids:
-                for row in existing.values():
-                    if row.id in unresolved_ids and row.status in ("ok", "new"):
-                        row.status = "modified"
-                        reflagged_ids.add(row.id)
+            #
+            # The set read at the start of the pass is re-read here, under the same transaction as
+            # the final batch. The panel refuses an accept while a scan runs, but `cairn accept`
+            # does not, so an alert can be acknowledged mid-pass: a row this pass held `modified`
+            # on the strength of the earlier read is then healthy, and leaving it flagged would
+            # show an issue the operator has already accepted, with nothing open behind it. Only
+            # rows THIS rule flagged are returned to `ok` — never a row a classification branch
+            # found changed, which carries its own open event and is therefore still in the set.
+            current_ids = await _unresolved_change_ids(session, collection_id)
+            for row in existing.values():
+                if row.id in reflagged_ids and row.id not in current_ids and row.status == "modified":
+                    row.status = "ok"
+                    reflagged_ids.discard(row.id)
+                elif row.id in current_ids and row.status in ("ok", "new"):
+                    row.status = "modified"
+                    reflagged_ids.add(row.id)
             summary.reflagged = len(reflagged_ids)
             if summary.reflagged:
                 logging.getLogger("cairn.scanner").info(

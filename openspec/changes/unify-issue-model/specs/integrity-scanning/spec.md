@@ -71,6 +71,18 @@ first-seen time. The number of files re-flagged SHALL be recorded in the scan's 
 The rule applies in both change policies. It SHALL also correct records left in that state by
 earlier versions, on the first scan that sees them.
 
+The rule is about open alerts, so it SHALL follow them when they close. The set of files carrying
+an open change alert SHALL be read again at the end of the pass, in the same transaction as its
+final batch: a file the pass kept `modified` only because of an alert that has since been
+acknowledged — an accept run from the command line is not excluded by a running scan — SHALL be
+recorded `ok`, so that no file is left listed as changed with no open alert behind it and no action
+that can clear it. A file a classification step of the pass itself found changed SHALL NOT be
+returned to `ok` by this re-read.
+
+The same rule SHALL bind every other writer of a file's status. In particular a manifest import,
+which re-seeds recorded digests and accepts nothing, SHALL leave a file that carries an open change
+alert recorded `modified`.
+
 #### Scenario: A changed file that is deleted and restored is still listed as changed
 
 - **WHEN** a file in a `worm` collection is found changed and not accepted, then found missing,
@@ -119,3 +131,17 @@ earlier versions, on the first scan that sees them.
 
 - **WHEN** a file is recorded `missing` and also carries an open `modified` event
 - **THEN** the scan SHALL leave its status `missing`
+
+#### Scenario: An alert acknowledged during the pass does not leave the file flagged
+
+- **WHEN** a pass keeps a file `modified` because it carried an open change alert when the pass
+  began, and that alert is acknowledged before the pass ends
+- **THEN** the file's status SHALL be `ok` after the scan, and the scan SHALL not count it as
+  re-flagged
+
+#### Scenario: A manifest import does not mark an unaccepted change healthy
+
+- **WHEN** a manifest is imported over a collection in which a file has been found changed and not
+  accepted
+- **THEN** that file's status SHALL still be `modified` after the import, its change alert SHALL
+  still be open, and the collection's other imported files SHALL be `ok`
