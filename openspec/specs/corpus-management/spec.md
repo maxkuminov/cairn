@@ -14,6 +14,10 @@ directory; otherwise creation SHALL fail with a clear error. The collection SHAL
 files to `ok`. For backward compatibility the `cairn add-collection` command SHALL accept
 `add-corpus` as an alias, and the `--collection` option SHALL accept `--corpus` as an alias.
 
+The two change policies are presented to operators as **Locked** (`worm`) and **Working**
+(`churn`). `cairn add-collection --mode` SHALL accept `locked` and `working` as names for them and
+SHALL store `worm` and `churn` respectively; the stored values and their meaning are unchanged.
+
 #### Scenario: Create over an existing directory
 
 - **WHEN** `cairn add-collection` is run with a name and a path that is an existing directory
@@ -41,4 +45,10 @@ files to `ok`. For backward compatibility the `cairn add-collection` command SHA
 - **WHEN** `cairn add-corpus` is run, or any command is given `--corpus NAME` instead of
   `--collection NAME`
 - **THEN** it SHALL behave identically to the new `add-collection` / `--collection` form
+
+#### Scenario: The plain policy names are accepted on the command line
+
+- **WHEN** `cairn add-collection` is run with `--mode locked` or `--mode working`
+- **THEN** the collection SHALL be stored with mode `worm` or `churn` respectively, exactly as if
+  the stored value had been given
 

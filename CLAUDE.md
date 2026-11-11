@@ -502,6 +502,53 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > limitations recorded in the archived spec: hard-link over-deferral, link-less-store cleanup
 > window (loud), lexists-only restore admission, no GC of leftover copies.
 
+> One issue model (unify-issue-model, #62): the panel used to show two ledgers — an event log
+> with an "unreviewed" count and a status on each file — and a verb for each ("Mark reviewed"
+> cleared only the alert; "Adopt"/"Stop tracking" cleared both). **There is now one open item, the
+> issue**: a file whose status is `modified` or `missing`. One count everywhere
+> (`_alert_badge_count`), one resolving action per kind, named for its outcome: **Accept change**
+> / **Accept deletion** (route addresses unchanged: `/review/adopt-changed`, `/review/stop-tracking`,
+> `/file/{id}/accept`). `POST /events/{id}/ack`, `/events/ack-all`, `/collection/{id}/review/ack-all`
+> and `/collection/{id}/accept` (baseline-new) are **deleted** — nothing forwards; the event log is
+> read-only history and `events.acknowledged_at` is written only by accept/restore/the scanner.
+> "Baseline" is gone from the review vocabulary: new files are not work (no tile, no button, no
+> form control; panel-created collections get `auto_baseline_new` on; the card keeps its "N new"
+> legend and the file browser its `new` filter). WORM/Churn render as **Locked/Working**
+> (`_POLICY`/`_policy_view`; stored values unchanged; `cairn add-collection --mode locked|working`).
+> Status pills state the fact ("2 changed", "377 missing · 4 changed").
+> **Review page** (`collection_review.html` + `partials/review_groups.html`/`review_row.html`/
+> `review_help.html`): files first, grouped by folder — `_group_scopes` splits the issues one level
+> below their deepest common folder, plus a "this folder only" group for files directly in it —
+> each group with counts, when found, and its own bulk action; `?dir=…[&deep=0]` opens a group as
+> the page's scope. Rows carry the deciding facts (found when, file last written, "changed N times
+> since", came-back-different with both digests). Help and recovery come AFTER the list.
+> `_review_model(collection, pop, scope, row_budget)` is pure and is the one model behind the
+> collection page, the fleet page (`/review`, sections ordered Locked → newest finding → name) and
+> the dashboard's **Needs you** list; the dashboard's per-event feed became a read-only
+> **recent activity** summary by local day and collection.
+> **Guard (D14) changes:** the two bulk forms carry a **folder scope** `(dir, deep)` —
+> operator-supplied, so it is bound, not trusted: `_narrow` slices by it, the fingerprint header
+> names it (`dir={len}US{dir}USdeep={0|1}`), and after the recount the mutation is
+> `scanner.accept_files(ids the recount hashed)` — one encoding of "which records", never a second
+> SQL expression of the folder rule. `_in_scope` is the only place the rule is written (literal
+> prefix + `/`). `_guarded_accept` repeats its in-flight check under the write lock. A bulk action
+> may cover rows the page does not list, and then says how many in its hint and its confirm.
+> **Scanner rule (D12): a file with an open `modified`/`restored_changed` event is never recorded
+> `ok`/`new`** — with the event count gone, file status is the only thing that keeps an unaccepted
+> change visible. `_healthy_status` guards every write of `ok` (reappearance, move, churn
+> re-baseline, auto-baseline), and the end of the pass re-reads the open-alert set and states the
+> rule on its rows AND as an `UPDATE` (a held row can read `modified` while the stored one was set
+> `ok` elsewhere). `import-manifest` honours it; `cairn accept` now refuses while an operation is
+> running. `RunSummary.reflagged` counts it; no event, no alert. **No schema change.**
+> Accepted limitations are listed in the archived design (CR/LF folder names can't use their bulk
+> action; blank `deep` = subtree; the status-bar label still says "modified"). Not in this change:
+> the pre-change fingerprint of a changed file is still not kept (restoring the original reads as
+> one more change) — that, the unmounted-root guard, bit-rot and mass-change alarms are the next
+> change; path rules and history views the one after.
+> Gates: 2-round Codex spec review, adversarial implementation review (guard scope PASS with no
+> findings; scanner scope 3 rounds, one family: status writers not serialized with a scan),
+> verifier 0 blocking, 3 test agents (mutation-tested guard), sandbox pass on a copy of prod data.
+
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
   Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).

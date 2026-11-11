@@ -21,179 +21,22 @@ requests. The panel SHALL run without a login wall in single-user mode.
 - **THEN** the choice SHALL be stored (cookie) and subsequent pages SHALL render with that
   `data-mode` without a flash
 
-### Requirement: Dashboard shows status and acknowledges events
-
-The dashboard SHALL show summary tiles, a per-collection card for each collection, and a
-recent-events feed. Unacknowledged events SHALL offer a "mark reviewed" action that, on use, removes
-the call-to-action and decrements the unreviewed-event count — the count of events awaiting a
-reading, not the file-derived issue counts — without a full page reload.
-
-The vocabulary SHALL distinguish the two state machines the panel tracks. Marking an event reviewed
-writes only to the reading log: the file's own state is unchanged, so the collection's status and
-the file-derived counts SHALL remain as they were. Every control that performs this action SHALL be
-labelled as reviewing/noting rather than resolving, and SHALL carry hint copy stating that the file
-stays on record, keeps any existence proof, and that the collection keeps its alert status until the
-file is restored or retired.
-
-The dashboard SHALL additionally offer a bulk action, shown only while at least one open event
-exists, that marks every unacknowledged event belonging to the current user's collections
-acknowledged (recording who and when) and refreshes the recent-events feed, the "need action" count,
-and the sidebar alert badge in place without a full page reload. Because it reaches events that are
-not visible in the capped feed, that control SHALL state the number of events it will affect and
-SHALL require an explicit confirmation before acting. It SHALL be scoped to the current user's own
-collections and SHALL NOT acknowledge events of other users' collections. It SHALL set
-acknowledgement only — it SHALL NOT re-baseline files (that remains the `accept` operation).
-
-The **Open issues** tile SHALL be a working link to the place where those issues can be acted on
-whenever the count is greater than zero, presented with the same clickable affordance as the
-equivalent collection-page stat. When exactly one collection is affected it SHALL link to that
-collection's review view; when more than one is affected it SHALL link to the **fleet-wide review
-page**, which lists every affected collection's issues together. It SHALL NOT link to a route that
-does not exist. At a count of zero it SHALL remain a non-interactive element.
-
-The recent-events feed SHALL be **ordered so that the events the unreviewed count is counting are
-the ones the operator sees**: unacknowledged events first, then most-recently-detected first within
-each group. The feed SHALL NOT be filtered to unacknowledged events, because informational kinds are
-written already acknowledged and an open-only feed would render an empty rail on a healthy system.
-Ordering, not filtering, is what keeps the bulk mark-reviewed control honest: a control offering to
-clear N events while the feed beneath it shows none of them asks for a blind acknowledgement of
-alerts the page never displayed.
-
-The sidebar alert badge SHALL carry an accessible label naming what it counts, and SHALL count the
-same population as the Open issues tile beside it (files that are missing or modified) so the two
-cannot disagree. That count SHALL be computed in one place and used by every render of the badge,
-including each out-of-band refresh, so a background scan keeps a long-open page's badge current.
-
-The dashboard's **last activity** tile summarises the newest finished run of **any** kind across the
-user's collections. It SHALL therefore name the operation it is describing — the collection and the
-kind of run (`scan`, `stamp`, `upgrade`) — and SHALL state that run's result whenever the result is
-anything other than a clean completion. It SHALL NOT describe every finished run as a scan: a
-`stamp` or `upgrade` run says nothing about when the files were last checked, and presenting one as
-a scan is the same false assurance in a smaller box. A `partial` run SHALL be named partial, a run
-that ended in `error` SHALL be named a failure, and an `interrupted` run SHALL be named neutrally
-(it is the routine record of a reclaimed claim, never an alarm).
-
-The dashboard tiles SHALL account for every tracked file, including files that are watched but not
-yet baselined, so that the total does not silently exceed the sum of the tiles that explain it.
-Status indicators SHALL use visually distinct icons for the "attention" and "alert" states.
-
-#### Scenario: Mark an event reviewed
-
-- **WHEN** the user marks an unacknowledged event reviewed
-- **THEN** the event SHALL be recorded acknowledged, its row SHALL update in place, and the "need
-  action" count and sidebar alert badge SHALL refresh — while the file's own status and the
-  collection's status SHALL be unchanged
-
-#### Scenario: Bulk mark-reviewed states its scope and confirms
-
-- **WHEN** the user triggers the dashboard's bulk mark-reviewed action while open events exist
-- **THEN** the control SHALL have stated how many events it affects and SHALL have required an
-  explicit confirmation, and on confirmation every unacknowledged event in the user's collections
-  SHALL be acknowledged and the feed, "need action" count and sidebar badge SHALL refresh without a
-  full page reload
-
-#### Scenario: Bulk mark-reviewed is scoped to the user
-
-- **WHEN** a user triggers the bulk action in multi-user mode
-- **THEN** only events belonging to that user's collections SHALL be acknowledged, and another
-  user's unacknowledged events SHALL be left untouched
-
-#### Scenario: Bulk mark-reviewed when nothing is open
-
-- **WHEN** there are no unacknowledged events for the user
-- **THEN** the bulk control SHALL NOT be shown (and the route SHALL be a no-op if invoked directly)
-
-#### Scenario: Open issues tile links to a single affected collection
-
-- **WHEN** exactly one collection has missing or modified files
-- **THEN** the Open issues tile SHALL be a link to that collection's review view, with a visible
-  call-to-action
-
-#### Scenario: Open issues tile with several affected collections
-
-- **WHEN** two or more collections have missing or modified files
-- **THEN** the Open issues tile SHALL link to the fleet-wide review page
-
-#### Scenario: Unreviewed events are visible in the feed that offers to clear them
-
-- **WHEN** a user's collections hold unacknowledged events that are older than twenty
-  already-acknowledged informational events
-- **THEN** the feed SHALL render those unacknowledged events first, so every event the bulk
-  mark-reviewed control names is displayed before the informational rows
-
-#### Scenario: A healthy system's feed is not emptied
-
-- **WHEN** every event in a user's collections is acknowledged
-- **THEN** the feed SHALL still render the most recent events, and SHALL NOT render an empty state
-
-#### Scenario: Open issues tile at zero
-
-- **WHEN** no collection has missing or modified files
-- **THEN** the tile SHALL render as a non-interactive element with no link
-
-#### Scenario: The badge and the tile agree
-
-- **WHEN** a user's collections contain both missing and modified files
-- **THEN** the sidebar badge SHALL show the same total as the Open issues tile and SHALL expose an
-  accessible label naming what the number counts
-
-#### Scenario: Watched-but-not-baselined files are explained
-
-- **WHEN** a collection contains files that are watched but not yet baselined
-- **THEN** the dashboard SHALL show their count in its own tile, so the monitored-file total is
-  accounted for by the tiles beside it
-
-#### Scenario: The last-activity tile names a non-scan run for what it is
-
-- **WHEN** the newest finished run across the user's collections is a `stamp` or an `upgrade` run
-- **THEN** the last-activity tile SHALL name that operation's kind and SHALL NOT describe it as a
-  scan
-
-#### Scenario: The last-activity tile names a partial or failed run
-
-- **WHEN** the newest finished run ended `partial` or `error`
-- **THEN** the tile SHALL state that result alongside the collection and the kind, rather than
-  presenting the run as a clean completion
-
-#### Scenario: The last-activity tile treats an interrupted run neutrally
-
-- **WHEN** the newest finished run ended `interrupted`
-- **THEN** the tile SHALL name it neutrally and SHALL NOT present it as a failure
-
 ### Requirement: Accept and scan actions are available from the panel
 
-The collection detail page SHALL offer "Scan now", and SHALL offer a re-baseline action only in the
-state where that action is harmless. Both mutate via the existing services and leave the operator on
-an up-to-date view of the collection; the re-baseline action MAY do so by an ordinary form
-submission followed by a redirect to a freshly rendered page rather than an in-place refresh.
-
-Re-baselining is irreversible: it rewrites the expected version of modified files and removes the
-records of missing ones. The collection detail page SHALL NOT present it as the page's primary
-action while the collection has missing or modified files. In that state the primary action SHALL be
-a link to the review view, which explains the choice between noting a change and adopting it; the
-re-baseline actions SHALL be reachable only from there. When the collection has no missing or
-modified files, **no open (unreviewed) events**, and does have files that are merely not yet
-baselined, the page MAY offer that harmless baseline action directly, and it SHALL require a
-confirmation naming what it will do. Any re-baseline form rendered on this page SHALL carry a
-confirmation.
-
-Both conditions are still required, though the reason has narrowed with the verb. The baseline
-action no longer marks the collection's other alerts reviewed — a scoped accept acknowledges only
-the events of the files it touches, and the events recording a merely-added file are born reviewed,
-so it now clears nothing the operator has not seen. What remains is the ordering: a file that was
-missing and has since been restored is healthy again while its alert stays open, so a collection can
-have no missing or modified files and still have an unread alarm. Offering a baseline action there
-puts a "nothing to see" control in front of an alert that has never been read. Where the collection
-has open events, the primary action SHALL remain the link to the review view, which is where those
-events can be read and cleared deliberately.
+The collection detail page SHALL offer "Scan now". It SHALL NOT offer any action that accepts a
+change or a deletion: those are irreversible, and they SHALL be reachable only from a review view,
+which lists the files they act on. While the collection has missing or modified files the detail
+page's primary action SHALL be a link to its review view. An accept action MAY complete as an
+ordinary form submission followed by a redirect to a freshly rendered page rather than an in-place
+refresh.
 
 Choosing what to render is not sufficient, because the collection can change between the page being
-rendered and the form being submitted. **Every endpoint that re-baselines or removes a file record
-SHALL be bound to the population its form was rendered for** — the collection-detail baseline
-action, each of the review view's scoped actions, and the per-file action alike. None is exempt: a
-rendered list is a statement about the past, so a scan that records another missing file after the
-render makes "these are the files this button will adopt" false, and the operator removes a record
-they never saw.
+rendered and the form being submitted. **Every endpoint that accepts a changed file or removes a
+file record SHALL be bound to the population its form was rendered for** — each of the review
+view's bulk actions, at whatever folder scope it was rendered for, and the per-file action alike.
+None is exempt: a rendered list is a statement about the past, so a scan that records another
+missing file after the render makes "these are the files this button will accept" false, and the
+operator removes a record they never saw.
 
 Each such form SHALL carry a **fingerprint of the population it claims to act on**, and the endpoint
 SHALL recompute that fingerprint from the datastore and refuse unless it still matches.
@@ -215,19 +58,23 @@ scoped so that a fingerprint issued for one form cannot validate another, and it
 unambiguous for every legal file path, so that two different populations cannot be encoded to the
 same input.
 
-Because the accept verb is now **scoped** — a distinct action per file state, plus a per-file action
-— that form-scoping is what keeps the actions apart: each form SHALL name the action it was minted
-for, so a fingerprint minted for "adopt the changed files" can never validate a submission that
+Because the accept verb is **scoped** — a distinct action per file state, plus a per-file action —
+that form-scoping is what keeps the actions apart: each form SHALL name the action it was minted
+for, so a fingerprint minted for "accept the changed files" can never validate a submission that
 would remove the missing ones, and a fingerprint minted for one row can never validate a submission
-at another row's address.
+at another row's address. A bulk action's form SHALL additionally name the **folder scope** it was
+rendered for — the directory, and whether the scope is that directory's whole subtree or only the
+files directly in it — so a fingerprint minted for one folder can never validate a submission
+naming another, including where the two scopes happen to hold the same files. The scope travels
+with the submission, so it SHALL be treated as untrusted input: it selects nothing by itself, and a
+submission whose scope does not reproduce the submitted fingerprint SHALL be refused like any other
+mismatch.
 
 The fingerprint SHALL cover the **whole population its own action acts on**, rather than any
 truncated list the page displayed and rather than the whole of what the page lists: for each of the
-review view's scoped actions, every file in the collection in that action's state; for the
-collection-detail baseline action, its entire not-yet-baselined set together with the assertion that
-the collection has no missing or modified files **and no open events**; for the per-file action,
-that single record. An absent or empty fingerprint SHALL be treated as a mismatch, so the check
-fails closed.
+review view's bulk actions, every file in that action's state within its folder scope; for the
+per-file action, that single record. An absent or empty fingerprint SHALL be treated as a mismatch,
+so the check fails closed.
 
 The population a form's fingerprint is computed over and the population the page **renders** SHALL
 be derived from a **single, consistent read** — one snapshot covering the file records, the open-event
@@ -241,34 +88,21 @@ snapshot**, so no two controls on the same page can describe different states. T
 derivation SHALL be used when the endpoint recomputes the fingerprint, so the two sides cannot encode
 the same state differently. Any other claim the same page makes **about that population's
 existence** — in particular the review view's "this collection indexes no files" state — SHALL be
-derived from that same snapshot rather than from an earlier count, so that a concurrent re-baseline
+derived from that same snapshot rather than from an earlier count, so that a concurrent accept
 committed between the two reads cannot leave the page reporting a healthy "all clear" for a
 collection it has just emptied.
 
 Any **count the action itself states** — a button label, and in particular a confirmation that names
 how many files the submit will change — SHALL be derived from that same snapshot, never from an
-earlier count query. This applies to the collection-detail baseline action as much as to the review
-view's scoped ones: a page that counts the not-yet-baselined files in one statement and mints the
-fingerprint in another lets a file committed between them be hashed without being counted, so the
-operator confirms a number smaller than the set the form authorizes and an unchanged submit
-baselines a file the confirmation never named. The number displayed, the population hashed and the
+earlier count query. This applies to every folder group's action as much as to the page-wide ones:
+a page that counts a group's files in one statement and mints the fingerprint in another lets a
+file committed between them be hashed without being counted, so the operator confirms a number
+smaller than the set the form authorizes. The number displayed, the population hashed and the
 population eventually mutated SHALL be the same one. Counts the page uses for **pure display**
-elsewhere — status tiles, totals, the file browser — are not claims the action makes and MAY come
-from separate reads.
+elsewhere — status tiles, totals, the file browser, a row's change history — are not claims the
+action makes and MAY come from separate reads.
 
-That single-read derivation SHALL hold for a row **re-rendered on its own** as well as for a whole
-page. Where marking a file reviewed swaps that row back in with its accept control, the state the
-row **displays** — its file status, and therefore the verb its control names — its open-event state
-and the fingerprint that control carries SHALL all be derived from one read taken after the
-acknowledgement is committed. A row rendered from a record read before that read can name one verb
-while its fingerprint authorizes the other: a scan committing a change of status in between leaves
-the swapped row offering to adopt a change while its fingerprint validates the removal of the
-record, and the operator submits, unchanged, a form that performs a consequence the row never
-displayed. Where that one read shows the row is in **no** action's population any more, the row
-SHALL be rendered with no accept control and no fingerprint, rather than with a fingerprint for a
-verb it does not show.
-
-The fingerprint SHALL additionally cover a set of open (unreviewed) events **by identity** — each
+The fingerprint SHALL additionally cover a set of open events **by identity** — each
 event's identifier, its kind and the time it was detected — recomputed inside the same guarded
 transaction as the file records. Covering that set by **count** is not sufficient: an open alert may
 be acknowledged and a different one opened with the same kind, returning the count to what it was
@@ -277,39 +111,23 @@ different one. Event identifiers may themselves be reused after a record is dele
 alone is not sufficient either — hence the detection time, which separates one generation of an
 alert from the next.
 
-**Which** events that set contains SHALL depend on the action, because the term answers a different
-question for each:
+**Which** events that set contains SHALL follow the action's own population: the open events
+**belonging to the files in that population** — the alerts the action itself will close — so that
+any change to *which* of them the action would close is a refusal. That term SHALL follow the
+action's scope rather than the collection: an action closes only the events of the files it
+touches, so binding it to every open event on the collection would refuse submissions over drift
+the action cannot reach — an alert opening on a file in a different state, or in a different
+folder, would refuse an action whose own population never moved — and refusals the operator cannot
+account for are how a guard gets worked around. That set is an assertion about a population's
+alerts as it stood when the form was rendered, and SHALL be recomputed from the endpoint's own read
+rather than trusted from the submission.
 
-For the review view's scoped actions and the per-file action, the set SHALL be the open events
-**belonging to the files in that action's own population** — the alerts the action itself will mark
-reviewed — so that any change to *which* of them the action would clear is a refusal. That term
-SHALL follow the action's scope rather than the collection: an action acknowledges only the events
-of the files it touches, so binding it to every open event on the collection would refuse
-submissions over drift the action cannot reach — an alert opening on a file in a different state
-would refuse an action whose own population never moved — and refusals the operator cannot account
-for are how a guard gets worked around.
-
-For the collection-detail baseline action the set SHALL be the **collection's entire open-event
-set**, un-narrowed, and the endpoint SHALL refuse when it is non-empty. This is a deliberate
-exception to the scoping rule above, and it SHALL NOT be narrowed to the not-yet-baselined files'
-own events. The baseline action clears no alert, so its event term is not a description of what it
-will mutate; it is the **binding of the precondition that permits the action to be offered at all**
-— that the operator is not baselining in front of an unread alarm — and that precondition is a claim
-about the collection. Files that are merely not yet baselined essentially never carry open events of
-their own, so a narrowed term would be empty for every input and would assert nothing, leaving the
-render-time gate with no submit-time binding. It SHALL cover open events that belong to no file
-record as well, since a detached alert is still unread.
-
-Both of these are assertions about a population's alerts as it stood when the form was rendered, and
-both SHALL be recomputed from the endpoint's own read rather than trusted from the submission.
-
-Each action SHALL act on **only the population its own label names**. The earlier accepted
-limitation — that a re-baseline from the review view also promoted not-yet-baselined files, which
-were deliberately left outside the fingerprint so an actively growing collection would not refuse
-every accept — is therefore **resolved rather than carried forward**: no action offered on the
-review view touches the not-yet-baselined set at all, so a file appearing there between render and
-submit is neither hashed nor acted on, and no such file can be promoted by an operator who was never
-shown it.
+Each action SHALL act on **only the population its own label names**, and the records it mutates
+SHALL be **exactly the records its recomputed fingerprint covered** — selected by that
+recomputation, never by a second, differently expressed selection of the same folder and state. Two
+encodings of one rule on a destructive path are two chances to disagree. No action offered on a
+review view touches a file that is merely new, so a file appearing there between render and submit
+is neither hashed nor acted on.
 
 The recomputation and the accept SHALL happen **within a single write transaction**, entered
 before the recomputation reads anything it depends on, so that no concurrent scan can commit between
@@ -327,10 +145,10 @@ retry it blind. Database failures that are **not** lock contention SHALL NOT be 
 refusal — reporting a corrupt or misconfigured datastore as "the collection changed since the page
 loaded" hides a fault the operator must act on.
 
-On refusal the endpoint SHALL mutate nothing — no file record removed, no baseline rewritten, no
+On refusal the endpoint SHALL mutate nothing — no file record removed, no change accepted, no
 event acknowledged — and SHALL redirect to the review view **carrying a marker that the view
 renders as an explanation**. That explanation SHALL lead with the consequence — the operator's
-action was **not** applied and nothing was deleted or acknowledged — before it describes the
+action was **not** applied and nothing was removed or accepted — before it describes the
 collection, and only then state that the collection changed since the page loaded. A refusal with no
 visible explanation is indistinguishable from a broken button and invites the operator to click it
 again; one that opens by describing the collection reads as a status note and leaves the operator
@@ -351,78 +169,35 @@ one.
 
 - **WHEN** the user opens a collection that has missing or modified files
 - **THEN** the page header SHALL offer a review link as its primary action and SHALL NOT contain an
-  accept/re-baseline form
+  accept form
 
-#### Scenario: Baselining new files is offered, and confirmed
+#### Scenario: The detail page offers no accept action in any state
 
-- **WHEN** the user opens a collection with no missing or modified files, no open events, but with
-  files not yet baselined
-- **THEN** the page MAY offer a baseline action, which SHALL require a confirmation before
-  submitting
-
-#### Scenario: The baseline confirmation names the population its fingerprint covers
-
-- **WHEN** the collection-detail page is rendered for a collection whose only non-baselined files are
-  new, and a scan commits a further new file **between** the count that decides to offer the action
-  and the read the fingerprint is minted from
-- **THEN** the confirmation SHALL name the number of files in the snapshot the fingerprint was minted
-  from — including the file that landed in that window — and submitting the form unchanged SHALL
-  baseline exactly the files the confirmation named, so the displayed count, the hashed population
-  and the mutation cannot disagree
-- **AND WHEN** the further new file instead lands **after** that read, the confirmation SHALL name
-  only the files that read saw, and the submission SHALL be refused rather than silently baselining
-  the newcomer as well
-
-#### Scenario: The baseline action is withheld while an alert is unread
-
-- **WHEN** the user opens a collection that has files not yet baselined and no missing or modified
-  files, but still has an open event — a file that was missing and has since been restored
-- **THEN** the page SHALL NOT offer the baseline action, and SHALL offer the review view link as its
-  primary action instead, so the outstanding alert is read on the view that shows it rather than
-  cleared by a new-file promotion
-
-#### Scenario: A stale baseline form is refused after the collection changes
-
-- **WHEN** the user opens a collection whose only non-baselined files are new, a scan then records a
-  file missing, and the user submits the already-rendered baseline form
-- **THEN** the endpoint SHALL refuse, SHALL NOT re-baseline or remove any file record and SHALL
-  leave the new missing file's event unacknowledged, and SHALL redirect to the review view with the
-  marker that makes the refusal visible
-
-#### Scenario: A stale baseline form is refused by an alert opening on a file it does not name
-
-- **WHEN** the baseline form is rendered for a collection whose only non-baselined files are new,
-  with no missing or modified files and no open events, and an **unrelated** file then goes modified,
-  then missing, and is then restored — so that it ends healthy, the collection again has no missing
-  or modified files and the not-yet-baselined set is untouched, while the alert raised when it was
-  modified remains open because restoring a file clears only its missing alert — and the user submits
-  the already-rendered baseline form
-- **THEN** the endpoint SHALL refuse, SHALL baseline nothing and SHALL leave the open alert
-  unacknowledged, and SHALL redirect to the review view with the staleness marker — the baseline
-  action's no-open-alert assertion SHALL be bound to the whole collection, so an alert on a file the
-  action would never touch SHALL still refuse it
+- **WHEN** the user opens a collection with no missing or modified files but with files that are
+  new
+- **THEN** the page SHALL offer no accept or baseline action of any kind
 
 #### Scenario: A scoped action is refused after its own population goes stale
 
 - **WHEN** the user opens the review view listing one missing file, a scan then records a second
-  file missing, and the user submits the already-rendered stop-tracking form
+  file missing, and the user submits the already-rendered accept-deletions form
 - **THEN** the endpoint SHALL refuse, SHALL NOT remove either missing file's record or acknowledge
   either event, and SHALL redirect to the review view with the marker that makes the refusal visible
 
-#### Scenario: Stop tracking is not refused by drift it cannot reach
+#### Scenario: Accepting deletions is not refused by drift it cannot reach
 
 - **WHEN** the user opens the review view, a scan then records a further file **modified** and opens
-  its alert, and the user submits the already-rendered stop-tracking form whose own missing
+  its alert, and the user submits the already-rendered accept-deletions form whose own missing
   population is unchanged
 - **THEN** the endpoint SHALL perform the removal, and SHALL NOT acknowledge the newly opened
   modified alert
 
-#### Scenario: Adopt is not refused by drift it cannot reach
+#### Scenario: Accepting changes is not refused by drift it cannot reach
 
 - **WHEN** the user opens the review view, a scan then records a further file **missing** and opens
-  its alert, and the user submits the already-rendered adopt form whose own modified population is
+  its alert, and the user submits the already-rendered accept-changes form whose own modified population is
   unchanged
-- **THEN** the endpoint SHALL adopt the changed files, and SHALL NOT acknowledge the newly opened
+- **THEN** the endpoint SHALL accept the changed files, and SHALL NOT acknowledge the newly opened
   missing alert or remove the newly missing record
 
 #### Scenario: A per-file action is not refused by drift on another row
@@ -435,8 +210,9 @@ one.
 
 #### Scenario: No accept form validates any action but its own
 
-- **WHEN** the fingerprint minted for any one of the four accept actions — baseline, adopt, stop
-  tracking, per-file — is submitted to any of the other three endpoints, for every such ordered pair
+- **WHEN** the fingerprint minted for any one of the three accept actions — accept changes, accept
+  deletions, per-file — is submitted to either of the other two endpoints, for every such ordered
+  pair
 - **THEN** the endpoint SHALL refuse and SHALL mutate nothing, in every pair, including where the
   two actions' populations happen to be identical
 
@@ -447,31 +223,20 @@ one.
 - **THEN** the endpoint SHALL refuse, SHALL mutate neither row, and SHALL redirect to the review
   view with the staleness marker
 
-#### Scenario: A row swapped in after being marked reviewed states the verb it authorizes
-
-- **WHEN** a file is marked reviewed from the review view and a scan changes that file's status
-  between the point its record would have been read and the read the row's fingerprint is minted
-  from
-- **THEN** the verb the swapped-in row names and the fingerprint it carries SHALL describe the same
-  state, so that submitting that row's form unchanged can perform no consequence other than the one
-  the row displayed — and where the row is no longer in any action's population, it SHALL be
-  rendered with no accept control and no fingerprint, and a submission at its address SHALL be
-  refused
-
 #### Scenario: A refused submission is explained on the review view
 
 - **WHEN** the review view is opened with the staleness marker a refused accept redirects to
 - **THEN** the view SHALL render a dismissable notice that states first that the action was not
-  applied and that nothing was deleted or acknowledged, then that the collection changed since the
+  applied and that nothing was removed or accepted, then that the collection changed since the
   page loaded and that the list shown is current, and SHALL NOT render that notice on an ordinary
   visit or for an unrecognized marker value
 
 #### Scenario: A refusal landing on an all-clear view still says the action was not applied
 
 - **WHEN** the review view is opened with the staleness marker and the collection has no missing or
-  modified files and no open alerts left to review
-- **THEN** the notice SHALL still state that the action was not applied and nothing was deleted or
-  acknowledged, SHALL say the state may already have been resolved, and SHALL NOT claim that a list
+  modified files left to review
+- **THEN** the notice SHALL still state that the action was not applied and nothing was removed or
+  accepted, SHALL say the state may already have been resolved, and SHALL NOT claim that a list
   shown below is current
 
 #### Scenario: A submission with no fingerprint is refused
@@ -490,23 +255,23 @@ one.
   its event, and SHALL redirect to the review view with the staleness marker — a reused identifier
   SHALL NOT be sufficient for a fingerprint to still match
 
-#### Scenario: Replacing one open alert with another does not validate a stale stop-tracking form
+#### Scenario: Replacing one open alert with another does not validate a stale accept-deletions form
 
 - **WHEN** the review view is rendered for a collection with one missing file and one open alert on
   it, that alert is then acknowledged and a **new** alert of the same kind is opened on the same
   file — so the count of open alerts returns to exactly what it was while the file records never
-  move — and the operator submits the already-rendered stop-tracking form
+  move — and the operator submits the already-rendered accept-deletions form
 - **THEN** the endpoint SHALL refuse, SHALL NOT acknowledge the newly opened alert and SHALL NOT
   remove the file's record
 
-#### Scenario: Replacing one open alert with another does not validate a stale adopt form
+#### Scenario: Replacing one open alert with another does not validate a stale accept-changes form
 
 - **WHEN** the review view is rendered for a collection with one modified file and one open alert on
   it, that alert is then acknowledged and a **new** alert of the same kind is opened on the same
   file, so the count of open alerts returns to what it was while the file records never move, and the
-  operator submits the already-rendered adopt form
+  operator submits the already-rendered accept-changes form
 - **THEN** the endpoint SHALL refuse, SHALL NOT acknowledge the newly opened alert and SHALL NOT
-  re-baseline the file
+  accept the change
 
 #### Scenario: Replacing one open alert with another does not validate a stale per-file form
 
@@ -560,8 +325,8 @@ one.
 
 #### Scenario: A file appearing in a population no action names does not refuse anything
 
-- **WHEN** a scoped action is submitted after a scan has added a file that is merely not yet
-  baselined, while the action's own population is exactly what the view listed
+- **WHEN** a scoped action is submitted after a scan has added a file that is merely new,
+  while the action's own population is exactly what the view listed
 - **THEN** the endpoint SHALL perform the action, and that file SHALL be neither promoted nor
   otherwise touched
 
@@ -575,7 +340,7 @@ one.
 
 - **WHEN** the user triggers one of the review view's scoped actions and that action's population
   has not changed since the page was rendered
-- **THEN** that population SHALL be accepted — changed files re-baselined, or missing records
+- **THEN** that population SHALL be accepted — changed files set healthy, or missing records
   removed — the events of those files SHALL be acknowledged, and the view SHALL refresh; the guard
   SHALL NOT stand in the way of an action that is still acting on what it displayed
 
@@ -585,6 +350,48 @@ one.
   session, or after it has been restored and is no longer in the state the row described
 - **THEN** the endpoint SHALL refuse, SHALL mutate nothing, and SHALL redirect to the review view
   with the staleness marker
+
+#### Scenario: A folder-scoped action acts only inside its folder
+
+- **WHEN** the review view lists missing files in two folders and the user submits one folder's
+  accept-deletions action
+- **THEN** only that folder's records SHALL be removed and only their events closed, and the other
+  folder's records and open alerts SHALL be untouched
+
+#### Scenario: A folder's fingerprint does not validate another folder
+
+- **WHEN** the fingerprint minted for one folder scope is submitted naming a different folder, the
+  whole collection, or the same folder with the subtree/direct-files choice flipped — including
+  where the two scopes hold exactly the same files
+- **THEN** the endpoint SHALL refuse and SHALL mutate nothing
+
+#### Scenario: A folder-scoped action is refused by drift inside its folder only
+
+- **WHEN** a folder's accept action is rendered, and a scan then records a further file of that
+  kind **inside** that folder, and the user submits the already-rendered form
+- **THEN** the endpoint SHALL refuse and SHALL mutate nothing
+- **AND WHEN** the further file is instead recorded in a **different** folder, the endpoint SHALL
+  perform the action on the folder it was rendered for and SHALL leave the newcomer untouched
+
+#### Scenario: A scope of the files directly in a folder leaves its subfolders alone
+
+- **WHEN** a folder holds missing files both directly and in a subfolder, and the user submits the
+  action rendered for the files directly in it
+- **THEN** only the files directly in that folder SHALL be acted on
+
+#### Scenario: A folder name is matched literally
+
+- **WHEN** two sibling folders are named so that one would match the other under pattern matching —
+  a name containing `%` or `_`, or one being a prefix of the other — and the user submits the action
+  rendered for one of them
+- **THEN** only files under exactly that folder SHALL be acted on
+
+#### Scenario: A malformed scope is refused, not interpreted
+
+- **WHEN** a bulk accept is submitted with a scope the page could not have rendered — one that is
+  absolute, over-long, or contains a NUL byte
+- **THEN** the endpoint SHALL refuse exactly as it does on a fingerprint mismatch and SHALL mutate
+  nothing
 
 #### Scenario: Scan now starts in the background and returns immediately
 
@@ -607,9 +414,13 @@ otherwise, and SHALL keep the submit action disabled until the name and a valid 
 The server SHALL re-validate the root on submit. The form and its actions SHALL be served under the
 `/collection` route prefix (e.g. `/collection/new`, `/collection/validate-root`,
 `/collection/{collection_id}/edit`). Legacy `/corpus/...` URLs SHALL 308-redirect to the
-corresponding `/collection/...` URL so existing bookmarks keep working. The form SHALL expose an
-"auto-baseline new files" control whose state is persisted to the collection's `auto_baseline_new`
-flag and pre-filled from it when editing.
+corresponding `/collection/...` URL so existing bookmarks keep working.
+
+The form SHALL name the two change policies in plain words — **Locked** and **Working** — each with
+a one-line statement of what it flags, and SHALL NOT present the stored policy values as its
+labels. The form SHALL NOT offer a control for baselining new files: a collection created from the
+form SHALL have automatic graduation of new files enabled, and editing a collection SHALL leave
+that stored setting exactly as it was.
 
 #### Scenario: Out-of-bounds or missing root is rejected
 
@@ -626,11 +437,22 @@ flag and pre-filled from it when editing.
 - **WHEN** a client requests an old `/corpus/{id}` (or any `/corpus/...`) URL
 - **THEN** the panel SHALL respond with a 308 redirect to the equivalent `/collection/...` URL
 
-#### Scenario: Auto-baseline toggle persists
+#### Scenario: The policies are named in plain words
 
-- **WHEN** the user turns the "auto-baseline new files" control on (or off) and submits the form
-- **THEN** the collection's `auto_baseline_new` flag SHALL be saved accordingly, and re-opening the
-  edit form SHALL show the saved state
+- **WHEN** the add- or edit-collection form is rendered
+- **THEN** its change-policy control SHALL offer "Locked" and "Working", each with a description of
+  what it flags, and SHALL NOT label either choice with its stored value
+
+#### Scenario: A collection created from the form graduates new files automatically
+
+- **WHEN** a collection is created from the form
+- **THEN** its `auto_baseline_new` flag SHALL be on, and the form SHALL have offered no control for
+  it
+
+#### Scenario: Editing leaves the stored new-file setting alone
+
+- **WHEN** a collection whose `auto_baseline_new` flag is off is edited and saved from the form
+- **THEN** the flag SHALL still be off
 
 ### Requirement: Verify a tracked file's proof from the panel without upload
 
@@ -1239,174 +1061,6 @@ indicator SHALL be read-only and SHALL NOT alter scan, accept, stamp, or upgrade
 - **WHEN** a corpus has no operation in progress
 - **THEN** its status indicator SHALL render statically and SHALL NOT poll for updates
 
-### Requirement: Review and recover changed or missing files
-
-The panel SHALL provide a per-collection **review** view, reachable directly from the dashboard,
-that focuses the operator on exactly the files that need attention and tells them what to do next.
-The dashboard collection card's issue count (and the collection-detail "changed / missing" stat)
-SHALL be a visible, clickable link to that collection's review view. The review view SHALL list
-each `missing` file and each WORM `modified` file for the collection, and for each SHALL show what
-happened (missing vs modified) with its last-seen / detected time, its size, and whether the file
-was notarized. The review view SHALL let the operator mark an individual file's event reviewed, mark
-all of the collection's open events reviewed, **accept one file on its own from its row**, and
-**accept each of the states it lists as its own action** — adopting the changed files, or stopping
-tracking the missing ones — reusing the existing acknowledge/accept behavior. It SHALL NOT offer a
-single control that does both, nor one that also acts on files the view does not list. Marking one
-or all events reviewed SHALL refresh the "need action" count and the sidebar alert badge in place
-without a full page reload; an accept action MAY instead complete as an ordinary form submission
-followed by a redirect to a freshly rendered review view. The review view SHALL provide **recovery
-guidance that assumes no particular backup tool**: a copyable list of the affected file paths and
-tool-neutral recovery instructions; for files that were notarized it SHALL note that their
-OpenTimestamps proof of prior existence survives. All review and recovery actions SHALL be scoped to
-the current user's own collections.
-
-The controls SHALL be styled by consequence, not by the colour of the condition they refer to: the
-mark-reviewed actions, which change nothing about any file, SHALL be the quiet controls, and the
-action that removes records SHALL be the loud one. This SHALL hold per row as well as in bulk: a
-row's accept control SHALL NOT be visually interchangeable with the mark-reviewed control beside it,
-since the two differ by everything that matters. The bulk mark-reviewed action SHALL state how many
-alerts it will clear and that nothing about the files changes.
-
-The control for clearing alerts SHALL be rendered whenever the collection has open events, whether
-or not any file is currently missing or modified. A file that was missing and has since been
-restored leaves its alert open while the file itself is healthy; suppressing the clearing control in
-that state leaves a red count with nothing in the interface able to clear it. In that state the view
-SHALL name the case and SHALL NOT offer any accept action — every accept action's population is
-empty, and an action rendered over an empty population is an invitation to act on nothing.
-
-Where recovery guidance tells the operator what to do about files they do not want back, it SHALL
-name the action that stops tracking them, by the label that action actually carries.
-
-Where the list of affected files is truncated, the link to the full set SHALL open the file browser
-already switched to the list view and already filtered to issues, rather than a view that discards
-both. Where the copyable path list is truncated, the view SHALL point at that same filtered browser
-for the full set, and SHALL NOT direct the operator to a command that is not implemented.
-
-Copy-to-clipboard controls SHALL handle a clipboard write being unavailable or rejected, and SHALL
-report the failure rather than silently appearing to succeed. This SHALL hold for **every** copy
-control the panel renders, including those on the verification result, and the behaviour SHALL be
-implemented once and shared rather than reimplemented per surface. Recovery guidance SHALL refer to
-the copied list by the control that produced it rather than by its position on the page.
-
-The view's introduction, which describes files that went missing or changed and how to recover them,
-SHALL be rendered only where there is something to review. On a view with no issues and no open
-alerts it describes a situation the page itself then contradicts.
-
-**Recovery guidance SHALL describe the check the scan actually performs, and both of its outcomes.**
-A restored file is compared against the digest recorded for it, so the guidance SHALL say that a
-rescan returns a file to a healthy state **only where the restored bytes match what was recorded**,
-and that a file which comes back different **closes the now-obsolete missing alert and replaces it
-with a new "came back changed" alert**. It SHALL NOT say that the new alert is raised *instead of*
-clearing the old one: the scan acknowledges the missing event in the same transaction, so an
-operator sent looking for a still-open missing alert is sent after something the scan already
-closed.
-It SHALL NOT tell the operator that restoring a file and rescanning returns it to a healthy state
-unconditionally, and SHALL NOT describe a set of restored files as matching what was recorded unless
-that comparison established it. Promising a verification the product does not perform is the failure
-class this page exists to close; promising one it does perform, without its negative outcome, is the
-same failure with a smaller blast radius.
-
-#### Scenario: Recovery guidance names both outcomes of a rescan
-
-- **WHEN** the review view renders its recovery guidance
-- **THEN** it SHALL state that a restored file returns to a healthy state only where its bytes match
-  the digest recorded for it, and that a file restored with different bytes closes its obsolete
-  missing alert and raises a new "came back changed" alert in its place
-
-#### Scenario: Recovery guidance names the action that stops tracking
-
-- **WHEN** the recovery guidance tells the operator what to do about files they do not want back
-- **THEN** it SHALL name the stop-tracking action by its rendered label, and SHALL NOT name a
-  control the view no longer offers
-
-#### Scenario: The restored-alerts card does not assert an unperformed match
-
-- **WHEN** the review view renders the card for alerts left open by files that have since been
-  restored
-- **THEN** its copy SHALL NOT assert that the restored files match what was recorded beyond what the
-  scan established
-
-#### Scenario: Dashboard issue count links to the review view
-
-- **WHEN** a collection has one or more missing or modified files and the user views the dashboard
-- **THEN** the card's issue count SHALL be a visibly clickable link that opens that collection's
-  review view
-
-#### Scenario: The keyboard-activated issue count responds to both activation keys
-
-- **WHEN** the user focuses a dashboard card's issue count and presses Space
-- **THEN** the review view SHALL open, as it does for Enter
-
-#### Scenario: The review view's introduction is withheld when there is nothing to review
-
-- **WHEN** the user opens the review view for a collection with no missing or modified files and no
-  open alerts
-- **THEN** the page SHALL NOT render the introduction describing files that went missing or changed
-
-#### Scenario: A truncated copy list points at the filtered browser
-
-- **WHEN** the review view's copyable path list is truncated
-- **THEN** the notice SHALL link to the file browser filtered to issues for the full set, and SHALL
-  NOT name an unimplemented command
-
-#### Scenario: Review view lists what happened to each file
-
-- **WHEN** the user opens the review view for a collection with missing and/or modified files
-- **THEN** each affected file SHALL be listed with a missing/modified indicator, its last-seen or
-  detected time, its size, and whether it was notarized
-
-#### Scenario: Mark a file reviewed from the review view
-
-- **WHEN** the user marks a file's event reviewed from the review view
-- **THEN** the event SHALL be recorded acknowledged and the "need action" count and sidebar alert
-  badge SHALL refresh in place without a full page reload
-
-#### Scenario: Accept one file from its own row
-
-- **WHEN** the user accepts a single row from the review view
-- **THEN** only that file SHALL be acted on, its own events SHALL be acknowledged, and the view
-  SHALL refresh to reflect the resolved row
-
-#### Scenario: Scoped accept and mark-all-reviewed from the review view
-
-- **WHEN** the user triggers one of the scoped accept actions or mark-all-reviewed from the review
-  view
-- **THEN** the action SHALL reuse the existing accept/acknowledge behavior scoped to the user's own
-  collections and to that action's own population, and the view SHALL refresh to reflect the cleared
-  issues
-
-#### Scenario: Recovery guidance is offered without assuming a backup tool
-
-- **WHEN** the user views a collection with missing or modified files
-- **THEN** the review view SHALL offer a copyable list of the affected paths and tool-neutral
-  recovery instructions, and SHALL note for any notarized file that its proof of prior existence
-  survives
-
-#### Scenario: Alerts left open by a restored file can be cleared
-
-- **WHEN** the user opens the review view for a collection with no missing or modified files but
-  with open events
-- **THEN** the view SHALL render the mark-all-reviewed control, naming the case, and SHALL NOT
-  render any accept action
-
-#### Scenario: Nothing to review and nothing open
-
-- **WHEN** the user opens the review view for a collection that has indexed files, none of them
-  missing or modified, and no open events
-- **THEN** the view SHALL render an "all clear" empty state and SHALL offer no review/accept actions
-
-#### Scenario: The truncation link lands filtered
-
-- **WHEN** the affected-file list is truncated and the user follows the link to the full set
-- **THEN** the file browser SHALL open in its list view with the issues filter already applied and
-  reflected in the filter control
-
-#### Scenario: A failed clipboard write is reported
-
-- **WHEN** a copy-paths action cannot write to the clipboard
-- **THEN** the panel SHALL attempt a fallback and, if that also fails, SHALL tell the user the copy
-  did not happen rather than showing the success confirmation
-
 ### Requirement: Panel address is configurable from the Settings page
 
 The Settings page SHALL present an admin-only "Panel address" field holding the panel's
@@ -1597,14 +1251,9 @@ name each with its own count; where one is zero it MAY be omitted. The documenta
 state as the interface words it.
 
 The notarization vocabulary SHALL NOT be borrowed for the **integrity** result. A collection summary
-reporting that its files match the baseline the last scan recorded SHALL NOT describe them as
+reporting that its files match what the last scan recorded SHALL NOT describe them as
 *verified*: verification is the notary's word for a proof checked against the Bitcoin record, which
 no scan performs, and reusing it credits the collection with evidence that was never gathered.
-
-A count of unacknowledged alerts SHALL be named for what clearing it does. Acknowledging is a
-reading log — it records that the operator has seen the alert and changes nothing about the file or
-the baseline — so the count SHALL NOT be labelled as needing action, which promises a repair the
-control does not perform.
 
 The documentation SHALL describe only verification paths an operator can actually complete. It SHALL
 lead with the public drag-and-drop verifier, SHALL state that verifying requires **both** the file
@@ -1678,6 +1327,11 @@ sharing a row with the name, rather than continue to consume it.
 A control whose label cannot fit its container SHALL be allowed to wrap rather than overflow the
 container it sits in.
 
+On a review view the affected files SHALL come before the explanation of what the actions do: the
+list SHALL be preceded by no more than the page heading, a one-line summary and the page-wide
+actions, so an operator arriving from an alert on a phone reaches the first file without scrolling
+past instructions.
+
 #### Scenario: A running operation does not crush the collection name
 
 - **WHEN** a collection with a running operation is rendered on a viewport narrower than the mobile
@@ -1687,8 +1341,8 @@ container it sits in.
 
 #### Scenario: A bulk action's label does not push its card off screen
 
-- **WHEN** a bulk acknowledgement control whose label carries a count and a scope is rendered on a
-  viewport narrower than the mobile breakpoint
+- **WHEN** a bulk action control whose label carries a count is rendered on a viewport narrower
+  than the mobile breakpoint
 - **THEN** the control SHALL wrap within its container rather than overflow it
 
 #### Scenario: A long root path is readable on a phone
@@ -1703,227 +1357,47 @@ container it sits in.
 - **WHEN** the collection detail page is rendered on a viewport narrower than the mobile breakpoint
 - **THEN** the status metadata cell SHALL reflow to fit its value rather than truncating it
 
+#### Scenario: The files come before the instructions
+
+- **WHEN** a review view with issues is rendered
+- **THEN** the first affected file SHALL appear in the page before the recovery guidance and before
+  the explanation of the accept actions
+
 ### Requirement: A file that came back different is rendered as an alarm, not as an arrival
 
-The panel SHALL render a `restored_changed` event — a file that was recorded missing and reappeared
-with bytes that do not match the digest recorded for it — with its own label and with the visual
-weight of the alarming kinds, never with the muted styling used for the informational kinds
-(`added`, `restored`, `moved`). It SHALL show that event's recorded detail, which carries both
-digests, **in full and at any viewport width** — the detail line is the only surviving record of
-the digest the file had before it came back, so it SHALL NOT be truncated, clipped or ellipsized.
-The event is the one surface that distinguishes "your file came back" from "something else came
-back in its place"; rendering it as an arrival would restore the false reassurance the underlying
-fix removes.
+The panel SHALL render a file whose open event is `restored_changed` — a file that was recorded
+missing and reappeared with bytes that do not match the digest recorded for it — with its own
+label and with the visual weight of an alarm, never with the muted styling used for informational
+activity. Wherever that file is listed for review, the row SHALL show that event's recorded detail,
+which carries both digests, **in full and at any viewport width** — the detail line is the only
+surviving record of the digest the file had before it came back, so it SHALL NOT be truncated,
+clipped or ellipsized. The row is the one surface that distinguishes "your file came back" from
+"something else came back in its place"; rendering it as an ordinary change, or as an arrival,
+would restore the false reassurance the underlying fix removes. A summary of recent activity that
+counts such events SHALL name them as files that came back different, never as restored.
 
 The affected file SHALL appear in the collection's review view and count toward its issue count and
 status like any other `modified` file, so the collection SHALL NOT read as all clear while it is
 unresolved.
 
-#### Scenario: The event feed names a changed reappearance as such
+#### Scenario: The review row names a changed reappearance as such
 
-- **WHEN** a scan writes a `restored_changed` event and the operator views the event feed
-- **THEN** the row SHALL carry a label distinct from `restored`, SHALL be styled as an alarming
-  kind, and SHALL show the recorded detail carrying both digests, with both digests fully visible
-  (the detail line wraps rather than truncating)
+- **WHEN** a scan writes a `restored_changed` event and the operator opens the review view
+- **THEN** the file's row SHALL carry a label distinct from an ordinary change, SHALL be styled as
+  an alarm, and SHALL show the recorded detail carrying both digests, with both digests fully
+  visible (the detail line wraps rather than truncating)
+
+#### Scenario: Recent activity does not count it as a restore
+
+- **WHEN** the dashboard's recent-activity summary covers a day on which a file came back different
+- **THEN** that line SHALL name it as a file that came back different, and SHALL NOT fold it into
+  the count of restored files
 
 #### Scenario: A collection with an unresolved changed reappearance does not read as all clear
 
 - **WHEN** a collection's only non-`ok` file is one that reappeared with different bytes
 - **THEN** the collection SHALL NOT be presented as all clear, and the file SHALL appear in its
   review view
-
-### Requirement: Accept is offered as scoped actions named for their consequence
-
-The panel SHALL NOT offer a single accept control that acts on more than one of the three
-populations — files not yet baselined, files whose contents changed, files that are gone. It SHALL
-offer a separate action per population, each labelled with **what it does and how many records it
-does it to**, and each SHALL act on its own population only.
-
-One control acting on three populations cannot be labelled honestly. The operator on the review
-view, which lists missing and modified files, is shown a count of what is wrong and one button; that
-button also promotes every not-yet-baselined file in the collection — files the view never displayed
-— and there is no way back. Naming the verb after its consequence is what makes the count on the
-button and the list on the page the same statement.
-
-The three actions SHALL be, with their populations and their relative loudness:
-
-| Population | Action | Loudness |
-|---|---|---|
-| files not yet baselined | baseline them — they become the expected version | quiet; a light confirmation |
-| files whose contents changed | adopt the current contents as correct from now on | subdued, but its own confirmation |
-| files that are gone | stop tracking them — their records are removed | the loud, dangerous one; its own confirmation |
-
-Each SHALL carry a hint stating, in the operator's terms, what is kept and what is lost:
-
-- Baselining folds files Cairn found but the operator has not vouched for into the expected set.
-  They are already watched and already notarized; it clears the "new" marker and nothing else.
-  There is no un-baseline.
-- Adopting treats the current contents as correct from now on. Cairn recorded and notarized the new
-  contents when it detected the change; this stops the alert, and this change will not be reported
-  again.
-- Stopping tracking permanently removes those files from Cairn's records — their paths, their
-  first-seen dates, and the link to their timestamp proofs. **Nothing on disk is deleted and the
-  proof files stay in the proof store**, but Cairn will no longer list those files under Verify. To
-  get them back the operator restores from backup and runs a scan.
-
-Two claims SHALL NOT be made anywhere in this vocabulary, because both are false and both are
-plausible enough to be re-derived:
-
-- That adopting a change is **alert-only or reversible by a rescan**. The scan already recorded the
-  new digest, so a rescan matches it and re-raises nothing. The change is gone from the record.
-- That stopping tracking **deletes the files' proofs**. No proof file is deleted by any path in the
-  product. What is lost is the *link* from Cairn's records to the proof.
-
-Each action's count SHALL be derived from the **same snapshot the page's list is rendered from**, so
-the number on the button and the rows on the page cannot disagree. An action whose population is
-empty SHALL NOT be rendered.
-
-The panel SHALL additionally offer a **per-file** accept control on each reviewable row, so that a
-scan reporting one legitimate edit and one suspicious deletion can be resolved one file at a time.
-The per-file control SHALL be distinguishable at a glance from the row's mark-reviewed control,
-which changes nothing about the file, and SHALL carry its own confirmation naming that one file.
-
-#### Scenario: Each action names its own population and count
-
-- **WHEN** the review view is opened for a collection with changed and missing files
-- **THEN** it SHALL render one action per non-empty population, each naming what it does and the
-  number of records it acts on, and SHALL NOT render a single control that acts on more than one of
-  them
-
-#### Scenario: An empty population is not offered an action
-
-- **WHEN** the review view is opened for a collection that has missing files but no modified files
-- **THEN** the adopt action SHALL NOT be rendered
-
-#### Scenario: Button counts agree with the list
-
-- **WHEN** the review view renders its actions
-- **THEN** each action's count SHALL come from the same read as the rows it lists
-
-#### Scenario: The forbidden reassurances are not rendered
-
-- **WHEN** any accept action, hint, confirmation or recovery instruction is rendered
-- **THEN** it SHALL NOT describe adopting a change as reversible by a rescan, and SHALL NOT state
-  that timestamp proofs are deleted
-
-#### Scenario: A single row is resolved on its own
-
-- **WHEN** the operator uses a row's own accept control on a collection with other reviewable rows
-- **THEN** only that file SHALL be acted on, and every other row's record and alert SHALL be
-  unchanged
-
-### Requirement: Fleet-wide review of every collection's open issues
-
-The panel SHALL serve a fleet-wide review page listing every missing or modified file across all of
-the collections the current user owns, grouped by collection, so that a fleet-wide issue count has a
-destination that can act on it. Collections with no missing or modified files SHALL NOT be listed.
-
-Each group SHALL name its collection, state **both** that collection's missing and modified counts —
-including a count that is zero, since an unstated count cannot be told apart from an absent one, and
-the two kinds carry different consequences — show its count of unreviewed events, and offer a link to
-that collection's own review view. A group rendered with **no** rows because the page-wide render
-budget was already spent SHALL say that is what happened and point at the collection's own review
-view for its issues, rather than describing itself as showing the first none of them. Within a group,
-missing files SHALL be listed before modified files. Groups SHALL be ordered worst-first (by missing
-count, then modified count, then name).
-
-Every number a group shows, every action a row authorises **and the open-event state each row
-displays and acts on** SHALL be derived from **one read** of that collection's review population —
-the same single-snapshot property the per-collection review view depends on, because a control
-authorised against a population the page did not display is the failure that guard exists to
-prevent. In particular the row's open event SHALL come from that same read rather than from a second
-query: a scan or an acknowledgement committing between two reads would otherwise let a row's
-"mark reviewed" control and its accept fingerprint describe two different states of the same file.
-
-Each row SHALL offer the same **per-file** actions as the collection's own review view: marking the
-file's open event reviewed, and the scoped per-file accept, each carrying the fingerprint minted from
-that same snapshot. Marking a row reviewed SHALL update the row in place, refresh that group's
-unreviewed count and the sidebar alert badge, and leave the group's file-derived counts unchanged,
-because acknowledgement writes to the reading log and not to the file's state.
-
-The page SHALL NOT offer any **collection-spanning bulk action**. Each bulk accept verb is
-authorised over a single collection's whole population and is irreversible, so a fleet-wide bulk
-would be an unscoped irreversible verb over several collections at once — the defect the scoped
-verbs replaced, rebuilt one level up. The bulk verbs SHALL remain on each collection's own review
-view, reachable from the group's link.
-
-The page SHALL bound the rows it renders, both per collection and in total, so that one collection
-with a very large issue set cannot crowd the others out. Where a group's rows are truncated the page
-SHALL say how many more that collection holds and link to its review view; a collection over the
-total budget SHALL still be listed with its counts and its link rather than omitted, because a
-collection SHALL NOT disappear from a fleet-wide issue list because of a render budget.
-
-The page SHALL be scoped to the current user's own collections, and SHALL render a distinct empty
-state when the user has collections but no open issues, separate from the state where the user has
-no collections at all.
-
-#### Scenario: Issues in several collections are listed together
-
-- **WHEN** a user with missing files in one collection and modified files in another opens the
-  fleet-wide review page
-- **THEN** the page SHALL render one group per affected collection, each naming its collection and
-  its missing/modified counts, with its rows listed missing-first
-
-#### Scenario: A row's event and its fingerprint come from the same read
-
-- **WHEN** an event is inserted or acknowledged for one of the listed files while the fleet-wide page
-  is being rendered
-- **THEN** the row's displayed reviewed state and the fingerprint its accept control carries SHALL
-  both describe the single population read that produced the row, and SHALL NOT be drawn from two
-  different snapshots
-
-#### Scenario: A row acts on one file without leaving the page's snapshot
-
-- **WHEN** the user accepts a single file from a fleet-wide review row
-- **THEN** the accept SHALL be authorised by the fingerprint minted from the same population read
-  the row was rendered from, and SHALL act on that one file only
-
-#### Scenario: A stale fleet-wide row is refused and returns to the fleet page
-
-- **WHEN** the user submits a per-file accept from the fleet-wide page whose population has since
-  changed
-- **THEN** the request SHALL be refused without mutating anything, and the operator SHALL be
-  returned to the fleet-wide page with the changed-since-loaded notice rather than to a different
-  page
-
-#### Scenario: The return destination is chosen from a fixed set, never supplied
-
-- **WHEN** a per-file accept is submitted carrying a return-destination value that is not the
-  fleet-page literal — including an absolute URL to another host, a scheme-relative or
-  protocol-bearing string, or any other arbitrary text
-- **THEN** the request SHALL still perform exactly the same scoped, fingerprint-guarded accept, and
-  SHALL redirect to the collection's own review view; no supplied value SHALL ever become part of
-  the redirect target
-
-#### Scenario: No collection-spanning bulk verb is offered
-
-- **WHEN** the fleet-wide review page renders any number of affected collections
-- **THEN** it SHALL offer no control that accepts, retires or acknowledges across more than one
-  collection
-
-#### Scenario: Marking a row reviewed does not change the file counts
-
-- **WHEN** the user marks a fleet-wide review row's event reviewed
-- **THEN** the row and that group's unreviewed count and the sidebar badge SHALL refresh, and the
-  group's missing and modified counts SHALL be unchanged
-
-#### Scenario: One very large collection does not hide the others
-
-- **WHEN** one collection holds more issues than the per-collection render budget while other
-  collections also have issues
-- **THEN** that group SHALL render its budgeted rows plus a count of how many more it holds and a
-  link to its review view, and every other affected collection SHALL still be listed
-
-#### Scenario: The page is scoped to the viewer's collections
-
-- **WHEN** a user opens the fleet-wide review page in multi-user mode
-- **THEN** only that user's own collections SHALL be listed, and no other user's files SHALL appear
-
-#### Scenario: No open issues
-
-- **WHEN** a user with collections has no missing or modified files anywhere
-- **THEN** the page SHALL render an empty state saying so, distinct from the state shown to a user
-  with no collections
 
 ### Requirement: The health pill names what is degraded and links to it
 
@@ -2230,27 +1704,6 @@ can appear.
 - **THEN** the searchable-file count, headings, and no-match copy SHALL describe tracked files —
   never a zero count of anchored files or proofs
 
-### Requirement: The collection detail page discloses the new-file count
-
-The collection detail page's summary statistics SHALL state the count of files that are watched
-but not yet baselined, using the same vocabulary as the dashboard's new-files tile, whenever such
-files exist — and SHALL render the count (as zero) rather than omit the concept when none do. The
-detail page is where the operator acts on a collection; a population that is invisible there but
-required to explain the page's own arithmetic (total ≠ baselined + issues) forces the operator to
-discover it inside a confirmation dialog.
-
-#### Scenario: A collection with new files
-
-- **WHEN** the operator opens the detail page of a collection with files in the new state
-- **THEN** the summary statistics SHALL include the new-file count, described as watched but not
-  yet baselined, consistent with the dashboard tile's wording
-
-#### Scenario: The counts explain the total
-
-- **WHEN** the detail page renders its summary statistics for any collection
-- **THEN** the displayed populations (baselined, new, changed/missing) SHALL account for the
-  displayed total without requiring a number that appears on no surface
-
 ### Requirement: A fleet-wide action states its scope before acting
 
 A dashboard control that acts on every collection SHALL say so in its label, and SHALL obtain a
@@ -2318,4 +1771,593 @@ same counts the visuals render from, so the label and the picture cannot drift a
 - **THEN** the bar SHALL still render a visible marker for that status (a minimum segment
   width), so the visual can never contradict its own label by showing a fully-green bar over a
   stated issue
+
+### Requirement: The panel has one kind of open item, the issue
+
+The panel SHALL treat a tracked file whose status is missing or modified as an **issue**, and SHALL
+present issues as the only thing waiting for the operator. Every count of outstanding work the panel
+renders — the sidebar badge, the dashboard's needs-you total, a collection's status, a review view's
+totals — SHALL count issues, SHALL be computed by one shared definition, and SHALL therefore agree
+wherever two of them are on screen together. The sidebar badge SHALL carry an accessible label
+naming what it counts, and SHALL be recomputed on every render so a background scan keeps it
+current.
+
+The panel SHALL NOT render a count of unacknowledged events, and SHALL NOT offer any control whose
+only effect is to mark an event acknowledged, reviewed or seen. The event log is history: the scan
+writes it, and resolving an issue closes the entries that belong to it. Two counters that move
+independently, with a verb for each, ask the operator to hold a distinction that exists in the data
+model and not in their intent — and the verb that clears the smaller counter leaves every status
+indicator where it was. The addresses that used to acknowledge events — one event, all of a user's
+events, all of a collection's events — and the address that baselined new files SHALL NOT exist; a
+request to any of them SHALL mutate nothing.
+
+An issue SHALL leave the count only by being resolved: accepted from a review view, or cleared by a
+scan that finds the file restored. Viewing an issue SHALL change nothing. Because issues are the
+only thing the panel counts, a change that was never accepted SHALL remain an issue through
+whatever happens to the file next (the scan guarantees this — see the integrity-scanning
+capability), so that removing the event count removes no unresolved change from view.
+
+A file that is merely new SHALL NOT be presented as outstanding work: no surface SHALL describe it
+as waiting for a baseline, and no surface SHALL offer an action to baseline it. A new file is
+watched from the scan that found it; whether it is notarized depends on the collection's
+notarization mode and is reported by the file's own proof state, so no surface SHALL describe new
+files as notarized on the strength of being new.
+
+#### Scenario: Every count of outstanding work agrees
+
+- **WHEN** a user's collections contain both missing and modified files
+- **THEN** the sidebar badge and the dashboard's needs-you total SHALL show the same number, and the
+  badge SHALL expose an accessible label naming what the number counts
+
+#### Scenario: No surface offers to acknowledge
+
+- **WHEN** the dashboard, a collection page, a collection's review view and the fleet-wide review
+  page are rendered for a user with open issues
+- **THEN** none of them SHALL contain a control that marks an event reviewed or acknowledged, and
+  none SHALL render a count of unreviewed or unacknowledged events
+
+#### Scenario: The retired addresses mutate nothing
+
+- **WHEN** a request is posted to any of the former acknowledge addresses or to the former
+  baseline address
+- **THEN** the panel SHALL answer not-found or method-not-allowed, no event SHALL be acknowledged
+  and no file record SHALL change
+
+#### Scenario: Resolving an issue is what lowers the count
+
+- **WHEN** the user accepts one changed file from a review view
+- **THEN** the sidebar badge on the next rendered page SHALL be one lower, and the collection's
+  status SHALL reflect the remaining issues only
+
+#### Scenario: New files are not work
+
+- **WHEN** a collection's only files that are not `ok` are new
+- **THEN** the collection SHALL read as all clear, and no page SHALL describe those files as not yet
+  baselined or offer an action on them
+
+### Requirement: Issues are resolved by actions named for their outcome
+
+The panel SHALL offer exactly two resolving actions, one per kind of issue, each named for what
+happens: **Accept change** for a file whose contents changed, and **Accept deletion** for a file
+that is gone. It SHALL NOT offer a single control that acts on both kinds, nor one that acts on
+files outside the scope it names. Each action SHALL be offered per file, on that file's row, and in
+bulk for a folder scope, labelled with **the number of files it acts on**; a bulk action whose
+population is empty SHALL NOT be rendered.
+
+Each action SHALL state, in the operator's terms, what is kept and what is lost:
+
+- Accepting a change treats the current contents as correct from now on. Cairn recorded the new
+  contents when it detected the change; accepting clears the issue, and this change will not be
+  reported again. The hint SHALL NOT say the new contents were notarized: stamping is queued only
+  in a notarized collection and may still be pending, and the file's proof state is reported by
+  its own badge.
+- Accepting a deletion permanently removes the file from Cairn's records — its path, its first-seen
+  date, and the link to its timestamp proof. **Nothing on disk is deleted and the proof file stays
+  in the proof store**, but Cairn will no longer list the file under Verify. To get it back the
+  operator restores it from backup and runs a scan.
+
+Two claims SHALL NOT be made anywhere in this vocabulary, because both are false and both are
+plausible enough to be re-derived:
+
+- That accepting a change is **reversible by a rescan**, or leaves some earlier version on record
+  to compare against. The scan already recorded the new digest, so a rescan matches it and re-raises
+  nothing.
+- That accepting a deletion **deletes the file's proof**. No proof file is deleted by any path in
+  the product. What is lost is the *link* from Cairn's records to the proof.
+
+Every accept SHALL require a confirmation that names the file, or the number of files, and the
+consequence; the confirmation for a deletion SHALL say that the record is removed.
+
+The controls SHALL be distinguishable by consequence without shouting. The control that removes
+records SHALL differ from the one that does not in both wording and colour. No page SHALL render a
+filled destructive button once per row: a column of several hundred loud buttons trains the
+operator to stop reading them, and puts the irreversible control where a tap lands by accident.
+
+Each action's count SHALL be derived from the **same snapshot the page's list is rendered from**, so
+the number on the button and the rows on the page cannot disagree.
+
+#### Scenario: Each action names its own population and count
+
+- **WHEN** a review view is opened for a collection with changed and missing files
+- **THEN** it SHALL render one bulk action per non-empty kind, each naming what it does and the
+  number of files it acts on, and SHALL NOT render a single control that acts on both kinds
+
+#### Scenario: An empty population is not offered an action
+
+- **WHEN** a review view is opened for a collection that has missing files but no modified files
+- **THEN** no accept-change action SHALL be rendered
+
+#### Scenario: Button counts agree with the list
+
+- **WHEN** a review view renders its actions
+- **THEN** each action's count SHALL come from the same read as the rows it lists
+
+#### Scenario: The forbidden reassurances are not rendered
+
+- **WHEN** any accept action, hint, confirmation or recovery instruction is rendered
+- **THEN** it SHALL NOT describe accepting a change as reversible by a rescan, and SHALL NOT state
+  that timestamp proofs are deleted
+
+#### Scenario: A single row is resolved on its own
+
+- **WHEN** the operator uses a row's own accept control on a collection with other reviewable rows
+- **THEN** only that file SHALL be acted on, and every other row's record and alert SHALL be
+  unchanged
+
+#### Scenario: A deletion is confirmed with its consequence
+
+- **WHEN** the operator activates an accept-deletion control, per file or in bulk
+- **THEN** the panel SHALL ask for confirmation in words that say the record is removed from Cairn
+  and that nothing on disk and no proof file is deleted
+
+#### Scenario: Rows do not carry a filled destructive button
+
+- **WHEN** a review view renders rows for missing files
+- **THEN** each row's accept-deletion control SHALL be rendered in the quiet outline style, not as
+  a filled destructive button
+
+### Requirement: The review view lists issues by folder with the facts needed to decide
+
+The panel SHALL provide a per-collection **review** view that lists every `missing` file and every
+`modified` file of the collection and lets the operator resolve them. It SHALL be reachable
+directly from the dashboard: a collection card's issue count, and the collection page's
+changed-or-missing statistic, SHALL be visible, clickable links to that collection's review view.
+All review actions SHALL be scoped to the current user's own collections.
+
+**Files first.** The view SHALL open with a one-line summary of what is listed — how many files
+changed, how many are gone, and on which days they were found — followed by the page-wide actions
+and then the files. Explanation of what the actions do, and recovery guidance, SHALL come after the
+list or be collapsed; the view SHALL NOT place instructions between the heading and the first file.
+
+**Grouped by folder.** Where the listed files lie in more than one folder, the view SHALL group them
+by the folders immediately below their deepest common folder, with a separate group for any files
+that sit directly in that common folder. Each group SHALL name its folder, state how many of its
+files changed and how many are gone, state when they were found (one day, or a range), and offer
+one bulk action per kind present, acting on that group only. A large group SHALL be collapsed by
+default, SHALL say how many files it holds beyond those it shows, and SHALL offer a link that opens
+that group as the view's scope — the same view, restricted to exactly the files the group held and
+grouped one level deeper — from which the operator can return to the wider scope. Following that
+link SHALL NOT widen the population: the scope it opens for a group of the files directly in a
+folder SHALL exclude that folder's subfolders.
+
+A bulk action MAY cover files the view does not show — a group or a scope past its row limit —
+because an incident of thousands of files cannot be listed in full. It SHALL NOT do so silently:
+wherever an action's population is larger than the rows shown for it, the control's hint and its
+confirmation SHALL state how many of the files it acts on are not shown on the page, and the view
+SHALL link to where the full set can be listed. Where every listed file lies in one
+folder the view SHALL render a single list rather than a group of one. Groups SHALL be ordered
+newest finding first.
+
+**Facts on the row.** For each file the view SHALL show what happened (changed, gone, or came back
+different), when it was found, its size, and whether it was notarized — noting for a notarized file
+that its proof of prior existence is kept. For a changed file it SHALL also show when the file
+itself was last written, and, where the file has changed more than once, how many changes are on
+record and since when: those are the facts that let the operator answer "was that expected?"
+without leaving the page. Each row SHALL carry that file's own accept action.
+
+**Recovery guidance SHALL assume no particular backup tool**: a copyable list of the affected file
+paths in the view's scope, relative and absolute, and tool-neutral instructions. Where the guidance
+tells the operator what to do about files they do not want back, it SHALL name the accept-deletion
+action by the label it carries. Recovery guidance SHALL refer to the copied list by the control
+that produced it rather than by its position on the page.
+
+**Recovery guidance SHALL describe the check the scan actually performs, and both of its outcomes.**
+A restored *missing* file is compared against the digest recorded for it, so the guidance SHALL say
+that a rescan returns such a file to a healthy state **only where the restored bytes match what was
+recorded**, and that a file which comes back different **closes the now-obsolete missing alert and
+replaces it with a new "came back different" issue**. It SHALL NOT tell the operator that restoring
+a file and rescanning returns it to a healthy state unconditionally. For a *changed* file the
+guidance SHALL NOT promise that restoring the earlier version clears the issue: the scan compares
+against the newest recorded contents, so a restored earlier version is found as a further change,
+which the operator then accepts. Promising a verification the product does not perform is the
+failure class this view exists to close.
+
+Where the list of affected files is truncated, the link to the full set SHALL open the file browser
+already switched to the list view and already filtered to issues. Where the copyable path list is
+truncated, the view SHALL point at that same filtered browser for the full set, and SHALL NOT direct
+the operator to a command that is not implemented.
+
+Copy-to-clipboard controls SHALL handle a clipboard write being unavailable or rejected, and SHALL
+report the failure rather than silently appearing to succeed. This SHALL hold for **every** copy
+control the panel renders, including those on the verification result, and the behaviour SHALL be
+implemented once and shared rather than reimplemented per surface.
+
+On a view with nothing to review, the summary, actions and guidance SHALL NOT be rendered: the view
+SHALL say that nothing is changed or missing — or, for a collection that has indexed no files, that
+nothing has been checked yet, which is not the same thing and SHALL NOT be presented as all clear.
+
+#### Scenario: Dashboard issue count links to the review view
+
+- **WHEN** a collection has one or more missing or modified files and the user views the dashboard
+- **THEN** the card's issue count SHALL be a visibly clickable link that opens that collection's
+  review view
+
+#### Scenario: The keyboard-activated issue count responds to both activation keys
+
+- **WHEN** the user focuses a dashboard card's issue count and presses Space
+- **THEN** the review view SHALL open, as it does for Enter
+
+#### Scenario: Review view lists what happened to each file
+
+- **WHEN** the user opens the review view for a collection with missing and/or modified files
+- **THEN** each affected file SHALL be listed with what happened to it, when it was found, its
+  size, and whether it was notarized
+
+#### Scenario: A changed file's row says when the file was last written
+
+- **WHEN** the review view lists a modified file
+- **THEN** its row SHALL show the file's own last-written time alongside when the change was found
+
+#### Scenario: A file that keeps changing says so
+
+- **WHEN** the review view lists a modified file that has more than one change on record
+- **THEN** its row SHALL state how many changes are recorded and since when
+
+#### Scenario: Files in several folders are grouped
+
+- **WHEN** the review view lists missing files that lie in two or more folders below their common
+  folder
+- **THEN** it SHALL render one group per such folder, each naming the folder, its counts and when
+  its files were found, and each offering its own bulk action
+
+#### Scenario: Files directly in the common folder get their own group
+
+- **WHEN** some listed files sit directly in the deepest common folder and others in its subfolders
+- **THEN** the files directly in it SHALL form a group of their own whose bulk action leaves the
+  subfolders' files alone
+
+#### Scenario: Files in one folder are a single list
+
+- **WHEN** every listed file lies in the same folder
+- **THEN** the view SHALL render one list, not a group of one
+
+#### Scenario: A large group is collapsed and can be opened as its own scope
+
+- **WHEN** a group holds more files than the view shows for it
+- **THEN** the group SHALL be collapsed by default, SHALL state how many more files it holds, and
+  SHALL link to the view scoped to that folder
+
+#### Scenario: Opening a direct-files group does not widen it
+
+- **WHEN** a group of the files directly in a folder is opened as the view's scope, and that
+  folder also has issues in a subfolder
+- **THEN** the scoped view SHALL list only the files directly in the folder
+
+#### Scenario: An action over files that are not shown says so
+
+- **WHEN** a group or scope holds more issue files than the view renders for it
+- **THEN** its bulk action's hint and confirmation SHALL state how many of the files it acts on are
+  not shown on the page
+
+#### Scenario: A scoped view acts only inside its scope and offers the way back
+
+- **WHEN** the review view is opened scoped to a folder
+- **THEN** it SHALL list, count and offer bulk actions for that folder's issues only, SHALL name
+  the folder it is scoped to, and SHALL link back to the collection-wide view
+
+#### Scenario: The summary says when the issues were found
+
+- **WHEN** the listed issues were found by scans on different days
+- **THEN** the view's summary SHALL name those days with how many issues each found
+
+#### Scenario: Accept one file from its own row
+
+- **WHEN** the user accepts a single row from the review view
+- **THEN** only that file SHALL be acted on, its own events SHALL be closed, and the view SHALL
+  refresh to reflect the resolved row
+
+#### Scenario: A bulk action from the review view
+
+- **WHEN** the user triggers a group's bulk action, or a page-wide one
+- **THEN** exactly that action's population SHALL be accepted, scoped to the user's own
+  collections, and the view SHALL refresh to reflect the resolved issues
+
+#### Scenario: Recovery guidance is offered without assuming a backup tool
+
+- **WHEN** the user views a collection with missing or modified files
+- **THEN** the review view SHALL offer a copyable list of the affected paths and tool-neutral
+  recovery instructions, and SHALL note for any notarized file that its proof of prior existence
+  is kept
+
+#### Scenario: Recovery guidance names both outcomes of a rescan
+
+- **WHEN** the review view renders its recovery guidance
+- **THEN** it SHALL state that a restored missing file returns to a healthy state only where its
+  bytes match the digest recorded for it, and that a file restored with different bytes closes its
+  obsolete missing alert and raises a new "came back different" issue in its place
+
+#### Scenario: Recovery guidance does not promise that reverting a change clears it
+
+- **WHEN** the review view renders its recovery guidance
+- **THEN** it SHALL NOT state that restoring the earlier version of a changed file returns it to a
+  healthy state
+
+#### Scenario: Recovery guidance names the action for unwanted files
+
+- **WHEN** the recovery guidance tells the operator what to do about files they do not want back
+- **THEN** it SHALL name the accept-deletion action by its rendered label, and SHALL NOT name a
+  control the view no longer offers
+
+#### Scenario: A truncated copy list points at the filtered browser
+
+- **WHEN** the review view's copyable path list is truncated
+- **THEN** the notice SHALL link to the file browser filtered to issues for the full set, and SHALL
+  NOT name an unimplemented command
+
+#### Scenario: The truncation link lands filtered
+
+- **WHEN** the affected-file list is truncated and the user follows the link to the full set
+- **THEN** the file browser SHALL open in its list view with the issues filter already applied and
+  reflected in the filter control
+
+#### Scenario: A failed clipboard write is reported
+
+- **WHEN** a copy-paths action cannot write to the clipboard
+- **THEN** the panel SHALL attempt a fallback and, if that also fails, SHALL tell the user the copy
+  did not happen rather than showing the success confirmation
+
+#### Scenario: Nothing to review
+
+- **WHEN** the user opens the review view for a collection that has indexed files, none of them
+  missing or modified
+- **THEN** the view SHALL say that nothing is changed or missing, SHALL NOT render the summary,
+  actions or recovery guidance, and SHALL offer no accept action
+
+#### Scenario: Nothing indexed is not all clear
+
+- **WHEN** the user opens the review view for a collection that has indexed no files
+- **THEN** the view SHALL say that nothing has been checked yet and SHALL NOT present an all-clear
+
+### Requirement: Fleet-wide review groups every collection's issues
+
+The panel SHALL serve a fleet-wide review page listing every missing or modified file across all of
+the collections the current user owns, in one section per collection, so that a fleet-wide issue
+count has a destination that can act on it. Collections with no missing or modified files SHALL NOT
+be listed.
+
+Each section SHALL name its collection and its change policy, state **both** that collection's
+missing and modified counts — including a count that is zero, since an unstated count cannot be
+told apart from an absent one — and offer a link to that collection's own review view. Within a
+section the issues SHALL be grouped by folder exactly as on the collection's own review view, with
+the same rows, the same per-file actions and the same per-group bulk actions.
+
+Sections SHALL be ordered by what most deserves the operator's attention, not by size: collections
+under the **Locked** policy before collections under the **Working** policy, then the collection
+with the most recently found issue first, then by name. A handful of changes in a collection where
+nothing should change SHALL NOT be listed beneath hundreds of routine deletions elsewhere.
+
+Every number a section shows and every action a row or group authorises SHALL be derived from
+**one read** of that collection's review population — the same single-snapshot property the
+per-collection review view depends on.
+
+The page SHALL NOT offer any **collection-spanning action**. Every accept is authorised over a
+single collection's population and is irreversible, so each control on this page SHALL act within
+one collection — one file, or one folder of one collection — and no control SHALL accept across
+collections.
+
+An accept submitted from this page SHALL return the operator to this page, on success and on
+refusal alike. The return destination SHALL be chosen from a fixed set and SHALL NOT be taken from
+the submission.
+
+The page SHALL bound the rows it renders, both per collection and in total, so that one collection
+with a very large issue set cannot crowd the others out. Where a section's rows are truncated the
+page SHALL say how many more that collection holds and link to its review view; a collection over
+the total budget SHALL still be listed with its counts and its link rather than omitted, and a
+section rendered with **no** rows because the budget was already spent SHALL say that is what
+happened.
+
+The page SHALL be scoped to the current user's own collections, and SHALL render a distinct empty
+state when the user has collections but no open issues, separate from the state where the user has
+no collections at all.
+
+#### Scenario: Issues in several collections are listed together
+
+- **WHEN** a user with missing files in one collection and modified files in another opens the
+  fleet-wide review page
+- **THEN** the page SHALL render one section per affected collection, each naming its collection
+  and stating both its missing and its modified count
+
+#### Scenario: Locked collections lead
+
+- **WHEN** one Working collection has several hundred missing files and one Locked collection has a
+  single modified file
+- **THEN** the Locked collection's section SHALL be rendered first
+
+#### Scenario: Within a policy the newest finding leads
+
+- **WHEN** two collections under the same policy both have issues
+- **THEN** the collection whose newest issue was found most recently SHALL be rendered first
+
+#### Scenario: A row acts on one file without leaving the page's snapshot
+
+- **WHEN** the user accepts a single file from a fleet-wide review row
+- **THEN** the accept SHALL be authorised by the fingerprint minted from the same population read
+  the row was rendered from, and SHALL act on that one file only
+
+#### Scenario: A group action acts on one collection's folder
+
+- **WHEN** the user submits a group's bulk action from the fleet-wide page
+- **THEN** only that collection's files in that folder SHALL be acted on, and the operator SHALL be
+  returned to the fleet-wide page
+
+#### Scenario: A stale fleet-wide submission is refused and returns to the fleet page
+
+- **WHEN** the user submits an accept from the fleet-wide page whose population has since changed
+- **THEN** the request SHALL be refused without mutating anything, and the operator SHALL be
+  returned to the fleet-wide page with the changed-since-loaded notice rather than to a different
+  page
+
+#### Scenario: The return destination is chosen from a fixed set, never supplied
+
+- **WHEN** an accept is submitted carrying a return-destination value that is not the fleet-page
+  literal — including an absolute URL to another host, a scheme-relative or protocol-bearing
+  string, or any other arbitrary text
+- **THEN** the request SHALL still perform exactly the same scoped, fingerprint-guarded accept, and
+  SHALL redirect to the collection's own review view; no supplied value SHALL ever become the
+  redirect's host or path
+
+#### Scenario: No collection-spanning action is offered
+
+- **WHEN** the fleet-wide review page renders any number of affected collections
+- **THEN** it SHALL offer no control that accepts across more than one collection
+
+#### Scenario: One very large collection does not hide the others
+
+- **WHEN** one collection holds more issues than the per-collection render budget while other
+  collections also have issues
+- **THEN** that section SHALL render its budgeted rows plus a count of how many more it holds and a
+  link to its review view, and every other affected collection SHALL still be listed
+
+#### Scenario: The page is scoped to the viewer's collections
+
+- **WHEN** a user opens the fleet-wide review page in multi-user mode
+- **THEN** only that user's own collections SHALL be listed, and no other user's files SHALL appear
+
+#### Scenario: No open issues
+
+- **WHEN** a user with collections has no missing or modified files anywhere
+- **THEN** the page SHALL render an empty state saying so, distinct from the state shown to a user
+  with no collections
+
+### Requirement: The dashboard leads with what needs the operator
+
+The dashboard SHALL open with a **needs-you** section that answers, before anything else, whether
+any file is changed or missing. Where issues exist it SHALL list every affected collection — in
+the fleet-wide review page's order — each with its changed and missing counts, when its newest
+issue was found, the folders holding most of its issues, and a link to that collection's review
+view; where more than one collection is affected it SHALL also link to the fleet-wide review page.
+The section's total SHALL be the same number the sidebar badge shows. Where no file is changed or
+missing the section SHALL be a single line saying so, and it SHALL NOT say so for a user whose
+collections have indexed no files at all: nothing checked is not the same as nothing wrong.
+
+Below it the dashboard SHALL show summary tiles for the files monitored, the proofs anchored and
+the last activity, a card for each collection, and a summary of recent activity.
+
+The **recent activity** summary SHALL be read-only. It SHALL aggregate the event log by day and by
+collection, most recent first, stating for each line how many files were added, changed, went
+missing, were restored, moved, or came back different. It SHALL carry no control, and it SHALL
+include informational activity, so that a healthy system does not render an empty summary.
+
+The **last activity** tile summarises the newest finished run of **any** kind across the user's
+collections. It SHALL therefore name the operation it is describing — the collection and the kind
+of run (`scan`, `stamp`, `upgrade`) — and SHALL state that run's result whenever the result is
+anything other than a clean completion. It SHALL NOT describe every finished run as a scan: a
+`stamp` or `upgrade` run says nothing about when the files were last checked, and presenting one as
+a scan is false assurance. A `partial` run SHALL be named partial, a run that ended in `error`
+SHALL be named a failure, and an `interrupted` run SHALL be named neutrally (it is the routine
+record of a reclaimed claim, never an alarm).
+
+Status indicators SHALL use visually distinct icons for a collection with changed files and a
+collection with missing files.
+
+#### Scenario: The needs-you section lists every affected collection
+
+- **WHEN** two or more collections have missing or modified files
+- **THEN** the needs-you section SHALL list each of them with its counts and a link to its review
+  view, and SHALL link to the fleet-wide review page
+
+#### Scenario: One affected collection
+
+- **WHEN** exactly one collection has missing or modified files
+- **THEN** the needs-you section SHALL list it with a link to its review view
+
+#### Scenario: Nothing needs the operator
+
+- **WHEN** no collection has missing or modified files and at least one file is indexed
+- **THEN** the needs-you section SHALL be a single line saying no files are changed or missing,
+  with no link
+
+#### Scenario: Nothing indexed is not all clear
+
+- **WHEN** the user's collections have indexed no files
+- **THEN** the needs-you section SHALL NOT say that nothing is changed or missing
+
+#### Scenario: Recent activity is a read-only summary by day and collection
+
+- **WHEN** scans over the last days added files to one collection and found changes in another
+- **THEN** the recent-activity summary SHALL show one line per day and collection stating those
+  counts, and SHALL contain no button or form
+
+#### Scenario: A healthy system's activity is not empty
+
+- **WHEN** the only recent events are informational ones — files added, restored or moved
+- **THEN** the recent-activity summary SHALL still list them, and SHALL NOT render an empty state
+
+#### Scenario: The last-activity tile names a non-scan run for what it is
+
+- **WHEN** the newest finished run across the user's collections is a `stamp` or an `upgrade` run
+- **THEN** the last-activity tile SHALL name that operation's kind and SHALL NOT describe it as a
+  scan
+
+#### Scenario: The last-activity tile names a partial or failed run
+
+- **WHEN** the newest finished run ended `partial` or `error`
+- **THEN** the tile SHALL state that result alongside the collection and the kind, rather than
+  presenting the run as a clean completion
+
+#### Scenario: The last-activity tile treats an interrupted run neutrally
+
+- **WHEN** the newest finished run ended `interrupted`
+- **THEN** the tile SHALL name it neutrally and SHALL NOT present it as a failure
+
+### Requirement: Policies and collection status are named in plain words
+
+The panel SHALL name a collection's change policy in plain words wherever it shows it — **Locked**
+for a collection where nothing should change, **Working** for one where edits are normal — and
+SHALL NOT present the stored policy value as the label. Wherever the policy is shown with room for
+it, the panel SHALL say what that policy flags, and SHALL say it accurately: under Locked every
+change and every deletion is flagged; under Working ordinary edits are not flagged, while
+deletions are, and so is a file that comes back different after going missing. It SHALL NOT
+describe Working as flagging deletions only.
+
+A collection's status indicator SHALL state the fact rather than a grade: that the collection is
+all clear, how many of its files changed, how many are missing, or both. It SHALL NOT label a
+collection with a severity word that leaves the operator to guess which kind of problem it has. A
+collection that has indexed no files SHALL be labelled as such and SHALL NOT read as all clear.
+
+#### Scenario: The policy is shown in plain words
+
+- **WHEN** a collection page is rendered for a collection stored with either policy
+- **THEN** the page SHALL show "Locked" or "Working" and SHALL NOT show the stored value as the
+  policy's label
+
+#### Scenario: The Working policy is not described as deletions-only
+
+- **WHEN** the panel describes what the Working policy flags
+- **THEN** the description SHALL include a file that comes back different after going missing
+
+#### Scenario: The status states what is wrong
+
+- **WHEN** a collection has two modified files and no missing files
+- **THEN** its status indicator SHALL say that two files changed, and SHALL NOT read "Attention"
+
+#### Scenario: Both kinds are stated
+
+- **WHEN** a collection has both missing and modified files
+- **THEN** its status indicator SHALL state both counts
+
+#### Scenario: An empty collection is not all clear
+
+- **WHEN** a collection has indexed no files
+- **THEN** its status indicator SHALL say so and SHALL NOT read as all clear
 
