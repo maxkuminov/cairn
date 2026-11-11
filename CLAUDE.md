@@ -161,8 +161,8 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > valid and become dead links.
 > Deploy auth caveat: DESIGN says "app owns its own auth, no OAuth proxy" — that only holds in
 > `multi` mode (Phase 2). In **single mode the panel has no login wall**, so the homelab deploy
-> fronts it with Traefik `chain-oauth@file` (Google OAuth), with `/healthz` kept public on a
-> higher-priority router for the Uptime-Kuma poll. Drop the middleware once multi-user login ships.
+> fronts it with the homelab's single sign-on (an OIDC login enforced at the ingress), with
+> `/healthz` kept public for the Uptime-Kuma poll. Drop it once multi-user login ships (#61).
 
 > Event acknowledgement (streamline-event-acknowledgement): only the alarming kinds nag —
 > `missing` (both modes) + worm `modified`. The informational kinds `added`/`restored` are written
@@ -551,16 +551,44 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
-  Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`).
+  Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`). This is the **compose** path,
+  for a host that runs Cairn under Docker Compose. **The homelab no longer deploys this way** — see
+  below.
 
-> **Standard session flow:** finish a unit of work by committing directly to `main`, pushing to
-> `origin`, then `make deploy`. `make deploy` does **not** run migrations and the container
-> auto-migrates only when `CAIRN_AUTO_MIGRATE` is set — so when a change adds an Alembic revision,
-> run `make migrate` (`alembic upgrade head`, idempotent) right after deploy. Verify with
-> `make status` / the `/healthz` poll. **This commit → push → `make deploy` → `make migrate` (when a
-> revision was added) flow is run automatically at the end of a unit of work — Max has standing
-> authorization, so don't ask per change.** Only stage the files belonging to the change (leave
-> unrelated dirty files like in-progress proposals or local `docker-compose.yml` tweaks alone).
+> **How the homelab runs Cairn (since the k3s move, Oct 2026).** A single-replica `Deployment`
+> `cairn` in the `cairn` namespace of the homelab k3s cluster (strategy `Recreate` — one writer on
+> a SQLite file), managed by Flux from the GitOps repo `maxkuminov/infra` (`apps/homelab/cairn`).
+> The watched folders are mounted **read-only**; the DB and the proof store are separate
+> read-write volumes. The image is `ghcr.io/maxkuminov/cairn`, built by
+> `.github/workflows/image.yml`: on a **pull request** it runs the pytest suite, then builds and
+> Trivy-scans the image (never pushes); on a **push to `main`** that touches the image inputs
+> (`src/**`, `alembic/**`, `Dockerfile`, `requirements.txt`, `pyproject.toml`, `README.md`,
+> `alembic.ini`, the workflow itself) it runs the suite again and publishes
+> `main-<short sha>-<run number>`. Flux image automation (`imagerepository` / `imagepolicy`
+> `cairn` in `flux-system`) picks up the newest such tag and rolls it out. The container runs with
+> `CAIRN_AUTO_MIGRATE=1`, so **Alembic revisions apply on startup — there is no separate migrate
+> step**, and `CAIRN_SCHEDULER_ENABLED=1`. Docs- and OpenSpec-only merges do not rebuild, so they
+> never restart the monitor. The panel is behind the homelab's single sign-on; `/healthz` is
+> public.
+
+> **Standard session flow.** Work on a branch; open a PR that closes the coordination issue; wait
+> for CI (the `test` and `build-scan` jobs); squash-merge. For a change that touches the image
+> inputs the merge **is** the deploy: watch the `image` workflow on `main` finish, then confirm the
+> rollout — `kubectl -n cairn get deploy cairn -o jsonpath='{..image}'` shows the new
+> `main-<sha>-<run>` tag, `kubectl -n cairn rollout status deploy/cairn`, and the public `/healthz`
+> reads `ok`. A rollout restarts the process, so a scan in flight is interrupted (recorded
+> `interrupted`, re-run on its next cadence) — check `runs` for a long `running` deep pass before
+> merging if that matters. **This branch → PR → merge on green CI → watch the rollout flow is run
+> automatically at the end of a unit of work — Max has standing authorization, so don't ask per
+> change.** Only stage the files belonging to the change (leave unrelated dirty files alone).
+
+> **Looking at the panel without touching the live instance.** The live panel is behind SSO and
+> reads production data, so UI review and the `user-representative` pass run against a local
+> copy: take an online backup of the production DB (`sqlite3 -readonly … ".backup …"`), **strip
+> the alert configuration from the copy** (the `smtp_*` rows of `app_settings`, and every
+> `collections.alert_json`), and serve it with `CAIRN_SCHEDULER_ENABLED=0 CAIRN_AUTO_MIGRATE=0
+> uvicorn src.main:app` against an empty proof store. Never trigger a scan there: the roots are
+> container paths that do not exist on the dev host.
 
 > OTS dependency de-risked 2026-05-31: `ots` CLI v0.7.2 stamps on Python 3.12 (host venv and the
 > `cairn:latest` image). Health is exposed at `/healthz` (poll model — external monitors poll Cairn).
@@ -621,8 +649,9 @@ specific to Cairn.
 | Gate | Command |
 | --- | --- |
 | Dependency audit | `make audit` (pip-audit) |
-| Migrations | `make migrate` (alembic) |
-| Deploy | `make deploy` (build → Trivy → compose) |
+| Tests | `.venv/bin/python -m pytest -q` (≈14 min; CI runs it on every PR and on `main`) |
+| Migrations | automatic on container start (`CAIRN_AUTO_MIGRATE=1`); `make migrate` on a compose host |
+| Deploy | merge to `main` → `image` workflow → Flux rollout (compose hosts: `make deploy`) |
 
 **Codex framing for this product.** Cairn's product *is* a trust claim: it
 tells a user that a file existed, unmodified, at a point in time. When briefing
