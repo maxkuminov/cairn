@@ -1294,3 +1294,67 @@ async def test_a_stray_symlink_does_not_make_an_empty_root_pass(cairn_env):
 
     assert summary.refused == REFUSAL_EMPTY and summary.result == "error"
     assert statuses == {"new"}
+
+
+@pytest.mark.asyncio
+async def test_an_unexamined_file_is_not_graduated_by_a_deep_pass(cairn_env, monkeypatch):
+    """Listed but unreadable: present, so not missing — and not looked at, so not graduated."""
+    from pathlib import Path
+
+    from sqlalchemy import select, update
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry
+    from src.services.scanner import scan_collection
+
+    root = cairn_env / "nograd"
+    root.mkdir()
+    (root / "locked.txt").write_text("one")
+    (root / "fine.txt").write_text("fine")
+    cid = await seed_collection(root, ots_mode="none", mode="worm")
+    async with get_sessionmaker()() as s:
+        await s.execute(update(Collection).values(auto_baseline_new=True))
+        await s.commit()
+        await scan_collection(s, await s.get(Collection, cid))
+
+    real_stat = Path.stat
+
+    def failing_stat(self, *args, **kwargs):
+        if self.name == "locked.txt":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", failing_stat)
+    async with get_sessionmaker()() as s:
+        summary = await scan_collection(s, await s.get(Collection, cid), deep=True)
+        statuses = dict((await s.execute(select(FileEntry.relpath, FileEntry.status))).all())
+
+    assert statuses == {"locked.txt": "new", "fine.txt": "ok"}
+    assert summary.baselined == 1 and summary.result == "partial"
+
+
+@pytest.mark.asyncio
+async def test_a_file_cairn_cannot_track_does_not_make_an_empty_root_pass(cairn_env, monkeypatch):
+    """A root holding only an un-storable name (never tracked) is, for the tracked files, empty."""
+    from sqlalchemy import select
+
+    from src.database import get_sessionmaker
+    from src.models.db import Collection, FileEntry
+    from src.services import scanner
+
+    root = cairn_env / "unstorable"
+    root.mkdir()
+    (root / "a.txt").write_text("a")
+    cid = await seed_collection(root, ots_mode="none", mode="worm")
+    async with get_sessionmaker()() as s:
+        await scanner.scan_collection(s, await s.get(Collection, cid))
+
+    (root / "a.txt").unlink()
+    # The walk yields exactly one name, and it is one the datastore cannot hold.
+    monkeypatch.setattr(scanner, "iter_relpaths", lambda *a, **k: iter(["bad\udcff.jpg"]))
+    async with get_sessionmaker()() as s:
+        summary = await scanner.scan_collection(s, await s.get(Collection, cid))
+        statuses = set(await s.scalars(select(FileEntry.status)))
+
+    assert summary.refused == scanner.REFUSAL_EMPTY and summary.result == "error"
+    assert statuses == {"new"}

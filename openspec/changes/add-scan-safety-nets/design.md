@@ -199,6 +199,15 @@ contents are exactly what "the contents on record when the file was last healthy
 return to them is a return. Refusing it would leave such a file's issue closable only by accepting
 a change the operator has just undone.
 
+Implementation review, scope B (refusal, unreadable folders, mass change, alerts): a file that
+is listed but cannot be examined is present, not missing (and is not graduated by a deep pass);
+"empty" means "the walk found no file Cairn can track" — a symlink or an un-storable name lying in
+an unmounted mount point does not make it pass. Two rounds; the second was verification and found
+two slips in the first round's own fixes, fixed with tests. The class — inferring deletion from
+incomplete coverage — is now one stated rule: a file is marked missing only by a pass whose walk
+listed every directory, that found at least one trackable file, and that did not list that file's
+name.
+
 ## Risks / Trade-offs
 
 - **A legitimately emptied collection now needs the CLI flag** → stated in the refusal reason.

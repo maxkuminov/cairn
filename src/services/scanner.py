@@ -575,6 +575,8 @@ async def scan_collection(
         # mass-change share are both measured against this (design D1, D4).
         tracked_at_start = sum(1 for r in existing.values() if r.status != "missing")
         seen: set[str] = set()
+        # Paths that were listed (so: present) but could not be examined in this pass.
+        unexamined: set[str] = set()
         # Directory-listing errors from the walk (design D1). Any one makes the walk incomplete:
         # no missing sweep, no move reconciliation, result `partial`.
         walk_errors: list[OSError] = []
@@ -730,12 +732,13 @@ async def scan_collection(
             if not os.path.isdir(root):
                 raise ScanRefused(REFUSAL_UNREACHABLE, f"the folder {root} is not reachable")
             for relpath in iter_relpaths(root, globs, walk_errors):
-                # `walked_files` answers one question — "does this root hold anything at all?" —
-                # for the empty-root refusal. It counts every entry that IS a file here, readable
-                # or not; it does not count a symlink, which the scan ignores and which must not
-                # make an otherwise empty (unmounted) root pass as populated.
+                # `walked_files` answers one question for the empty-root refusal: "did this walk
+                # find any file Cairn can TRACK?" — a regular file with a storable name, whether or
+                # not it could then be examined. A symlink (ignored) and an un-storable name (never
+                # tracked) do not count: neither is evidence that the tracked files' folder is
+                # really there, and an otherwise empty (unmounted) root must not pass as populated
+                # because one of them is lying in it.
                 if not _db_storable(relpath):
-                    walked_files += 1
                     # Non-UTF-8 name: it cannot be tracked (SQLite TEXT can't bind a lone surrogate).
                     # Skip before any row is created so one bad name can't abort the scan. Not added to
                     # `seen` and never stored, so it also never reads as missing/added on a later scan.
@@ -758,9 +761,11 @@ async def scan_collection(
                     # The name was listed, so the file is THERE; it just could not be examined
                     # (search permission gone, an I/O error). It is counted as skipped — and it is
                     # `seen`, so the missing sweep cannot report a file we failed to read as a file
-                    # that was deleted.
+                    # that was deleted. It is also `unexamined`: nothing may conclude from `seen`
+                    # that its bytes were looked at in this pass.
                     walked_files += 1
                     seen.add(relpath)
+                    unexamined.add(relpath)
                     continue
                 if is_symlink:
                     continue  # conservative: never follow symlinks out of the read-only jail
@@ -773,6 +778,7 @@ async def scan_collection(
                     if len(error_entries) < RUN_ERROR_SAMPLE_MAX:
                         error_entries.append(_render_skip("stat", relpath))
                     seen.add(relpath)  # present but unreadable — never "missing" (see above)
+                    unexamined.add(relpath)
                     continue
                 seen.add(relpath)
                 size = st.st_size
@@ -1083,7 +1089,9 @@ async def scan_collection(
             # `new`, so it is never auto-accepted. No re-stamp: a `new` file was stamped when first seen.
             if deep and collection.auto_baseline_new:
                 for relpath, row in existing.items():
-                    if row.status == "new" and relpath in seen:
+                    # ...and only files this pass actually examined: one that was merely listed
+                    # (its metadata could not be read) was not re-hashed and must not graduate.
+                    if row.status == "new" and relpath in seen and relpath not in unexamined:
                         row.status = _healthy_status(row, unresolved_ids, reflagged_ids)
                         if row.status == "ok":
                             summary.baselined += 1

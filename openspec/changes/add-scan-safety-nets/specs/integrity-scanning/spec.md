@@ -4,9 +4,10 @@
 
 A scan SHALL NOT interpret a collection root it cannot read as a collection whose files were all
 deleted. Before walking, the scan SHALL verify that the root is an existing directory. After
-walking, and before any tracked file is classified missing, the scan SHALL check whether it saw
-any file at all: where it saw none while the collection holds at least one record that is not
-`missing`, it SHALL refuse the pass. An empty mount point is the usual appearance of a volume that
+walking, and before any tracked file is classified missing, the scan SHALL check whether it found
+any file it can track — a regular file with a storable name, whether or not it could then be read:
+where it found none while the collection holds at least one record that is not `missing`, it SHALL
+refuse the pass. A symbolic link, and a file whose name cannot be stored, are not such files. An empty mount point is the usual appearance of a volume that
 did not mount, and it cannot be told apart from a deliberate deletion of everything, so the
 reading that destroys nothing is the default.
 
@@ -29,8 +30,8 @@ any file missing. It SHALL still record what it found in the directories it coul
 count each unreadable directory among the run's errors with a diagnostic entry, and SHALL end
 `partial`. The same holds one level down: a file whose name the walk listed but which could not be examined
 (its metadata could not be read) is present, not deleted, and SHALL NOT be marked missing — it is
-counted among the files the run skipped. And a symbolic link, which a scan ignores, SHALL NOT count
-as a file for the purpose of deciding whether the root is empty.
+counted among the files the run skipped. A file that was listed but not examined SHALL NOT be treated as verified by that pass either: in
+particular a deep pass SHALL NOT graduate it from `new`.
 
 This rule takes precedence over the empty-root refusal: a walk that saw no file because
 the directories holding them could not be listed is an unreadable folder, not an empty one, and
@@ -85,6 +86,18 @@ does today.
 - **WHEN** a tracked file's name is returned by the walk but its metadata cannot be read
 - **THEN** the file SHALL NOT be marked `missing`, and the run SHALL count it as skipped and end
   `partial`
+
+#### Scenario: An unexamined file is not graduated
+
+- **WHEN** a deep pass over a collection that graduates new files cannot read the metadata of a
+  file recorded `new`
+- **THEN** that file SHALL stay `new`
+
+#### Scenario: A file Cairn cannot track does not make an empty root pass
+
+- **WHEN** a collection that tracks files is scanned and its root holds nothing but a file whose
+  name cannot be stored
+- **THEN** the pass SHALL be refused as an empty root, and no file SHALL be marked `missing`
 
 #### Scenario: A stray symbolic link does not make an empty root pass
 
