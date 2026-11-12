@@ -24,7 +24,8 @@ the scanner's writes; enforced foreign keys guarantee referential integrity acro
 ### Requirement: The five locked tables exist with the specified shape
 
 The datastore SHALL define `users`, `collections`, `files`, `runs`, and `events` per DESIGN.md §5.
-`collections.ots_mode` SHALL be constrained to `none` or `perfile`, and `collections` SHALL carry a
+`collections.ots_mode` SHALL be constrained to `none` or `perfile`, `collections` SHALL carry a
+`rules_json` TEXT column (default an empty JSON array) holding the collection's path rules, and `collections` SHALL carry a
 boolean `auto_baseline_new` (default false) controlling whether the deep-verify pass promotes intact
 `new` files to `ok`. `files` SHALL be unique on `(collection_id, relpath)` and carry `status` ∈
 {ok,new,modified,missing} and `ots_state` ∈ {none,pending,incomplete,complete}. `files` SHALL also
@@ -46,7 +47,7 @@ TEXT column holding a bounded, ASCII-only JSON array of diagnostic renderings of
 skipped — bounded in entry count, in per-entry size and in total serialized size — so that a
 `partial` result is explainable rather than merely reported, without letting a pathological set of
 filenames write an unbounded value into a diagnostic column. The `files`, `runs`, and `events` tables SHALL reference their owning
-collection through a `collection_id` foreign key. JSON-valued columns (`exclude_globs_json`,
+collection through a `collection_id` foreign key. JSON-valued columns (`rules_json`, `exclude_globs_json`,
 `alert_json`) SHALL be stored as TEXT. Deleting a collection SHALL cascade to its `files`, `runs`,
 and `events`.
 
@@ -149,6 +150,12 @@ rows exist the downgrade SHALL proceed normally.
 
 - **WHEN** a downgrade past this revision is attempted while an event of kind `corrupted` exists
 - **THEN** the downgrade SHALL refuse rather than delete or relabel it
+
+#### Scenario: The rules column exists after migration
+
+- **WHEN** the datastore is migrated to head from the previous revision with existing collections
+- **THEN** every collection SHALL have `rules_json` equal to an empty JSON array, and no other
+  column or row SHALL have changed
 
 ### Requirement: Implicit single-user bootstrap
 

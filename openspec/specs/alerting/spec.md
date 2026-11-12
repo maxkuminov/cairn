@@ -11,11 +11,12 @@ that reappeared with **different bytes** than the digest recorded for it (a `res
 in any mode — see the `integrity-scanning` requirement "A file that reappears with different bytes
 is not reported as restored"), a
 `modified` file in a WORM corpus, a file showing **possible corruption** (a `corrupted` event, in
-any mode), or the files of a **mass change** in a churn corpus (see the `integrity-scanning`
+any mode), or the files of a **mass change** — in a corpus of either mode (see the `integrity-scanning`
 requirements of those names). The alert's summary SHALL name each of these kinds it contains with
 its own count, and SHALL say when a count of modified files is a mass change. Informational
-`added`, `restored`, and `moved` events, ordinary churn re-baselines, and a file that returned to
-the contents on record before it changed SHALL NOT trigger an alert.
+`added`, `restored`, and `moved` events, ordinary churn re-baselines, an ordinary change that a
+path rule makes quiet, and a file that returned to the contents on record before it changed SHALL
+NOT trigger an alert.
 
 A scan that is refused because its root is unreachable or empty SHALL dispatch an alert saying so
 and naming the collection, with no file paths. While the outage lasts the alert SHALL be repeated
@@ -85,7 +86,8 @@ backlog, so the operator is not re-nagged on every scan.
 
 #### Scenario: A mass change alerts
 
-- **WHEN** a scan of a churn corpus converts a mass change into issues
+- **WHEN** a scan converts a mass change into issues — the silent re-baselines of a churn corpus,
+  or the changes a path rule would have made quiet in a worm corpus
 - **THEN** an alert SHALL be dispatched whose summary gives the number of modified files and says
   it is unusually many for one scan
 
@@ -124,6 +126,16 @@ backlog, so the operator is not re-nagged on every scan.
 - **WHEN** a collection's previous scan ended in error for some other reason, and its next scan is
   refused for an unreachable root
 - **THEN** the unreachable-folder alert SHALL be dispatched
+
+#### Scenario: A rule-covered change does not alert
+
+- **WHEN** a scan re-records a change that a path rule makes quiet
+- **THEN** no alert SHALL be dispatched on its account
+
+#### Scenario: A rule does not silence what it never covers
+
+- **WHEN** a file matched by a rule goes missing, or shows possible corruption
+- **THEN** an alert SHALL be dispatched as it would be without the rule
 
 ### Requirement: Pluggable channels with email active, others scaffolded
 
