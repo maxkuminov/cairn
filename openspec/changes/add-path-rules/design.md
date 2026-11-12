@@ -161,6 +161,12 @@ event is now read); and a stored entry the scanner ignores was shown as "Already
 row's link was renamed from "Stop flagging this…" to "Don't flag future changes…" — the change
 already listed stays listed.
 
+**Implementation review, round 3** (verification only): the scanner fix and the round-2 panel
+fixes were confirmed. Two statements on the rule page were found false and corrected — a
+"this file is already covered" notice shown in a Working collection, where a rule has no effect,
+and a sentence saying a few changed files could never reach the mass-change ceiling, which
+depends on the configured thresholds.
+
 **Usability pass** (a browser-driving agent on a sanitized copy of production data, before
 merge): no blockers, five major, all addressed —
 (1) "an unusually large change is still flagged" read as a per-file safety net; it is the

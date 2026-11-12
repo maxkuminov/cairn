@@ -32,7 +32,7 @@
           one file: when the changes a scan would let pass reach both
           {{ "{:,}".format(mass.files) }} files and {{ mass.percent }}% of the collection, all of
           them are flagged instead. It counts one scan's quiet changes together, whichever rule
-          let them pass — a handful of matching files changing never comes near it.</li>
+          let them pass; short of either threshold, rule-covered changes are not flagged.</li>
         {% endif %}
         <li>A further change to a file whose earlier change you have not accepted yet: it stays listed.</li>
       </ul>

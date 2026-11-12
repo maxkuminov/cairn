@@ -2668,7 +2668,10 @@ async def rule_new(
             "start": start,
             # The rule that already covers the starting file, if any: said up front, so the page
             # is not an invitation to stack a second rule on a file that only needs accepting.
-            "covered_by": _covering_rule(collection, start) if start else None,
+            # Not under Working: a rule has no effect there, so nothing is "covered".
+            "covered_by": (
+                _covering_rule(collection, start) if start and collection.mode != "churn" else None
+            ),
             "proposals": proposals,
             "custom": custom,
             "window_days": rules_svc.ALARM_WINDOW_DAYS,
