@@ -251,6 +251,43 @@ async def test_an_open_change_alert_survives_a_rule_covered_edit(cairn_env, aler
 
 
 @pytest.mark.asyncio
+async def test_a_listed_change_with_no_open_alert_survives_a_rule_covered_edit(cairn_env, alerts):
+    """A file recorded `modified` whose alert was closed without an accept (the retired "mark
+    reviewed" verb left such rows) is still listed for review. A rule resolves nothing, so a
+    rule-covered edit in a Locked collection must not record it healthy: only an accept or an
+    exact return takes a file off that list. (Under the Working policy an ordinary edit to such a
+    row re-records it healthy, as it always has — `tests/test_unresolved_change.py`.)"""
+    mode = "worm"
+    from src.database import get_sessionmaker
+    from src.models.db import Event, FileEntry
+
+    root, cid = await _collection(cairn_env, f"acked-{mode}", {"c/x.db": "AAAAA", "y": "y"}, mode=mode)
+    row = await _file(cid, "c/x.db")
+    async with get_sessionmaker()() as s:
+        # The state the old verb left: status `modified`, kept contents, every alert acknowledged.
+        await s.execute(
+            update(FileEntry).where(FileEntry.id == row.id).values(
+                status="modified", prior_sha256=_sha("the original"), prior_size=12
+            )
+        )
+        await s.execute(update(Event).where(Event.file_id == row.id).values(acknowledged_at=row.first_seen))
+        await s.commit()
+    assert await _open_events(cid, row.id) == []
+
+    await _add_rule(cid, "c/")
+    _edit(root / "c/x.db", "edited while listed")
+    alerts.clear()
+    await _scan(cid)
+
+    row = await _file(cid, "c/x.db")
+    assert row.status == "modified", "still listed for review"
+    assert row.sha256 == _sha("edited while listed")
+    assert row.prior_sha256 == _sha("the original"), "kept contents untouched"
+    assert await _open_events(cid, row.id) == []
+    assert alerts == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["worm", "churn"])
 async def test_an_open_restored_changed_alert_survives_a_rule_covered_edit(cairn_env, alerts, mode):
     root, cid = await _collection(cairn_env, f"rc-{mode}", {"c/x.db": "one", "y": "y"}, mode=mode)

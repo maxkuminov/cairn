@@ -106,6 +106,7 @@
       <span class="recovery__copied" id="recovery-copied" hidden>Copied ✓</span>
       <button type="button" class="btn btn--sm btn--ghost" data-copy="rel">{{ m.icon("copy", size=14) }} Copy paths</button>
       <button type="button" class="btn btn--sm btn--ghost" data-copy="abs">{{ m.icon("copy", size=14) }} Copy full paths</button>
+      <a class="btn btn--sm btn--ghost" href="/collection/{{ c.id }}/rules" id="review-rules-link">{{ m.icon("stack", size=14) }} Rules{% if c.policy.rules %} ({{ c.policy.rules }}){% endif %}</a>
       <a class="btn btn--sm btn--ghost" href="#review-help">{{ m.icon("info", size=14) }} What do these do?</a>
     </div>
   </div>
@@ -123,6 +124,7 @@
   {% if copy_truncated %}
     {% set copy_note %}The copy buttons take the first {{ "{:,}".format(copy_count) }} of {{ "{:,}".format(r.total) }} paths — open the <a href="/collection/{{ c.id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, for the full set.{% endset %}
   {% endif %}
+  {% set rule_help = c.policy.value != "churn" %}
   {% include "partials/review_help.html" %}
 {% endif %}
 

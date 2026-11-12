@@ -26,7 +26,7 @@ TEXT column holding a bounded, ASCII-only JSON array of diagnostic renderings of
 skipped — bounded in entry count, in per-entry size and in total serialized size — so that a
 `partial` result is explainable rather than merely reported, without letting a pathological set of
 filenames write an unbounded value into a diagnostic column. The `files`, `runs`, and `events` tables SHALL reference their owning
-collection through a `collection_id` foreign key. JSON-valued columns (`exclude_globs_json`,
+collection through a `collection_id` foreign key. JSON-valued columns (`rules_json`, `exclude_globs_json`,
 `alert_json`) SHALL be stored as TEXT. Deleting a collection SHALL cascade to its `files`, `runs`,
 and `events`.
 

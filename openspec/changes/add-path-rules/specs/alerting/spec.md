@@ -8,7 +8,7 @@ that reappeared with **different bytes** than the digest recorded for it (a `res
 in any mode — see the `integrity-scanning` requirement "A file that reappears with different bytes
 is not reported as restored"), a
 `modified` file in a WORM corpus, a file showing **possible corruption** (a `corrupted` event, in
-any mode), or the files of a **mass change** in a churn corpus (see the `integrity-scanning`
+any mode), or the files of a **mass change** — in a corpus of either mode (see the `integrity-scanning`
 requirements of those names). The alert's summary SHALL name each of these kinds it contains with
 its own count, and SHALL say when a count of modified files is a mass change. Informational
 `added`, `restored`, and `moved` events, ordinary churn re-baselines, an ordinary change that a
@@ -83,7 +83,8 @@ backlog, so the operator is not re-nagged on every scan.
 
 #### Scenario: A mass change alerts
 
-- **WHEN** a scan of a churn corpus converts a mass change into issues
+- **WHEN** a scan converts a mass change into issues — the silent re-baselines of a churn corpus,
+  or the changes a path rule would have made quiet in a worm corpus
 - **THEN** an alert SHALL be dispatched whose summary gives the number of modified files and says
   it is unusually many for one scan
 

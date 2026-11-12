@@ -14,6 +14,9 @@
   </div>
 </div>
 
+{% set on_rules_page = true %}
+{% include "partials/done_banner.html" %}
+
 {% if gone == "1" %}
   <div class="card notice notice--ok" id="rule-gone" role="status">
     <span class="notice__icon">{{ m.icon("checkCircle", size=16, stroke=2) }}</span>
@@ -50,23 +53,33 @@
             {% else %}
               <span>Changes expected · matches <strong>{{ "{:,}".format(r.tracked) }}</strong> of {{ "{:,}".format(total) }} tracked file{{ "" if total == 1 else "s" }}</span>
             {% endif %}
-            {% if r.created %}<span class="review-row__sep">·</span> <span>added {{ r.created }}</span>{% endif %}
+            {% if r.created %}<span class="rule-row__added">added {{ r.created }}</span>{% endif %}
           </div>
+          {% if r.sample %}
+            <details class="rule-sample">
+              <summary>Show {{ "the file" if r.tracked == 1 else ("the " ~ r.tracked ~ " files" if r.tracked <= r.sample|length else "the first " ~ r.sample|length ~ " of " ~ "{:,}".format(r.tracked) ~ " files") }} it matches</summary>
+              <ul class="rule-sample__list mono">
+                {% for path in r.sample %}<li>{{ path }}</li>{% endfor %}
+              </ul>
+              {% if r.tracked > r.sample|length %}<div class="rule-sample__more">…and {{ "{:,}".format(r.tracked - r.sample|length) }} more, in path order.</div>{% endif %}
+            </details>
+          {% endif %}
         </div>
         <form method="post" action="/collection/{{ c.id }}/rules/delete" style="margin:0"
               data-pattern="{{ r.pattern }}"
-              onsubmit="return confirm('Remove the rule ' + this.dataset.pattern + '?\n\nNo file record changes. From the next scan, changes to the files it matched follow the collection\'s policy again.');">
+              onsubmit="return confirm('Remove the rule ' + this.dataset.pattern + '?\n\nNo file\'s record is changed. From the next scan, changes to the files it matched follow the collection\'s policy again.');">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
           <input type="hidden" name="pattern" value="{{ r.pattern }}" />
-          <button class="btn btn--sm btn--ghost" type="submit">Remove</button>
+          <button class="btn btn--sm" type="submit">Remove</button>
         </form>
       </div>
     {% endfor %}
   {% else %}
     <div class="empty-state" id="rule-none">
       <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px">No rules</div>
-      <div>Every file in this collection follows its policy. Add a rule below, or from a changed file on the
-        <a href="/collection/{{ c.id }}/review">review page</a> with <strong>Don’t flag future changes…</strong></div>
+      <div>Every file in this collection follows its policy.
+        {% if c.rules_have_effect %}Add a rule below, or from a changed file on the
+        <a href="/collection/{{ c.id }}/review">review page</a> with <strong>Don’t flag future changes…</strong>{% endif %}</div>
     </div>
   {% endif %}
 </div>
@@ -77,9 +90,9 @@
     <div class="field__hint">This collection has {{ max_rules }} rules, the most it can hold. Remove one to add another.</div>
   {% else %}
     {# A GET into the rule page: it shows what the pattern matches before anything is stored. #}
-    <form method="get" action="/collection/{{ c.id }}/rules/new" class="rule-own__form">
+    <form method="get" action="/collection/{{ c.id }}/rules/new#rule-custom" class="rule-own__form">
       <input class="input mono" type="text" name="pattern" id="rule-pattern"
-             placeholder="e.g. NOTES.md   or   exports/   or   clients/*/draft-*.docx"
+             placeholder="NOTES.md  ·  exports/  ·  clients/*/draft-*.docx"
              maxlength="512" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Pattern" />
       <button class="btn" type="submit">See what it matches</button>
     </form>

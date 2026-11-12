@@ -2211,6 +2211,7 @@ async def collection_review(
     pop = await _read_population(session, collection)
     model = _review_model(collection, pop, scope, REVIEW_ROW_LIMIT)
     await _attach_facts(session, collection.id, model["rows"])
+    _attach_rule_state(collection, model["rows"])
 
     # The page's own claims about the collection come from the snapshot too, not from
     # `_collection_view`'s earlier, separate count queries: "nothing to review" only means
@@ -2274,6 +2275,7 @@ async def fleet_review(
         model = _review_model(c, pop, _ROOT_SCOPE, min(FLEET_COLLECTION_ROW_LIMIT, max(budget, 0)))
         budget -= model["shown"]
         await _attach_facts(session, c.id, model["rows"])
+        _attach_rule_state(c, model["rows"])
         model["policy"] = _policy_view(c.mode, _rules_count(c))
         sections.append(model)
 
@@ -2479,6 +2481,50 @@ _RULE_REFUSALS = {
 }
 
 
+RULE_SAMPLE = 20
+
+
+def _covering_rule(collection: Collection, relpath: str) -> str | None:
+    """The first of the collection's rules that matches ``relpath``, or ``None``."""
+    for pattern in rules_svc.load(collection).patterns:
+        try:
+            if rules_svc.compile_pattern(pattern).fullmatch(relpath):
+                return pattern
+        except (rules_svc.RuleError, re.error):
+            continue
+    return None
+
+
+def _attach_rule_state(collection: Collection, rows: list[dict[str, Any]]) -> None:
+    """What each ordinary-change row says about rules: ``rule_link`` (offer "Don't flag future
+    changes…") or ``covered_by`` (the rule that already covers it — so the row says the change
+    only needs accepting, instead of inviting a second, redundant rule). Neither under the
+    Working policy, where ordinary edits are quiet anyway and a rule does nothing."""
+    compiled: list[tuple[str, re.Pattern[str]]] = []
+    if collection.mode != "churn":
+        for pattern in rules_svc.load(collection).patterns:
+            try:
+                compiled.append((pattern, rules_svc.compile_pattern(pattern)))
+            except (rules_svc.RuleError, re.error):
+                continue
+    for row in rows:
+        row["rule_link"], row["covered_by"] = False, None
+        if row["kind"] != "changed" or collection.mode == "churn":
+            continue
+        row["covered_by"] = next(
+            (pattern for pattern, rx in compiled if rx.fullmatch(row["relpath"])), None
+        )
+        row["rule_link"] = row["covered_by"] is None
+
+
+def _mass_rule(settings: Any) -> dict[str, int] | None:
+    """The mass-change ceiling's two thresholds, for the sentence that explains it; ``None`` when
+    it is switched off (a share of 0), so the pages do not describe a safety net that is not on."""
+    if settings.mass_change_percent <= 0:
+        return None
+    return {"files": settings.mass_change_min_files, "percent": settings.mass_change_percent}
+
+
 def _rule_refusal(reason: str, fallback: str = "") -> dict[str, str]:
     return {"reason": reason, "text": _RULE_REFUSALS.get(reason) or fallback or "That pattern cannot be used."}
 
@@ -2594,24 +2640,39 @@ async def rule_new(
         proposals = [p for p in proposals if p["pattern"] != stored]
 
     wanted = [p["pattern"] for p in proposals]
+    as_folder: str | None = None
     if custom and custom["pattern"]:
         wanted.append(custom["pattern"])
-    reach = await rules_svc.reach_many(session, collection, wanted)
+        # The commonest way to match nothing is a folder typed without its trailing slash (which
+        # reads as a file NAME). Checked in the same pass, and offered only if it matches.
+        if not custom["pattern"].endswith("/"):
+            try:
+                as_folder = rules_svc.validate_pattern(custom["pattern"] + "/")
+                wanted.append(as_folder)
+            except rules_svc.RuleError:
+                as_folder = None
+    reach = await rules_svc.reach_many(session, collection, wanted, sample=RULE_SAMPLE)
     for p in proposals:
         p["reach"] = reach[p["pattern"]]
         p["exists"] = p["pattern"] in existing
         p["ignored"] = p["pattern"] in ignored
     if custom and custom["pattern"]:
         custom["reach"] = reach[custom["pattern"]]
+        if custom["reach"]["tracked"] == 0 and as_folder and reach[as_folder]["tracked"]:
+            custom["as_folder"] = {"pattern": as_folder, "tracked": reach[as_folder]["tracked"]}
 
     ctx = await _base_context(request, session, user, "collection")
     ctx.update(
         {
             "c": _rule_collection(collection),
             "start": start,
+            # The rule that already covers the starting file, if any: said up front, so the page
+            # is not an invitation to stack a second rule on a file that only needs accepting.
+            "covered_by": _covering_rule(collection, start) if start else None,
             "proposals": proposals,
             "custom": custom,
             "window_days": rules_svc.ALARM_WINDOW_DAYS,
+            "mass": _mass_rule(get_settings()),
         }
     )
     return templates.TemplateResponse(request, "rule_new.html", ctx)
@@ -2641,7 +2702,10 @@ async def rule_create(
             f"/collection/{collection_id}/rules/new?{urlencode(back)}", status_code=303
         )
     listed = (await rules_svc.reach(session, collection, stored))["open_changed"]
-    response = RedirectResponse(f"/collection/{collection_id}/review", status_code=303)
+    # Back to where the operator started: the review page when they came from a flagged file,
+    # the rules page when they typed a pattern there. Both show the same one-shot confirmation.
+    target = "review" if _legal_relpath(path) else "rules"
+    response = RedirectResponse(f"/collection/{collection_id}/{target}", status_code=303)
     _set_rule_done(response, listed)
     return response
 
@@ -2658,7 +2722,7 @@ async def collection_rules(
     collection = await _get_owned_collection(session, collection_id, user)
     entries = rules_svc.list_rules(collection)
     reach = await rules_svc.reach_many(
-        session, collection, [e["pattern"] for e in entries if e["recognised"]]
+        session, collection, [e["pattern"] for e in entries if e["recognised"]], sample=RULE_SAMPLE
     )
     rows = []
     for entry in entries:
@@ -2673,6 +2737,7 @@ async def collection_rules(
                 "recognised": entry["recognised"],
                 "created": created,
                 "tracked": reach[entry["pattern"]]["tracked"] if entry["recognised"] else None,
+                "sample": reach[entry["pattern"]]["sample"] if entry["recognised"] else [],
             }
         )
     total = next(iter(reach.values()))["total"] if reach else None
@@ -2685,9 +2750,16 @@ async def collection_rules(
             "max_rules": rules_svc.MAX_RULES,
             # `?gone=1` a rule was removed; `?gone=0` the rule named was no longer there.
             "gone": gone if gone in ("0", "1") else "",
+            "mass": _mass_rule(get_settings()),
         }
     )
-    return templates.TemplateResponse(request, "collection_rules.html", ctx)
+    # The one-shot "Rule added" confirmation, when the rule was typed on this page.
+    done = _take_done(request)
+    ctx["done"] = done if done and done["kind"] == "rule" else None
+    response = templates.TemplateResponse(request, "collection_rules.html", ctx)
+    if ctx["done"] is not None:
+        response.delete_cookie(_DONE_COOKIE, path="/")
+    return response
 
 
 @router.post("/collection/{collection_id}/rules/delete", dependencies=[Depends(verify_csrf)])

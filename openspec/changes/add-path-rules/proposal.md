@@ -10,8 +10,9 @@ watching the file altogether: no deletion alarm, no corruption check, no timesta
 
 A tripwire that is always tripped is not read. The alarms worth reading need to be the only ones.
 
-This refines DESIGN.md §3's WORM/churn decision from "one policy per collection" to "a default per
-collection, with exceptions by path", and adds two pages to §5's web panel.
+This refines the WORM/churn decision (DESIGN.md §5, the per-run flow) from "one policy per
+collection" to "a default per collection, with exceptions by path", and adds two pages to §5's
+web panel.
 
 ## What Changes
 
@@ -76,4 +77,4 @@ _None._
   `partials/review_row.html`, the collection page, the guidance.
 - Tests: `tests/test_rules.py`, `tests/test_scan_rules.py`, `tests/test_rules_panel.py`,
   `tests/test_migration_0014.py`.
-- Docs: `README.md`, `DESIGN.md` §3 and §5, `CLAUDE.md`.
+- Docs: `README.md`, `DESIGN.md` §5, `CLAUDE.md`.

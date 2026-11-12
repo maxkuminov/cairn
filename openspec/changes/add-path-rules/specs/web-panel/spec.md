@@ -2,31 +2,39 @@
 
 ### Requirement: A rule is created from a changed file, with its reach shown first
 
-Every file listed on a review view as an ordinary change SHALL offer a link to say that changes to
-it are expected. The link SHALL open a page that starts from that file and proposes patterns for it —
+A review view SHALL offer, on every file it lists as an ordinary change, a link to say that changes to it are expected.
+This applies in a collection whose policy flags ordinary changes, and not where one of the
+collection's rules already matches the file: that row SHALL name the rule instead, so that a file
+that only needs its change accepted does not invite a second rule. The link SHALL open a page that starts from that file and proposes patterns for it —
 files of that name in any folder, everything in its folder, and that file alone — together with a
 field for a pattern of the operator's own. A missing file's row SHALL NOT offer the link, and neither SHALL the row of a
 file flagged for possible corruption or for coming back different: no rule covers any of those, and
 a control that suggested otherwise beside such a finding would invite the wrong answer to it.
 
 The page SHALL say what a rule does and what it never does: that ordinary changes to matching
-files stop being flagged from the next scan; that deletions, possible corruption, a file that
-comes back different and an unusually large change in one scan are flagged regardless; that
+files stop being flagged from the next scan, **however large the change to a file**; that
+deletions, possible corruption, a file that comes back different and an unusually large change in
+one scan — stated as what it is, a ceiling across the collection with its two thresholds, not a
+check on any one file — are flagged regardless; that
 matching files are still watched and notarized; and that changes already listed stay listed until
 they are accepted.
 
 For each proposed pattern the page SHALL state its reach, computed from the collection's records:
-how many of the collection's tracked files it matches, how many currently listed changed files it
-matches, and how many change alarms raised in the last ninety days were for files it matches. An
+how many of the collection's tracked files it matches — and, on request, which (the first of
+them, with how many more there are) — how many currently listed changed files it matches, and how
+many change alarms raised in the last ninety days were for files it matches. A pattern that
+matches no file SHALL say so before it can be added. An
 operator SHALL NOT have to create a rule to find out what it does. The figure for past alarms
 SHALL count ordinary modification alarms only, SHALL match each by the path recorded with the
 alarm where one was recorded and otherwise by the file's present path, and SHALL be worded as
 alarms for matching files, not as alarms the rule would have prevented.
 
 Submitting SHALL store the rule and SHALL change no file record and no event. The operator SHALL
-be returned to the collection's review view with a single confirmation that the rule was added
-and applies from the next scan, stating how many listed changes it matches and that they are still
-listed. A pattern the system refuses SHALL be reported on the page, with the reason, and nothing
+be returned to where they started — the collection's review view when they came from a listed
+file, its rules page when they typed a pattern there — with a single confirmation that the rule
+was added and applies from the next scan (or, where the collection's policy already expects
+edits, that the rule changes nothing while that policy stands), stating how many listed changes
+it matches and that they are still listed. A pattern the system refuses SHALL be reported on the page, with the reason, and nothing
 SHALL be stored; where the refusal is that the pattern matches every file, the page SHALL say that
 the collection's policy is the place for that. The starting path arrives in the address and SHALL
 be treated as untrusted text: it SHALL only ever be shown escaped and split into proposals. The
@@ -37,6 +45,23 @@ page and its submission SHALL be scoped to the current user's own collections.
 - **WHEN** a review view lists a changed file and a missing file
 - **THEN** the changed file's row SHALL offer a link that opens the rule page for it, and the
   missing file's row SHALL NOT
+
+#### Scenario: A file a rule already covers says so instead
+
+- **WHEN** a review view lists an ordinary changed file that one of the collection's rules matches
+- **THEN** its row SHALL name that rule and SHALL NOT offer the link to create another
+
+#### Scenario: A rule typed on the rules page returns there
+
+- **WHEN** the operator adds a rule that did not start from a listed file
+- **THEN** they SHALL be returned to the collection's rules page, which SHALL state once that the
+  rule was added
+
+#### Scenario: A pattern that matches nothing says so first
+
+- **WHEN** the operator checks a pattern that matches no tracked file
+- **THEN** the page SHALL say that it matches no file and would do nothing, before offering to add
+  it
 
 #### Scenario: A finding no rule covers does not offer the link
 

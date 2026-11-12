@@ -314,11 +314,14 @@ def _try_compile(pattern: str) -> re.Pattern[str] | None:
 
 
 async def reach_many(
-    session: AsyncSession, collection: Collection, patterns: list[str]
+    session: AsyncSession, collection: Collection, patterns: list[str], sample: int = 0
 ) -> dict[str, dict]:
     """:func:`reach` for each pattern, in ONE pass over the files and ONE over the events.
 
     A pattern that does not compile gets zero counts (with the real ``total``) instead of raising.
+    With ``sample`` > 0 each result also carries ``"sample"``: the first ``sample`` matching
+    paths in path order — so the operator can see WHICH files a pattern reaches, not only how
+    many — collected in the same pass.
     """
     if not patterns:
         return {}
@@ -327,20 +330,27 @@ async def reach_many(
         if p not in compiled:
             compiled[p] = _try_compile(p)
     live = [(p, rx) for p, rx in compiled.items() if rx is not None]
-    out = {p: {"tracked": 0, "total": 0, "open_changed": 0, "alarms_90d": 0} for p in compiled}
+    out: dict[str, dict] = {
+        p: {"tracked": 0, "total": 0, "open_changed": 0, "alarms_90d": 0} for p in compiled
+    }
+    if sample > 0:
+        for counts in out.values():
+            counts["sample"] = []
     cid = collection.id
 
     total = 0
     rows = await session.execute(
-        select(FileEntry.relpath, FileEntry.status).where(
-            FileEntry.collection_id == cid, FileEntry.status != "missing"
-        )
+        select(FileEntry.relpath, FileEntry.status)
+        .where(FileEntry.collection_id == cid, FileEntry.status != "missing")
+        .order_by(FileEntry.relpath)
     )
     for relpath, status in rows:
         total += 1
         for p, rx in live:
             if rx.fullmatch(relpath) is not None:
                 out[p]["tracked"] += 1
+                if sample > 0 and len(out[p]["sample"]) < sample:
+                    out[p]["sample"].append(relpath)
                 if status == "modified":
                     out[p]["open_changed"] += 1
     for counts in out.values():

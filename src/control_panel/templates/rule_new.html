@@ -18,17 +18,26 @@
     </li>
     <li><strong>{{ "{:,}".format(r.alarms_90d) }}</strong> change alarm{{ "" if r.alarms_90d == 1 else "s" }} in the last {{ window_days }} days {{ "was" if r.alarms_90d == 1 else "were" }} for files it matches</li>
   </ul>
-  {% if r.tracked == 0 %}
-    <div class="rule-card__warn">{{ m.icon("alert", size=13, stroke=2) }} It matches no file in this collection today. Check the spelling — a rule that matches nothing does nothing.</div>
-  {% elif r.total and r.tracked * 2 >= r.total %}
-    <div class="rule-card__warn">{{ m.icon("alert", size=13, stroke=2) }} That is {{ "all" if r.tracked == r.total else "at least half" }} of this collection. If changes are normal for most of it, its policy is the better tool.</div>
+  {# WHICH files, not only how many: the choice between a name and a folder is a choice of files. #}
+  {% if r.sample %}
+    <details class="rule-sample">
+      <summary>Show {{ "the file" if r.tracked == 1 else ("the " ~ r.tracked ~ " files" if r.tracked <= r.sample|length else "the first " ~ r.sample|length ~ " of " ~ "{:,}".format(r.tracked) ~ " files") }} it matches</summary>
+      <ul class="rule-sample__list mono">
+        {% for path in r.sample %}<li>{{ path }}</li>{% endfor %}
+      </ul>
+      {% if r.tracked > r.sample|length %}<div class="rule-sample__more">…and {{ "{:,}".format(r.tracked - r.sample|length) }} more, in path order.</div>{% endif %}
+    </details>
+  {% endif %}
+  {% if r.total and r.tracked * 2 >= r.total %}
+    <div class="rule-card__warn rule-card__warn--strong">{{ m.icon("alert", size=13, stroke=2) }}
+      <span>That is <strong>{{ "all" if r.tracked == r.total else "%.1f%%"|format([100 * r.tracked / r.total, 99.9]|min) }}</strong> of this collection — in effect the Working policy for it. If changes are normal for most of the collection, <a href="/collection/{{ c.id }}/edit">change its policy</a> instead of adding a rule.</span></div>
   {% endif %}
 {%- endmacro %}
 
 {% macro add_form(pattern, tracked) -%}
   <form method="post" action="/collection/{{ c.id }}/rules" class="rule-card__form"
         data-pattern="{{ pattern }}"
-        onsubmit="return confirm('Add the rule ' + this.dataset.pattern + '?\n\nFrom the next scan, ordinary changes to the {{ "{:,}".format(tracked) }} file{{ "" if tracked == 1 else "s" }} it matches — and any that match it later — are not flagged. Deletions, possible corruption, a file that comes back different and unusually large changes still are. Nothing listed for review is accepted.');">
+        onsubmit="return confirm('Add the rule ' + this.dataset.pattern + '?\n\n{% if not c.rules_have_effect %}This collection is Working, so the rule has no effect until its policy is Locked. Then: {% endif %}From the next scan, changes to the {{ "{:,}".format(tracked) }} file{{ "" if tracked == 1 else "s" }} it matches — and any that match it later — are not flagged, however large the change. Deletions, possible corruption and a file that comes back different still are.\n\nNothing listed for review is accepted.');">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
     <input type="hidden" name="pattern" value="{{ pattern }}" />
     <input type="hidden" name="path" value="{{ start }}" />
@@ -36,10 +45,27 @@
   </form>
 {%- endmacro %}
 
+{# A pattern that matches no file would do nothing today. It says so FIRST, and its only add
+   control is this secondary one — never the primary button. #}
+{% macro anyway_form(pattern) -%}
+  <form method="post" action="/collection/{{ c.id }}/rules" class="rule-card__anyway"
+        data-pattern="{{ pattern }}"
+        onsubmit="return confirm('Add the rule ' + this.dataset.pattern + ' although it matches no file today?\n\nIt will apply to files that match it later.');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    <input type="hidden" name="pattern" value="{{ pattern }}" />
+    <input type="hidden" name="path" value="{{ start }}" />
+    <button class="btn btn--sm" type="submit">Add it anyway</button>
+  </form>
+{%- endmacro %}
+
 <div class="page-header">
   <div>
-    <a class="back-link" href="/collection/{{ c.id }}/review">{{ m.icon("arrowLeft", size=15) }} What changed in {{ c.name }}</a>
-    <h1>Expect changes to some files</h1>
+    {% if start %}
+      <a class="back-link" href="/collection/{{ c.id }}/review">{{ m.icon("arrowLeft", size=15) }} What changed in {{ c.name }}</a>
+    {% else %}
+      <a class="back-link" href="/collection/{{ c.id }}/rules">{{ m.icon("arrowLeft", size=15) }} Rules for {{ c.name }}</a>
+    {% endif %}
+    <h1>New rule: don't flag ordinary changes</h1>
     <div class="page-header__sub">
       A rule for <strong>{{ c.name }}</strong>: ordinary changes to the files it matches stop being flagged.
       {% if start %}Starting from <span class="mono">{{ start }}</span>.{% endif %}
@@ -61,6 +87,17 @@
   </div>
 {% endif %}
 
+{% if covered_by %}
+  <div class="card notice notice--ok" id="rule-covered">
+    <span class="notice__icon">{{ m.icon("checkCircle", size=16, stroke=2) }}</span>
+    <div class="notice__body">
+      <strong>This file is already covered</strong> by the rule <span class="mono">{{ covered_by }}</span>.
+      If it is still listed for review, it only needs its change accepted — later ordinary
+      changes to it will not be flagged. Another rule for it would add nothing.
+    </div>
+  </div>
+{% endif %}
+
 {% if custom %}
   <div class="card rule-card {{ 'rule-card--refused' if custom.refusal else 'rule-card--own' }}" id="rule-custom">
     <div class="rule-card__head">
@@ -70,7 +107,7 @@
         {% if custom.pattern %}<div class="rule-card__pattern mono">{{ custom.pattern }}</div>
         {% elif custom.typed.strip() %}<div class="rule-card__pattern mono">{{ custom.typed }}</div>{% endif %}
       </div>
-      {% if custom.pattern %}{{ add_form(custom.pattern, custom.reach.tracked) }}{% endif %}
+      {% if custom.pattern and custom.reach.tracked %}{{ add_form(custom.pattern, custom.reach.tracked) }}{% endif %}
     </div>
     {% if custom.refusal %}
       <div class="rule-card__refusal" id="rule-refusal" role="alert">
@@ -82,6 +119,20 @@
       </div>
     {% else %}
       {{ reach(custom.reach) }}
+      {% if custom.reach.tracked == 0 %}
+        <div class="rule-card__warn rule-card__warn--strong" id="rule-nomatch">{{ m.icon("alert", size=13, stroke=2) }}
+          <span><strong>It matches no file in this collection today</strong>, so it would do nothing.
+            {% if custom.as_folder %}
+              With a trailing slash it is a folder:
+              <a href="/collection/{{ c.id }}/rules/new?{% if start %}path={{ start | urlencode }}&amp;{% endif %}pattern={{ custom.as_folder.pattern | urlencode }}#rule-custom"><span class="mono">{{ custom.as_folder.pattern }}</span></a>
+              matches {{ "{:,}".format(custom.as_folder.tracked) }} file{{ "" if custom.as_folder.tracked == 1 else "s" }}.
+            {% else %}
+              Check the spelling and the capitals (upper and lower case matter); a folder needs a
+              trailing slash; and <span class="mono">[ ]</span> and <span class="mono">\</span> are not special.
+            {% endif %}
+            {{ anyway_form(custom.pattern) }}
+          </span></div>
+      {% endif %}
     {% endif %}
   </div>
 {% endif %}
@@ -108,21 +159,27 @@
         </div>
         {% if p.exists %}<span class="rule-card__exists">{{ m.icon("checkCircle", size=13, stroke=2) }} Already a rule</span>
         {% elif p.ignored %}<a class="rule-card__exists rule-card__exists--warn" href="/collection/{{ c.id }}/rules">A stored entry with this pattern is not recognised and is ignored — remove it first</a>
-        {% else %}{{ add_form(p.pattern, p.reach.tracked) }}{% endif %}
+        {% elif p.reach.tracked %}{{ add_form(p.pattern, p.reach.tracked) }}{% endif %}
       </div>
       {{ reach(p.reach) }}
-      {% if p.wild %}<div class="rule-card__warn">{{ m.icon("info", size=13, stroke=2) }} This path contains <span class="mono">*</span> or <span class="mono">?</span>, which a pattern always reads as wildcards, so this can match other files as well — the count above is what it matches.</div>{% endif %}
+      {% if p.reach.tracked == 0 %}
+        <div class="rule-card__warn rule-card__warn--strong">{{ m.icon("alert", size=13, stroke=2) }}
+          <span><strong>It matches no file in this collection today</strong>, so it would do nothing — this file is not one Cairn tracks here.
+            {% if not p.exists and not p.ignored %}{{ anyway_form(p.pattern) }}{% endif %}</span></div>
+      {% endif %}
+      {% if p.wild %}<div class="rule-card__warn">{{ m.icon("info", size=13, stroke=2) }} <span>This path contains <span class="mono">*</span> or <span class="mono">?</span>, which a pattern always reads as wildcards, so this can match other files as well — the count above is what it matches.</span></div>{% endif %}
     </div>
   {% endfor %}
 {% endif %}
 
 <div class="card rule-own" id="rule-own">
   <div class="section-label">{{ "A pattern of your own" if proposals or custom else "Pattern" }}</div>
-  {# A GET: it shows what the pattern matches (or why it is refused) and stores nothing. #}
-  <form method="get" action="/collection/{{ c.id }}/rules/new" class="rule-own__form">
+  {# A GET: it shows what the pattern matches (or why it is refused) and stores nothing. The
+     fragment brings the result into view instead of leaving the reader at the top of the page. #}
+  <form method="get" action="/collection/{{ c.id }}/rules/new#rule-custom" class="rule-own__form">
     {% if start %}<input type="hidden" name="path" value="{{ start }}" />{% endif %}
     <input class="input mono" type="text" name="pattern" id="rule-pattern" value="{{ custom.typed if custom else '' }}"
-           placeholder="e.g. NOTES.md   or   exports/   or   clients/*/draft-*.docx"
+           placeholder="NOTES.md  ·  exports/  ·  clients/*/draft-*.docx"
            maxlength="512" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Pattern" />
     <button class="btn" type="submit">See what it matches</button>
   </form>

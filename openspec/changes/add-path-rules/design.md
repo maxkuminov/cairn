@@ -98,15 +98,18 @@ For a candidate pattern, computed from the datastore, never from the filesystem:
 
 ### D5 — Panel
 
-- **`GET /collection/{id}/rules/new?path=…`** — reached from "Changes to this are expected…" on a
-  changed file's review row. Proposes, for `a/b/NOTES.md`: "files named `NOTES.md`, in any
-  folder", "everything in `a/b/`", "just this file"; plus a free pattern field. Each proposal
+- **`GET /collection/{id}/rules/new?path=…`** — reached from "Don't flag future changes…" on the
+  review row of a file listed as an ordinary change. Proposes, for `a/b/NOTES.md`, narrowest
+  first: "Only this file", "Everything in its folder, at any depth", "Every file named
+  `NOTES.md`, in any folder"; plus a free pattern field, checked by a GET (`&pattern=…`) that
+  states the typed pattern's reach or its refusal and stores nothing. Each proposal
   carries its reach. The page states what a rule never covers and that open changes stay listed.
   `path` is a query value: it is only ever split into the proposals and rendered escaped; a value
   that is not a legal relative path yields the free field alone.
 - **`POST /collection/{id}/rules`** — validates (D2), stores, redirects to the collection's review
-  view with a one-shot confirmation ("Rule added: changes to … are expected from the next scan.
-  N open changes it matches are still listed below."). It accepts nothing.
+  view with a one-shot confirmation ("Rule added. It applies from the next scan. N changed files
+  listed here match it and are still listed — a rule does not accept anything"). It accepts
+  nothing.
 - **`GET /collection/{id}/rules`** — the rules, each with how many tracked files it matches now
   (zero is called out), a remove control, and the add form. Linked from the collection page, which
   states the rule count.
@@ -145,6 +148,11 @@ itself contains `*` or `?` was labelled "Only this file" (it is now labelled as 
 its reach), and an accepted typed pattern was displayed stripped of characters the stored
 pattern keeps (the card now shows exactly what its button stores). One MINOR declined, below.
 
+**Verifier** (independent, read-only): one blocking gap, fixed — a file recorded `modified` with
+no open alert (rows left by the retired "mark reviewed" verb) was recorded healthy by a quiet
+change; a rule-covered change now never takes a `modified` row off the review list (the
+`churn` policy's own long-standing handling of such a row is unchanged and still tested). The reference deployment holds no such row today. Doc drift it listed is corrected.
+
 **Independent panel tests** (written by an agent that did not write the panel) found three
 defects, all fixed: a file name containing a line break was offered a rule link that opened an
 empty page (the starting path is now accepted and its folder proposed); accepting a deletion
@@ -153,7 +161,32 @@ event is now read); and a stored entry the scanner ignores was shown as "Already
 row's link was renamed from "Stop flagging this…" to "Don't flag future changes…" — the change
 already listed stays listed.
 
+**Usability pass** (a browser-driving agent on a sanitized copy of production data, before
+merge): no blockers, five major, all addressed —
+(1) "an unusually large change is still flagged" read as a per-file safety net; it is the
+collection-wide ceiling, which a rule covering a few dozen files can never reach. Every surface
+now says that a change to a matching file is not flagged *however large*, and the ceiling is
+described once, with its two thresholds, as what it is.
+(2) Reach was counts only; each pattern now lists the first twenty files it matches.
+(3) A listed file already covered by a rule looked like any other; its row now says "Covered by
+rule …" instead of offering another, and the rule page says so for its starting file.
+(4) A folder typed without its trailing slash matched nothing and was told to check its
+spelling; a zero-match pattern now says it would do nothing, offers the trailing-slash reading
+when that one matches, and can only be added through a secondary "Add it anyway".
+(5) The rules list was reachable only through an 11px link; the collection page and the review
+toolbar now carry a "Rules (N)" control, and a rule typed on the rules page returns there.
+Also: the link is not offered in a Working collection; a pattern matching half the collection or
+more states the share and points at the policy.
+
 ## Accepted limitations
+
+- **Wording kept as is** (usability pass, minor): "tracked files" (it excludes missing files,
+  where the collection page's file count does not), "change alarms", and "Not added." on a
+  refused preview.
+- **Equivalent patterns are not recognised as duplicates** (`**/NOTES.md` and `NOTES.md`,
+  `x/**` and `x/`): both can be stored; the first that matches is the one a row names.
+- **A rule added from the fleet review page returns to that collection's review page**, not to
+  the fleet page.
 
 - **No rule for deletions.** Cut in spec review (see above); a missing file is always an issue.
 - **A file directly in the collection's folder cannot be named alone**: a pattern with no slash is
@@ -167,6 +200,9 @@ already listed stays listed.
   across a version that adds an effect.
 - **The ninety-day figure** matches alarms raised before `add-scan-safety-nets` by the file's
   present path (they recorded none), so a file renamed since is counted under its new name.
+- **A file made an issue by the mass-change rule offers the rule link** like any ordinary change.
+  The rule it leads to would quiet that file's later ordinary edits, not a mass change; the rule
+  page says so. Telling such rows apart needs each open event's detail on the review page.
 - **Declined (review round 2, MINOR):** a browser that sends a hand-made `cairn_done=rule:N`
   cookie sees the "Rule added" confirmation. The cookie selects and authorises nothing, and the
   only person it can mislead is the one who forged it; the same holds for the accept

@@ -9,6 +9,7 @@
   </div>
   <div class="page-header__actions">
     <a class="btn" href="/collection/{{ c.id }}/edit">{{ m.icon("settings", size=15) }} Edit</a>
+    <a class="btn" href="/collection/{{ c.id }}/rules" id="collection-rules-btn">{{ m.icon("stack", size=15) }} Rules{% if c.policy.rules %} ({{ c.policy.rules }}){% endif %}</a>
     {# Scan now runs in the background and swaps the live status badge in place (no full reload). #}
     <form hx-post="/collection/{{ c.id }}/scan" hx-target="#op-status-{{ c.id }}" hx-swap="outerHTML" style="display:inline">
       <button class="btn btn--subtle" type="submit">{{ m.icon("refresh", size=15) }} Scan now</button>

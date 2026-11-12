@@ -996,7 +996,15 @@ async def scan_collection(
                                 # Change is expected (churn policy or a path rule): silently
                                 # re-baseline, no nag — unless an earlier alarm on this file is
                                 # still open (design D12).
-                                row.status = _healthy_status(row, unresolved_ids, reflagged_ids)
+                                # ...and, where the change is quiet only because a RULE says so
+                                # (a `worm` collection), unless the file is already an issue at
+                                # all: a row recorded `modified` with NO open alert (an alert
+                                # closed by the retired "mark reviewed" verb) is still listed for
+                                # review, and a rule resolves nothing — only an accept or an exact
+                                # return takes it off that list. Its kept contents stay as they
+                                # are. Under `churn` the long-standing behaviour is unchanged.
+                                if collection.mode == "churn" or row.status != "modified":
+                                    row.status = _healthy_status(row, unresolved_ids, reflagged_ids)
                                 summary.ok += 1
                                 if row.status == "ok" and was_healthy:
                                     # Remembered for the mass-change ceiling (design D4).

@@ -658,3 +658,28 @@ async def test_reach_counts_alarms_inside_the_ninety_day_window_only(cairn_env):
     async with await _session() as s:
         r = await reach(s, await s.get(Collection, cid), "NOTES.md")
     assert r["alarms_90d"] == 1
+
+
+@pytest.mark.asyncio
+async def test_reach_many_can_name_the_first_matching_paths(cairn_env):
+    """`sample=N` adds the first N matching paths, in path order, from the same single pass — the
+    panel shows WHICH files a pattern reaches. Without it the result shape is unchanged."""
+    from src.models.db import Collection
+    from src.services.rules import compile_pattern, reach_many
+
+    cid, _ = await _seed_reach(cairn_env)
+    patterns = ["NOTES.md", "a/", "nothing-matches-this"]
+    async with await _session() as s:
+        c = await s.get(Collection, cid)
+        plain = await reach_many(s, c, patterns)
+        sampled = await reach_many(s, c, patterns, sample=2)
+        everything = await reach_many(s, c, patterns, sample=1000)
+
+    assert all("sample" not in counts for counts in plain.values())
+    for p in patterns:
+        assert {k: v for k, v in sampled[p].items() if k != "sample"} == plain[p]
+        full = everything[p]["sample"]
+        assert len(full) == plain[p]["tracked"], "a sample never lists a file the count excludes"
+        assert full == sorted(full) and all(compile_pattern(p).fullmatch(path) for path in full)
+        assert sampled[p]["sample"] == full[:2]
+    assert everything["nothing-matches-this"]["sample"] == []

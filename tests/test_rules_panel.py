@@ -9,6 +9,10 @@ the panel saying something untrue about a rule's reach, and a rule route changin
 an event. Everything is exercised at route level against a seeded database: render the page,
 submit the very form it rendered, and look at what the database then holds.
 
+Covered rows, the two places a new rule returns to, the list of matching files, the "matches
+nothing" warning, the share-of-the-collection warning and the description of the mass-change
+ceiling were added after a usability pass (sections J–P at the end).
+
 Written from the spec by someone who did not write the routes. A test that states what the spec
 requires and fails against the code is kept and marked ``xfail(strict=True)`` with the observed
 behaviour — it is a finding, not a test to bend.
@@ -93,6 +97,62 @@ def _rule_hrefs(fragment: str) -> list[str]:
     return [
         a["href"] for a in _tags(fragment, "a") if RULE_PAGE.match(urlsplit(a.get("href", "")).path)
     ]
+
+
+_COVERED = re.compile(
+    r'<a\b[^>]*\bclass="[^"]*\breview-row__rule--covered\b[^"]*"[^>]*>(.*?)</a>', re.S
+)
+
+
+def _covered(fragment: str) -> list[tuple[int, str]]:
+    """``(collection id, pattern)`` of every "Covered by rule …" marker in ``fragment``: the
+    collection whose rules page it links to and the rule it names, exactly as rendered."""
+    out = []
+    for m in _COVERED.finditer(fragment):
+        (a,) = _tags(m.group(0), "a")
+        target = re.fullmatch(r"/collection/(\d+)/rules", a.get("href", ""))
+        assert target, a.get("href")
+        assert _text(m.group(1)).startswith("Covered by rule "), m.group(1)
+        named = re.search(r'<span class="mono">(.*?)</span>', m.group(1), re.S)
+        assert named, m.group(1)
+        out.append((int(target.group(1)), html_lib.unescape(named.group(1))))
+    return out
+
+
+def _sample(fragment: str) -> dict | None:
+    """The list of matching files a reach block offers: its summary, the paths in the order
+    listed (entity-decoded, whitespace intact) and how many more it says there are."""
+    found = re.findall(r'<details class="rule-sample">(.*?)</details>', fragment, re.S)
+    if not found:
+        assert "rule-sample" not in fragment
+        return None
+    assert len(found) == 1, "one list per reach"
+    block = found[0]
+    summary = _text(re.search(r"<summary>(.*?)</summary>", block, re.S).group(1))
+    listed = re.search(r'<ul class="rule-sample__list[^"]*">(.*?)</ul>', block, re.S).group(1)
+    paths = [html_lib.unescape(li) for li in re.findall(r"<li>(.*?)</li>", listed, re.S)]
+    more = re.search(r'<div class="rule-sample__more">(.*?)</div>', block, re.S)
+    count = 0
+    if more is not None:
+        said = re.fullmatch(r"…and ([\d,]+) more, in path order\.", _text(more.group(1)))
+        assert said, more.group(1)
+        count = _int(said.group(1))
+        assert count > 0
+    return {"summary": summary, "paths": paths, "more": count, "html": block}
+
+
+def _share(fragment: str) -> str | None:
+    """The share of the collection a reach block warns about ("71.4%", "all"), or ``None``."""
+    m = re.search(r"That is <strong>(.*?)</strong> of this collection", fragment, re.S)
+    return _text(m.group(1)) if m else None
+
+
+def _nomatch(body: str) -> str | None:
+    """The "matches no file" warning of the operator's own pattern, up to its add control."""
+    start = body.find('id="rule-nomatch"')
+    if start == -1:
+        return None
+    return body[start : body.index("</form>", start) + len("</form>")]
 
 
 def _row_block(body: str, file_id: int) -> str:
@@ -212,7 +272,8 @@ def _cards(body: str) -> dict[str, dict]:
 def _get_forms(fragment: str, action: str) -> list[dict]:
     p = _FormParser()
     p.feed(fragment)
-    return [f for f in p.forms if f["method"] == "get" and f["action"] == action]
+    # The fragment (`#rule-custom`) only scrolls the result into view; it is not part of the address.
+    return [f for f in p.forms if f["method"] == "get" and f["action"].split("#")[0] == action]
 
 
 def _free_field(body: str, cid: int = 1) -> dict:
@@ -411,6 +472,7 @@ def test_only_an_ordinary_changed_row_offers_the_rule_link(cairn_env):
             assert "rules/new" not in block, relpath
         # ...and nowhere else on the page either: one link, for the one ordinary change.
         assert _rule_links(body) == [(1, "docs/changed.txt")]
+        assert _covered(body) == [], "no rule exists, so no row is called covered"
         # The link opens the rule page for that file.
         (href,) = _rule_hrefs(changed)
         opened = _get(client, href, "rule_new.html")[0]
@@ -526,8 +588,12 @@ def test_the_review_guidance_says_a_rule_accepts_nothing_and_covers_no_deletion(
         body, _r = _review(client)
     said = _text(_help(body))
     assert "A rule accepts nothing already listed" in said
-    assert "never covers a deletion" in said
-    assert "possible corruption" in said
+    assert (
+        "never covers a deletion, possible corruption or a file that comes back different" in said
+    )
+    # The mass-change ceiling is a property of a scan, not something to say about one file's rule.
+    assert "unusually large" not in said
+    assert "A row marked Covered by rule only needs its change accepted." in said
 
 
 # =============================================================================================
@@ -776,10 +842,15 @@ def test_each_proposal_states_its_reach_from_the_collections_records(cairn_env):
     # nothing listed is accepted.
     for card in cards.values():
         confirm = card["form"]["attrs"]["onsubmit"]
-        said = re.search(r"ordinary changes to the ([\d,]+) files? it matches", confirm)
+        said = re.search(r"changes to the ([\d,]+) files? it matches", confirm)
         assert said and _int(said.group(1)) == card["reach"][0], confirm
         assert "Nothing listed for review is accepted" in confirm
-        assert "Deletions" in confirm and "possible corruption" in confirm
+        assert "are not flagged, however large the change" in confirm
+        assert (
+            "Deletions, possible corruption and a file that comes back different still" in confirm
+        )
+        # The ceiling is not a check on one file, so the confirm for one rule does not cite it.
+        assert "unusually large" not in confirm
 
 
 def test_the_alarm_figure_is_worded_as_alarms_for_matching_files_not_as_alarms_prevented(
@@ -876,7 +947,7 @@ def test_a_tripwire_collection_is_not_told_its_files_are_re_stamped(cairn_env):
         body = _rule_page(client, path=NOTES)
     facts = _text(body[body.index('id="rule-facts"'):])
     assert "re-stamped" not in facts
-    assert "notarized where the collection is" in facts
+    assert "notarized if the collection is" in facts
 
 
 @pytest.mark.parametrize("with_rule", [False, True], ids=["no rules", "one rule"])
@@ -1158,6 +1229,7 @@ def test_creating_a_rule_returns_to_the_review_page_which_says_so_once(cairn_env
         assert "It applies from the next scan." in banner
         assert "2 changed files listed here match it and are still listed" in banner
         assert "a rule does not accept anything" in banner
+        assert "changes nothing while" not in banner, "this collection is Locked"
         # It names no outcome it did not have.
         assert "Accepted" not in banner and "removed" not in banner
         assert body.count('id="done-banner"') == 1
@@ -1178,12 +1250,17 @@ def test_creating_a_rule_returns_to_the_review_page_which_says_so_once(cairn_env
             assert "Contents changed" in _text(block)
             (accept,) = _row_forms(block)
             assert accept["button"] == "Accept change"
-            # The link is still offered too: the file is still an ordinary listed change.
-            assert _rule_links(block) == [(1, relpath)]
+            # The rule now covers it, so the row names the rule instead of offering another.
+            assert _covered(block) == [(1, "clients/acme/")]
+            assert _rule_links(block) == []
+        # The changed file the rule does not match still offers one.
+        assert _rule_links(body) == [(1, "other/x.txt")]
 
-        # Once: the same address again carries no confirmation — nor does any other review page.
+        # Once: the same address again carries no confirmation — nor does any other page that
+        # can show one.
         assert _done_banner(client.get(resp.headers["location"]).text) is None
         assert _done_banner(client.get("/review").text) is None
+        assert _done_banner(client.get("/collection/1/rules").text) is None
 
         # The accept the page still offers still works after the rule: a rule took nothing away.
         accepted = client.post(accept["action"], data=accept["fields"], follow_redirects=False)
@@ -1202,7 +1279,9 @@ def test_creating_a_rule_returns_to_the_review_page_which_says_so_once(cairn_env
 )
 def test_the_confirmation_states_how_many_listed_changes_match(cairn_env, pattern, expected):
     with _make_client(cairn_env, _photos(cairn_env, CREATE_SEED)) as client:
-        resp = _post(client, "/collection/1/rules", csrf_token=_csrf(client), pattern=pattern)
+        resp = _post(
+            client, "/collection/1/rules", csrf_token=_csrf(client), pattern=pattern, path=NOTES
+        )
         assert (resp.status_code, resp.headers["location"]) == (303, "/collection/1/review")
         body, r = _review(client, resp.headers["location"])
 
@@ -1221,7 +1300,10 @@ def test_the_confirmation_counts_a_possibly_corrupted_file_as_still_listed_not_a
     among the listed files that "are still listed" — but must not suggest the rule deals with
     it."""
     with _make_client(cairn_env, _photos(cairn_env, CREATE_SEED)) as client:
-        resp = _post(client, "/collection/1/rules", csrf_token=_csrf(client), pattern="other/")
+        resp = _post(
+            client, "/collection/1/rules", csrf_token=_csrf(client), pattern="other/",
+            path="other/x.txt",
+        )
         body, r = _review(client, resp.headers["location"])
 
     banner = _done_banner(body)
@@ -1230,6 +1312,9 @@ def test_the_confirmation_counts_a_possibly_corrupted_file_as_still_listed_not_a
     assert by_path["other/rot.bin"]["kind"] == "corrupted"
     block = _row_block(body, by_path["other/rot.bin"]["id"])
     assert "Possible corruption" in _text(block) and _rule_links(block) == []
+    # The rule matches its path, and still the row is not called covered: no rule covers this.
+    assert _covered(block) == []
+    assert _covered(_row_block(body, by_path["other/x.txt"]["id"])) == [(1, "other/")]
 
 
 @pytest.mark.parametrize("token", [None, "", "not-a-token"], ids=["absent", "blank", "forged"])
@@ -1253,7 +1338,7 @@ def test_creating_a_rule_without_a_valid_csrf_token_is_refused(cairn_env, token)
 )
 def test_a_forged_confirmation_cookie_renders_no_banner_and_no_error(cairn_env, value):
     with _make_client(cairn_env, _photos(cairn_env, CREATE_SEED)) as client:
-        for url in ("/collection/1/review", "/review"):
+        for url in ("/collection/1/review", "/review", "/collection/1/rules"):
             resp = client.get(url, headers={"cookie": f"cairn_done={value}"})
             assert resp.status_code == 200, url
             assert _done_banner(resp.text) is None, url
@@ -1311,6 +1396,9 @@ def test_the_rules_page_lists_each_rule_with_what_it_matches_now(cairn_env):
         assert form["attrs"]["data-pattern"] == row["pattern"]
         assert form["attrs"]["onsubmit"].startswith("return confirm(")
         assert form["button"] == "Remove"
+        # A visible control, not a borderless word at the end of the row.
+        assert "btn" in form["button_class"].split()
+        assert "btn--ghost" not in form["button_class"].split()
     # The same form for adding a rule directly: a check first, nothing stored by it.
     add = _get_forms(body, "/collection/1/rules/new")
     assert len(add) == 1 and set(add[0]["fields"]) == {"pattern"}
@@ -1833,9 +1921,12 @@ def test_a_hostile_pattern_stays_text_when_checked_stored_listed_and_removed(cai
         assert add["attrs"]["data-pattern"] == pattern
 
         created = client.post(add["action"], data=add["fields"], follow_redirects=False)
-        assert (created.status_code, created.headers["location"]) == (303, "/collection/1/review")
+        assert (created.status_code, created.headers["location"]) == (303, "/collection/1/rules")
         assert _patterns() == [pattern], "stored exactly as typed"
-        review = client.get(created.headers["location"])
+        landed = client.get(created.headers["location"])
+        assert _done_banner(landed.text).startswith("Rule added.")
+        assert "zqx" not in _done_banner(landed.text), "the confirmation does not echo the pattern"
+        review = client.get("/collection/1/review")
         listed = client.get("/collection/1/rules")
         (row,) = _rule_rows(listed.text)
         assert row["pattern"] == pattern
@@ -1843,7 +1934,7 @@ def test_a_hostile_pattern_stays_text_when_checked_stored_listed_and_removed(cai
         assert remove["fields"]["pattern"] == pattern
         assert remove["attrs"]["data-pattern"] == pattern
 
-        for page in (checked, review, listed, client.get("/collection/1")):
+        for page in (checked, landed, review, listed, client.get("/collection/1")):
             assert page.status_code == 200
             for raw in ("<script>alert('zqx9')", "<img src=x onerror"):
                 assert raw not in page.text
@@ -1896,3 +1987,896 @@ def test_a_hostile_pattern_the_grammar_refuses_is_reported_escaped_and_not_store
             assert raw not in _content(body)
         # Nothing the refusal says is built from the pattern.
         assert "zqx" not in _refusal(body)
+
+
+# =============================================================================================
+# J. A file a rule already covers says so instead
+# =============================================================================================
+
+COVER_SEED = [
+    (NOTES, "modified"),
+    ("clients/acme/plan.txt", "modified"),
+    ("other/x.txt", "modified"),
+    ("other/gone.txt", "missing"),
+    ("clients/acme/rot.bin", "modified", {"kind": "corrupted"}),
+    ("clients/acme/back.txt", "modified", {"kind": "restored_changed"}),
+    ("clients/acme/lost.txt", "missing"),
+]
+
+
+def test_a_changed_file_a_rule_covers_names_the_rule_instead_of_offering_another(cairn_env):
+    """Scenario "A file a rule already covers says so instead" — on the collection's page and the
+    fleet page; the rule named is the first in the list that matches; and only an ORDINARY change
+    is ever called covered (no rule covers a deletion, corruption or a changed return)."""
+    seed = _with_rules(_photos(cairn_env, COVER_SEED), "NOTES.md", "clients/acme/")
+    with _make_client(cairn_env, seed) as client:
+        before = _snapshot()
+        body, r = _review(client)
+        fleet = client.get("/review").text
+        rules_page = client.get("/collection/1/rules")
+        by_path = {row["relpath"]: row for row in r["rows"]}
+
+        def block(relpath, page=None):
+            return _row_block(page or body, by_path[relpath]["id"])
+
+        # Both rules match NOTES.md; the row names the first of them.
+        assert _covered(block(NOTES)) == [(1, "NOTES.md")]
+        assert _covered(block("clients/acme/plan.txt")) == [(1, "clients/acme/")]
+        for relpath in (NOTES, "clients/acme/plan.txt"):
+            assert _rule_links(block(relpath)) == [] and "rules/new" not in block(relpath)
+            # It still has to be accepted, and can be.
+            (accept,) = _row_forms(block(relpath))
+            assert accept["button"] == "Accept change"
+            assert "Contents changed" in _text(block(relpath))
+        # A change no rule matches is still offered one.
+        assert _rule_links(block("other/x.txt")) == [(1, "other/x.txt")]
+        assert _covered(block("other/x.txt")) == []
+        # Findings no rule covers say neither — even though `clients/acme/` matches their paths.
+        for relpath in ("clients/acme/rot.bin", "clients/acme/back.txt", "clients/acme/lost.txt",
+                        "other/gone.txt"):
+            assert _covered(block(relpath)) == [] and _rule_links(block(relpath)) == [], relpath
+        for page in (body, fleet):
+            assert sorted(_covered(page)) == [(1, "NOTES.md"), (1, "clients/acme/")]
+            assert _rule_links(page) == [(1, "other/x.txt")]
+        # The marker leads to the list the rule is in.
+        assert rules_page.status_code == 200
+        assert [x["pattern"] for x in _rule_rows(rules_page.text)] == ["NOTES.md", "clients/acme/"]
+
+        # The other way round, the other rule is the first that matches.
+        stored = _stored()
+        _write_rules_json([stored[1], stored[0]])
+        again, _r = _review(client)
+        assert _covered(block(NOTES, again)) == [(1, "clients/acme/")]
+        assert sorted(_covered(client.get("/review").text)) == [
+            (1, "clients/acme/"), (1, "clients/acme/"),
+        ]
+        # Rendering any of it changed no record.
+        assert _snapshot() == before
+
+
+def test_each_collection_on_the_fleet_page_is_judged_by_its_own_rules(cairn_env):
+    a, b = cairn_env / "alpha", cairn_env / "beta"
+    a.mkdir()
+    b.mkdir()
+
+    async def seed():
+        from src.database import get_sessionmaker
+        from src.models.db import Collection
+        from src.services import rules
+
+        await _seed_files(await seed_collection(a), [("docs/a.txt", "modified")])
+        cid = await seed_collection(b)
+        await _seed_files(cid, [("docs/a.txt", "modified"), ("misc/b.txt", "modified")])
+        async with get_sessionmaker()() as s:
+            await rules.add_rule(s, await s.get(Collection, cid), "docs/")
+
+    with _make_client(cairn_env, seed) as client:
+        fleet = client.get("/review").text
+        own = [_review(client, f"/collection/{cid}/review")[0] for cid in (1, 2)]
+
+    assert _covered(fleet) == [(2, "docs/")]
+    assert sorted(_rule_links(fleet)) == [(1, "docs/a.txt"), (2, "misc/b.txt")]
+    assert (_covered(own[0]), _rule_links(own[0])) == ([], [(1, "docs/a.txt")])
+    assert (_covered(own[1]), _rule_links(own[1])) == ([(2, "docs/")], [(2, "misc/b.txt")])
+
+
+def test_an_entry_the_scanner_ignores_does_not_cover_a_file(cairn_env):
+    """D1: an entry with an unrecognised effect is inert. A row must not be told a rule covers it
+    when its next change will be flagged like any other."""
+    with _make_client(cairn_env, _photos(cairn_env, COVER_SEED)) as client:
+        _write_rules_json([
+            _rule("NOTES.md", effect="other"),
+            {"pattern": "clients/acme/", "effect": "ignore"},
+            {"pattern": 5, "effect": "edits"},
+            "clients/acme/plan.txt",
+        ])
+        body, _r = _review(client)
+        fleet = client.get("/review").text
+
+    for page in (body, fleet):
+        assert _covered(page) == []
+        assert sorted(_rule_links(page)) == [
+            (1, NOTES), (1, "clients/acme/plan.txt"), (1, "other/x.txt"),
+        ]
+
+
+@pytest.mark.parametrize("patterns", [(), ("NOTES.md", "other/")], ids=["no rules", "two rules"])
+def test_no_row_offers_or_names_a_rule_in_a_working_collection(cairn_env, patterns):
+    """"This applies in a collection whose policy flags ordinary changes": under Working a rule
+    does nothing, so a changed row neither invites one nor credits one."""
+    seed = _with_rules(_photos(cairn_env, COVER_SEED, mode="churn"), *patterns)
+    with _make_client(cairn_env, seed) as client:
+        body, r = _review(client)
+        scoped, _r = _review(client, "/collection/1/review?dir=clients")
+        fleet = client.get("/review").text
+
+    kinds = {row["relpath"]: row["kind"] for row in r["rows"]}
+    assert kinds[NOTES] == kinds["other/x.txt"] == "changed", "the rows ARE ordinary changes"
+    for page in (body, scoped, fleet):
+        assert _rule_links(page) == []
+        assert _covered(page) == []
+        assert "rules/new" not in _content(page)
+
+
+def test_a_covering_rules_pattern_is_only_text_in_the_row(cairn_env):
+    name = "zqx<img src=x onerror=alert(1)> \"q\" 'r' &amp;.txt"
+    pattern = "zqx<img src=x onerror=alert(1)> \"q\" 'r' &amp;*"
+    seed = _with_rules(_photos(cairn_env, [(name, "modified"), ("plain.txt", "ok")]), pattern)
+    with _make_client(cairn_env, seed) as client:
+        pages = [_review(client)[0], client.get("/review").text]
+
+    for page in pages:
+        assert _covered(page) == [(1, pattern)]
+        assert _rule_links(page) == []
+        assert "<img src=x" not in page
+        assert not [i for i in _tags(page, "img") if i.get("onerror")]
+
+
+# =============================================================================================
+# K. Where a new rule returns to, and what the page it returns to says — once
+# =============================================================================================
+
+
+def _banner_links(body: str) -> list[str]:
+    m = re.search(r'<div[^>]*id="done-banner"[^>]*>.*?</div>\s*</div>', body, re.S)
+    return [a.get("href", "") for a in _tags(m.group(0), "a")] if m else []
+
+
+def test_a_rule_typed_on_the_rules_page_returns_there_and_is_confirmed_once(cairn_env):
+    """Scenario "A rule typed on the rules page returns there" — through the forms the pages
+    render: the rules page's field, the check it leads to, and that page's add control."""
+    with _make_client(cairn_env, _photos(cairn_env, CREATE_SEED)) as client:
+        (field,) = _get_forms(_rules_page(client), "/collection/1/rules/new")
+        assert set(field["fields"]) == {"pattern"}, "no starting file travels with it"
+        checked = _rule_page(client, pattern="clients/acme/")
+        own = _cards(checked)["custom"]
+        assert own["reach"] == (3, 5, 2, 2)
+        assert own["form"]["fields"]["path"] == ""
+
+        before = _snapshot()
+        add = own["form"]
+        resp = client.post(add["action"], data=add["fields"], follow_redirects=False)
+        assert (resp.status_code, resp.headers["location"]) == (303, "/collection/1/rules")
+        after_post = _snapshot()
+        landed = _rules_page(client)
+        assert _snapshot() == after_post == before, "no file, event, run or other column changed"
+        assert _patterns() == ["clients/acme/"]
+
+        banner = _done_banner(landed)
+        assert banner.startswith("Rule added. It applies from the next scan.")
+        assert "2 changed files listed for review match it and are still listed" in banner
+        assert "a rule does not accept anything" in banner
+        assert "listed here" not in banner, "nothing is listed for review on the rules page"
+        assert landed.count('id="done-banner"') == 1
+        assert _banner_links(landed) == ["/collection/1/review"]
+        assert landed.index('id="done-banner"') < landed.index('id="rule-list"')
+        assert [r["pattern"] for r in _rule_rows(landed)] == ["clients/acme/"]
+
+        # Once — here, and on the review page it points to (where the two files are still listed,
+        # now named as covered).
+        assert _done_banner(_rules_page(client)) is None
+        review, r = _review(client)
+        assert _done_banner(review) is None
+        assert sorted(_covered(review)) == [(1, "clients/acme/")] * 2
+        assert r["accept_changes"]["count"] == 4
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected", "links"),
+    [
+        (NOTES, "1 changed file listed for review matches it and is still listed",
+         ["/collection/1/review"]),
+        ("clients/acme/plan.docx", "No changed file listed for review matches it.", []),
+    ],
+    ids=["one", "none"],
+)
+def test_the_rules_page_confirmation_states_how_many_listed_changes_match(
+    cairn_env, pattern, expected, links
+):
+    with _make_client(cairn_env, _photos(cairn_env, CREATE_SEED)) as client:
+        resp = _post(client, "/collection/1/rules", csrf_token=_csrf(client), pattern=pattern)
+        assert (resp.status_code, resp.headers["location"]) == (303, "/collection/1/rules")
+        landed = _rules_page(client)
+
+    banner = _done_banner(landed)
+    assert banner.startswith("Rule added. It applies from the next scan.")
+    assert expected in banner
+    # It points at the review page only when there is something there to accept.
+    assert _banner_links(landed) == links
+
+
+@pytest.mark.parametrize(
+    "path", [NOTES, None], ids=["from a listed file", "typed on the rules page"]
+)
+def test_in_a_working_collection_the_confirmation_says_the_rule_changes_nothing(cairn_env, path):
+    """"…(or, where the collection's policy already expects edits, that the rule changes nothing
+    while that policy stands)" — on whichever page the operator is returned to."""
+    seed = _photos(cairn_env, CREATE_SEED, mode="churn")
+    with _make_client(cairn_env, seed) as client:
+        own = _cards(_rule_page(client, path=path, pattern="clients/acme/*.md"))["custom"]
+        # The confirm says so before the click, too.
+        assert "This collection is Working, so the rule has no effect" in (
+            own["form"]["attrs"]["onsubmit"]
+        )
+        before = _snapshot()
+        add = own["form"]
+        resp = client.post(add["action"], data=add["fields"], follow_redirects=False)
+        target = "/collection/1/review" if path else "/collection/1/rules"
+        assert (resp.status_code, resp.headers["location"]) == (303, target)
+        landed = client.get(target).text
+        assert _snapshot() == before
+        assert _done_banner(client.get(target).text) is None
+
+    banner = _done_banner(landed)
+    assert banner.startswith("Rule added.")
+    assert "policy is Working" in banner
+    assert "the rule changes nothing while that stands" in banner
+    assert "applies from the next scan" not in banner
+    assert "will not be flagged" not in banner, "nothing about the rule taking effect"
+    # What is listed is still stated as listed, and still to be accepted.
+    where = "here" if path else "for review"
+    assert f"1 changed file listed {where} matches it and is still listed" in banner
+    assert "a rule does not accept anything" in banner
+    assert _patterns() == ["clients/acme/*.md"]
+
+
+def test_the_rules_page_neither_shows_nor_uses_up_an_accept_confirmation(cairn_env):
+    """The rules page shows the "Rule added" confirmation only. One left by an accept belongs to
+    the review page: passing through the rules page must not show it or lose it."""
+    seed = _with_rules(_photos(cairn_env, [("a.txt", "modified"), ("b.txt", "missing")]), "x/")
+    with _make_client(cairn_env, seed) as client:
+        accepts = (("a.txt", "Accepted 1 change."), ("b.txt", "Accepted 1 deletion"))
+        for relpath, expected in accepts:
+            body, r = _review(client)
+            (row,) = [x for x in r["rows"] if x["relpath"] == relpath]
+            (accept,) = _row_forms(_row_block(body, row["id"]))
+            resp = client.post(accept["action"], data=accept["fields"], follow_redirects=False)
+            assert resp.status_code == 303 and "stale" not in resp.headers["location"]
+
+            for url in ("/collection/1/rules", "/collection/1/rules/new?pattern=x/"):
+                passing = client.get(url)
+                assert passing.status_code == 200
+                assert _done_banner(passing.text) is None, url
+                assert "Accepted" not in _said(passing.text), url
+                assert "cairn_done" not in passing.headers.get("set-cookie", ""), url
+            landed = client.get(resp.headers["location"]).text
+            assert _done_banner(landed).startswith(expected)
+
+        # A hand-made cookie of either kind gets the same treatment.
+        for value in ("changes:3", "deletions:2"):
+            resp = client.get("/collection/1/rules", headers={"cookie": f"cairn_done={value}"})
+            assert resp.status_code == 200 and _done_banner(resp.text) is None
+            assert "cairn_done" not in resp.headers.get("set-cookie", "")
+
+
+RETURNS = [
+    (NOTES, "review"),
+    ("not/a/tracked/file.txt", "review"),
+    ("", "rules"),
+    (None, "rules"),
+    ("//zqx.example/x", "rules"),
+    ("../zqx", "rules"),
+    ("/zqx/abs.txt", "rules"),
+    ("zqx\x00b", "rules"),
+    ("https://zqx.example/", "rules"),
+]
+
+
+def test_a_new_rule_returns_to_one_of_two_fixed_pages(cairn_env):
+    """The submitted starting path only chooses between the review page and the rules page; it is
+    never part of the address the operator is sent to."""
+    with _make_client(cairn_env, _photos(cairn_env, CREATE_SEED)) as client:
+        token = _csrf(client)
+        before = _snapshot()
+        for i, (path, target) in enumerate(RETURNS):
+            data = {"csrf_token": token, "pattern": f"returns-{i}/"}
+            if path is not None:
+                data["path"] = path
+            resp = client.post("/collection/1/rules", data=data, follow_redirects=False)
+            assert resp.status_code == 303, path
+            assert resp.headers["location"] == f"/collection/1/{target}", path
+            assert not any("zqx" in v for v in resp.headers.values()), path
+            landed = client.get(resp.headers["location"])
+            assert _done_banner(landed.text).startswith("Rule added."), path
+        assert _patterns() == [f"returns-{i}/" for i in range(len(RETURNS))]
+        assert _snapshot() == before
+
+
+# =============================================================================================
+# L. Which files a pattern matches — on request, and in agreement with the count
+# =============================================================================================
+
+SAMPLE_FILES = (
+    [(f"logs/f{i:02d}.txt", "ok") for i in range(25)]
+    + [
+        ("logs/Zeta.txt", "modified"),             # sorts before every lower-case name
+        ("logs/sub/deep.txt", "new"),
+        ("logs/Aaa.txt", "missing"),               # would be listed first, were it tracked
+        ("NOTES.md", "ok"),
+        ("Zeta/NOTES.md", "ok"),
+        ("alpha/NOTES.md", "modified"),
+        ("gone/NOTES.md", "missing"),
+        ("only/one.bin", "ok"),
+    ]
+)
+SAMPLE_TRACKED = sorted(p for p, status, *_ in SAMPLE_FILES if status != "missing")
+
+
+def _expect_sample(pattern: str, tracked: list[str]) -> dict:
+    """What a list for ``pattern`` must say, derived independently: the first twenty matching
+    tracked paths in path order, and how many more there are."""
+    hits = sorted(_matching(pattern, tracked))
+    n = len(hits)
+    if n == 1:
+        summary = "Show the file it matches"
+    elif n <= 20:
+        summary = f"Show the {n} files it matches"
+    else:
+        summary = f"Show the first 20 of {n:,} files it matches"
+    return {"summary": summary, "paths": hits[:20], "more": max(n - 20, 0)}
+
+
+def _same_sample(got: dict | None, pattern: str, tracked: list[str]) -> None:
+    want = _expect_sample(pattern, tracked)
+    if not want["paths"]:
+        assert got is None, "a pattern that matches nothing lists nothing"
+        return
+    assert got is not None, pattern
+    assert {k: got[k] for k in want} == want, pattern
+
+
+def test_the_rule_page_lists_which_files_each_pattern_matches(cairn_env):
+    """"…how many of the collection's tracked files it matches — and, on request, which (the
+    first of them, with how many more there are)"."""
+    with _make_client(cairn_env, _photos(cairn_env, SAMPLE_FILES)) as client:
+        pages = {
+            typed: _rule_page(client, path="logs/f03.txt", pattern=typed)
+            for typed in ("logs/", "NOTES.md", "only/one.bin", "nothing/", "logs/f??.txt", "*.txt")
+        }
+        assert _rules_json() == "[]"
+
+    for typed, body in pages.items():
+        cards = _cards(body)
+        assert set(cards) >= {"custom", "file", "name"}
+        for card in cards.values():
+            pattern = card["pattern"]
+            got = _sample(card["html"])
+            _same_sample(got, pattern, SAMPLE_TRACKED)
+            if got is not None:
+                # The list and the count are the same statement.
+                assert len(got["paths"]) + got["more"] == card["reach"][0], pattern
+        # On request: the lists are there, closed.
+        assert "<details" in body and not re.search(r"<details[^>]*\bopen\b", body)
+
+    logs = _sample(_cards(pages["logs/"])["custom"]["html"])
+    assert logs["summary"] == "Show the first 20 of 27 files it matches"
+    assert logs["paths"][:3] == ["logs/Zeta.txt", "logs/f00.txt", "logs/f01.txt"]
+    assert logs["paths"][-1] == "logs/f18.txt" and logs["more"] == 7
+    notes = _sample(_cards(pages["NOTES.md"])["custom"]["html"])
+    assert notes == {**notes, "summary": "Show the 3 files it matches", "more": 0,
+                     "paths": ["NOTES.md", "Zeta/NOTES.md", "alpha/NOTES.md"]}
+    one = _sample(_cards(pages["only/one.bin"])["custom"]["html"])
+    assert (one["summary"], one["paths"]) == ("Show the file it matches", ["only/one.bin"])
+    # A file that is missing is not tracked: it is in no list, whatever matches its path.
+    for body in pages.values():
+        assert "logs/Aaa.txt" not in body and "gone/NOTES.md" not in body
+
+
+@pytest.mark.parametrize("n", [1, 2, 20, 21, 45])
+def test_the_list_stops_at_twenty_and_says_how_many_more(cairn_env, n):
+    files = [(f"d/f{i:03d}.txt", "ok") for i in range(n)] + [("other/bystander.txt", "ok")]
+    files += [(f"pad/p{i:03d}.txt", "ok") for i in range(n)]  # keeps `d/` under half
+    tracked = sorted(p for p, _s in files)
+    seed = _with_rules(_photos(cairn_env, files), "d/")
+    with _make_client(cairn_env, seed) as client:
+        own = _cards(_rule_page(client, pattern="d/*.txt"))["custom"]
+        (row,) = _rule_rows(_rules_page(client))
+
+    for got, pattern in ((_sample(own["html"]), "d/*.txt"), (_sample(row["html"]), "d/")):
+        _same_sample(got, pattern, tracked)
+        assert len(got["paths"]) == min(n, 20) and got["more"] == max(n - 20, 0)
+        assert got["paths"] == [f"d/f{i:03d}.txt" for i in range(min(n, 20))]
+    assert own["reach"][:2] == (n, 2 * n + 1)
+    assert f"matches {n} of {2 * n + 1} tracked files" in row["meta"]
+
+
+def test_the_rules_page_lists_which_files_each_rule_matches(cairn_env):
+    seed = _with_rules(_photos(cairn_env, SAMPLE_FILES), "logs/", "NOTES.md", "nothing/", "*.bin")
+    with _make_client(cairn_env, seed) as client:
+        body = _rules_page(client)
+        _write_rules_json([_rule("logs/", effect="other")])
+        ignored = _rules_page(client)
+
+    rows = _rule_rows(body)
+    assert [r["pattern"] for r in rows] == ["logs/", "NOTES.md", "nothing/", "*.bin"]
+    for row in rows:
+        _same_sample(_sample(row["html"]), row["pattern"], SAMPLE_TRACKED)
+    assert "matches 27 of 31 tracked files" in rows[0]["meta"]
+    assert _sample(rows[0]["html"])["more"] == 7
+    assert "Currently matches no files" in rows[2]["meta"] and _sample(rows[2]["html"]) is None
+    assert not re.search(r"<details[^>]*\bopen\b", body)
+    # An entry that is ignored matches nothing, and lists nothing.
+    (row,) = _rule_rows(ignored)
+    assert "ignored" in row["meta"] and _sample(row["html"]) is None
+
+
+HOSTILE_NAMES = [
+    "d/<img src=zqx onerror=alert(1)>.txt",
+    "d/</li></ul></details><script>alert('zqx')</script>",
+    "d/a&amp;b &lt;i&gt;.txt",
+    "d/quote \" and ' .txt",
+    "d/line\nbreak  two spaces.txt",
+    "d/{{ 7*7 }}.txt",
+]
+
+
+def test_a_hostile_file_name_is_only_text_in_the_list_of_matching_files(cairn_env):
+    files = [(p, "ok") for p in HOSTILE_NAMES] + [("pad/a", "ok"), ("pad/b", "ok")]
+    tracked = sorted(p for p, _s in files)
+    seed = _with_rules(_photos(cairn_env, files), "d/")
+    with _make_client(cairn_env, seed) as client:
+        rule_page = _rule_page(client, pattern="d/**")
+        rules_page = _rules_page(client)
+
+    lists = [
+        (_sample(_cards(rule_page)["custom"]["html"]), "d/**"),
+        (_sample(_rule_rows(rules_page)[0]["html"]), "d/"),
+    ]
+    for got, pattern in lists:
+        # Every name comes back exactly — which it could not if any of it had been read as markup
+        # or if an entity in a name had been passed through undoubled.
+        _same_sample(got, pattern, tracked)
+        assert sorted(got["paths"]) == sorted(_matching(pattern, tracked))
+        assert len(got["paths"]) == len(HOSTILE_NAMES)
+    for page in (rule_page, rules_page):
+        assert "<img src=zqx" not in page and "<script>alert('zqx')" not in page
+        assert not [i for i in _tags(page, "img") if i.get("onerror")]
+        assert "d/49.txt" not in page
+
+
+# =============================================================================================
+# M. A pattern that matches nothing says so first
+# =============================================================================================
+
+
+def test_a_typed_pattern_that_matches_nothing_says_so_before_offering_to_add_it(cairn_env):
+    """Scenario "A pattern that matches nothing says so first"."""
+    with _make_client(cairn_env, _photos(cairn_env, LISTED_FILES)) as client:
+        body = _rule_page(client, pattern="nothing-here/*.tmp")
+        matching = _rule_page(client, pattern="exports/")
+        own = _cards(body)["custom"]
+        assert own["reach"] == (0, 7, 0, 0)
+        assert _sample(own["html"]) is None
+
+        warning = _nomatch(body)
+        said = _text(warning)
+        assert "It matches no file in this collection today" in said
+        assert "it would do nothing" in said
+        # What usually went wrong, in general terms — and no guess at a folder that is not there.
+        assert "Check the spelling and the capitals" in said
+        assert "a folder needs a trailing slash" in said
+        assert _typed_links(warning) == []
+        # Said BEFORE the control, and the control is not the page's primary action.
+        assert warning.index("matches no file") < warning.index("<form")
+        assert body.index('id="rule-nomatch"') < body.index("Add it anyway")
+        # ...the only add control the card has.
+        (anyway,) = _forms(body[body.index('id="rule-custom"'):body.index('id="rule-own"')])
+        assert own["form"] == anyway
+        assert anyway["button"] == "Add it anyway"
+        assert "btn--primary" not in anyway["button_class"].split()
+        assert "Add this rule" not in own["text"]
+        assert "although it matches no file today" in anyway["attrs"]["onsubmit"]
+        assert "this.dataset.pattern" in anyway["attrs"]["onsubmit"]
+        assert anyway["attrs"]["data-pattern"] == "nothing-here/*.tmp"
+
+        # A pattern that does match is offered the ordinary way, with no such warning.
+        ok = _cards(matching)["custom"]
+        assert _nomatch(matching) is None
+        assert ok["form"]["button"] == "Add this rule"
+        assert "btn--primary" in ok["form"]["button_class"].split()
+
+        # "Anyway" stores exactly what was typed, and nothing else changes.
+        before = _snapshot()
+        resp = client.post(anyway["action"], data=anyway["fields"], follow_redirects=False)
+        assert (resp.status_code, resp.headers["location"]) == (303, "/collection/1/rules")
+        assert _snapshot() == before
+        assert _patterns() == ["nothing-here/*.tmp"]
+        landed = _rules_page(client)
+        assert "No changed file listed for review matches it." in _done_banner(landed)
+        assert "Currently matches no files" in _rule_rows(landed)[0]["meta"]
+
+
+def _typed_links(fragment: str) -> list[dict[str, str]]:
+    """Links in ``fragment`` that open the rule page to check a pattern: ``{pattern, path}``."""
+    out = []
+    for a in _tags(fragment, "a"):
+        parts = urlsplit(a.get("href", ""))
+        if not RULE_PAGE.match(parts.path):
+            continue
+        query = parse_qs(parts.query, keep_blank_values=True, strict_parsing=True)
+        assert set(query) <= {"pattern", "path"} and "pattern" in query, a["href"]
+        out.append({
+            "href": a["href"],
+            "pattern": query["pattern"][0],
+            "path": query.get("path", [None])[0],
+        })
+    return out
+
+
+# (typed, the folder variant the page should offer, how many tracked files that matches)
+FOLDER_HINTS = [
+    ("exports", "exports/", 2),             # two tracked files; the third is missing
+    ("src", "src/", 1),
+    ("clients/acme", "clients/acme/", 1),
+    ("clients/*", "clients/*/", 2),
+    ("  exports  ", "exports/", 2),
+    ("readme", None, 0),                    # readme/ matches nothing either
+    ("archive", None, 0),                   # the only file beneath archive/ is missing
+    ("Exports", None, 0),                   # case matters
+    ("nothing-here/", None, 0),             # already a folder
+    ("exports/2026/q1", None, 0),
+]
+
+
+@pytest.mark.parametrize(
+    ("typed", "folder", "count"), FOLDER_HINTS, ids=[repr(c[0]) for c in FOLDER_HINTS]
+)
+def test_the_trailing_slash_is_suggested_only_when_the_folder_matches(
+    cairn_env, typed, folder, count
+):
+    with _make_client(cairn_env, _photos(cairn_env, LISTED_FILES)) as client:
+        body = _rule_page(client, path="readme.txt", pattern=typed)
+        warning = _nomatch(body)
+        assert warning is not None and _cards(body)["custom"]["reach"][0] == 0
+        said = _text(warning)
+        assert "It matches no file in this collection today" in said
+        links = _typed_links(warning)
+        if folder is None:
+            assert links == []
+            assert "With a trailing slash" not in said
+            assert "Check the spelling" in said
+        else:
+            (link,) = links
+            # The suggestion is a check, not an add: it opens the rule page for that pattern,
+            # still starting from the same file.
+            assert (link["pattern"], link["path"]) == (folder, "readme.txt")
+            assert f"With a trailing slash it is a folder: {folder} matches {count} file" in said
+            opened = _get(client, link["href"], "rule_new.html")[0]
+            suggested = _cards(opened)["custom"]
+            assert suggested["pattern"] == folder
+            assert suggested["reach"][0] == count == len(_sample(suggested["html"])["paths"])
+            assert _nomatch(opened) is None
+            assert _starting_from(opened) == "readme.txt"
+        # Either way "anyway" stores what was typed (without the spaces around it) — never the
+        # suggestion — and returns to the review page the starting file came from.
+        anyway = _cards(body)["custom"]["form"]
+        assert anyway["button"] == "Add it anyway"
+        before = _snapshot()
+        resp = client.post(anyway["action"], data=anyway["fields"], follow_redirects=False)
+        assert (resp.status_code, resp.headers["location"]) == (303, "/collection/1/review")
+        assert _patterns() == [typed.strip(" ")]
+        assert _snapshot() == before
+
+
+def test_the_trailing_slash_link_survives_reserved_characters(cairn_env):
+    folder = "a&b #1 'q' \"d\" +%41 é<i>"
+    files = [(f"{folder}/one.txt", "ok"), (f"{folder}/sub/two.txt", "modified"), ("x.txt", "ok"),
+             ("pad/1", "ok"), ("pad/2", "ok")]
+    with _make_client(cairn_env, _photos(cairn_env, files)) as client:
+        for start in (None, f"{folder}/one.txt"):
+            body = _rule_page(client, path=start, pattern=folder)
+            warning = _nomatch(body)
+            (link,) = _typed_links(warning)
+            assert (link["pattern"], link["path"]) == (folder + "/", start)
+            assert "<i>" not in warning
+            opened = _get(client, link["href"], "rule_new.html")[0]
+            assert _cards(opened)["custom"]["pattern"] == folder + "/"
+            assert _cards(opened)["custom"]["reach"] == (2, 5, 1, 1)
+            assert _starting_from(opened) == start
+        assert _rules_json() == "[]"
+
+
+def test_a_proposal_for_a_file_that_is_not_tracked_says_it_matches_nothing(cairn_env):
+    """A starting path can be typed into the address, or outlive its file: the proposals derived
+    from it then match nothing, and each says so beside its add control."""
+    with _make_client(cairn_env, _photos(cairn_env, LISTED_FILES)) as client:
+        cards = _cards(_rule_page(client, path="not/tracked/file.bin"))
+
+    assert set(cards) == {"file", "folder", "name"}
+    for card in cards.values():
+        assert card["reach"] == (0, 7, 0, 0)
+        assert "It matches no file in this collection today" in card["text"]
+        assert _sample(card["html"]) is None
+
+
+# =============================================================================================
+# N. A pattern that takes in half the collection or more says how much
+# =============================================================================================
+
+SHARES = [
+    (5, 7, "71.4%"),
+    (7, 7, "all"),
+    (1, 1, "all"),
+    (1, 2, "50.0%"),
+    (2, 3, "66.7%"),
+    (6, 7, "85.7%"),
+    (3, 7, None),      # 42.9% — under half: no warning
+    (1, 3, None),
+    (0, 4, None),
+]
+
+
+@pytest.mark.parametrize(
+    ("hit", "total", "expected"), SHARES, ids=[f"{h}/{t}" for h, t, _ in SHARES]
+)
+def test_a_broad_pattern_states_its_share_of_the_collection(cairn_env, hit, total, expected):
+    files = [(f"hit/h{i}.txt", "ok") for i in range(hit)]
+    files += [(f"miss/m{i}.txt", "ok") for i in range(total - hit)]
+    files += [("hit/gone.txt", "missing"), ("miss/gone.txt", "missing")]  # never in either figure
+    with _make_client(cairn_env, _photos(cairn_env, files)) as client:
+        typed = _cards(_rule_page(client, pattern="hit/"))["custom"]
+        proposed = _cards(_rule_page(client, path="hit/h0.txt"))["folder"]
+
+    for card in (typed, proposed):
+        assert card["reach"][:2] == (hit, total)
+        assert _share(card["html"]) == expected
+        if expected is None:
+            assert "of this collection" not in card["text"]
+            continue
+        # It points at the policy — the tool for "most of the collection" — with a link to it.
+        assert "in effect the Working policy" in card["text"]
+        warn = card["html"][card["html"].index("That is <strong>"):]
+        assert "/collection/1/edit" in [a.get("href") for a in _tags(warn.split("</div>")[0], "a")]
+
+
+def test_a_share_just_under_the_whole_collection_is_not_rounded_up_to_all_of_it(cairn_env):
+    """1,999 of 2,000 files is not the whole collection, and the one file it leaves out is the
+    one that is still flagged. The share must not read as 100%."""
+    files = [(f"hit/h{i:04d}.txt", "ok") for i in range(1999)] + [("kept/locked.pdf", "ok")]
+    with _make_client(cairn_env, _photos(cairn_env, files)) as client:
+        card = _cards(_rule_page(client, pattern="hit/"))["custom"]
+
+    assert card["reach"][:2] == (1999, 2000)
+    share = _share(card["html"])
+    assert share is not None and share != "all"
+    assert not share.startswith("100"), share
+
+
+# =============================================================================================
+# O. The mass-change ceiling is described as what it is
+# =============================================================================================
+
+
+def _ceiling(monkeypatch, *, percent: int, min_files: int) -> None:
+    from src.config import get_settings
+
+    monkeypatch.setenv("CAIRN_MASS_CHANGE_PERCENT", str(percent))
+    monkeypatch.setenv("CAIRN_MASS_CHANGE_MIN_FILES", str(min_files))
+    get_settings.cache_clear()
+
+
+def _facts(body: str) -> str:
+    return _text(_content(body)[_content(body).index('id="rule-facts"'):])
+
+
+@pytest.mark.parametrize(
+    ("percent", "min_files", "thresholds"),
+    [
+        (None, None, "200 files and 25% of the collection"),      # the defaults
+        (10, 50, "50 files and 10% of the collection"),
+        (40, 1000, "1,000 files and 40% of the collection"),
+        (100, 1, "1 files and 100% of the collection"),
+    ],
+    ids=["defaults", "50 and 10%", "1,000 and 40%", "1 and 100%"],
+)
+def test_the_ceiling_is_stated_with_the_thresholds_in_force(
+    cairn_env, monkeypatch, percent, min_files, thresholds
+):
+    """"…an unusually large change in one scan — stated as what it is, a ceiling across the
+    collection with its two thresholds, not a check on any one file"."""
+    from src.config import get_settings
+
+    seed = _with_rules(_photos(cairn_env, [(NOTES, "modified")]), "NOTES.md")
+    try:
+        if percent is not None:
+            _ceiling(monkeypatch, percent=percent, min_files=min_files)
+        with _make_client(cairn_env, seed) as client:
+            pages = [_rule_page(client, path=NOTES), _rules_page(client)]
+    finally:
+        get_settings.cache_clear()
+
+    for body in pages:
+        facts = _facts(body)
+        assert "An unusually large change in one scan" in facts
+        assert "across the collection, not to one file" in facts
+        assert f"reach both {thresholds}" in facts
+        assert "all of them are flagged instead" in facts
+        # ...and what that leaves: one file's change is not flagged for being large.
+        assert "however large the edit — is not flagged" in facts
+
+
+def test_a_ceiling_that_is_switched_off_is_not_described(cairn_env, monkeypatch):
+    from src.config import get_settings
+
+    seed = _with_rules(_photos(cairn_env, [(NOTES, "modified")]), "NOTES.md")
+    try:
+        _ceiling(monkeypatch, percent=0, min_files=200)
+        with _make_client(cairn_env, seed) as client:
+            pages = [_rule_page(client, path=NOTES), _rules_page(client)]
+            confirm = _cards(pages[0])["folder"]["form"]["attrs"]["onsubmit"]
+    finally:
+        get_settings.cache_clear()
+
+    for body in pages:
+        facts = _facts(body)
+        assert "unusually large" not in facts and "200 files" not in facts
+        assert "0%" not in facts
+        # The rest of what a rule never covers is still said.
+        for kept in ("Deletions.", "Possible corruption", "comes back different",
+                     "however large the edit — is not flagged"):
+            assert kept in facts
+    assert "unusually large" not in confirm
+
+
+def test_the_ceiling_is_not_said_to_be_out_of_reach_of_a_small_rule(cairn_env, monkeypatch):
+    """The spec asks for the ceiling to be stated "as what it is, a ceiling across the
+    collection". A sentence that makes it a property of one rule's size is the opposite claim, and
+    the scanner disproves it here before the pages are read."""
+    from src.config import get_settings
+    from tests.test_scan_safety_nets import _edit, _scan
+
+    root = cairn_env / "two-rules"
+    root.mkdir()
+    names = ["a0.txt", "a1.txt", "b0.txt", "b1.txt"]
+    for name in names:
+        (root / name).write_text(f"first {name}")
+    outcome = {}
+
+    async def seed():
+        from src.database import get_sessionmaker
+        from src.models.db import Collection
+        from src.services import rules
+
+        cid = await seed_collection(root, ots_mode="none")
+        await _scan(cid)
+        async with get_sessionmaker()() as s:
+            c = await s.get(Collection, cid)
+            await rules.add_rule(s, c, "a?.txt")
+            await rules.add_rule(s, c, "b?.txt")
+        for name in names:
+            _edit(root / name, f"second {name}")
+        outcome["summary"] = await _scan(cid)
+
+    try:
+        _ceiling(monkeypatch, percent=50, min_files=3)
+        with _make_client(cairn_env, seed) as client:
+            pages = [_rule_page(client, path="a0.txt"), _rules_page(client)]
+            reach = {r["pattern"]: r["meta"] for r in _rule_rows(pages[1])}
+    finally:
+        get_settings.cache_clear()
+
+    # The premise, checked without `assert` so that only the claim below can be the expected
+    # failure: two rules of two files each, and one scan that hit the ceiling of three.
+    summary = outcome["summary"]
+    if summary.mass_change != 4 or summary.modified != 4:
+        raise RuntimeError(f"premise not met: {summary}")
+    if not all("matches 2 of 4 tracked files" in meta for meta in reach.values()):
+        raise RuntimeError(f"premise not met: {reach}")
+
+    for body in pages:
+        facts = _facts(body)
+        if "reach both 3 files and 50% of the collection" not in facts:
+            raise RuntimeError("the pages do not state the thresholds in force")
+        assert "never reaches it" not in facts
+
+
+# =============================================================================================
+# P. The pages around a rule: titles, ways back, the covered notice, the links to the list
+# =============================================================================================
+
+
+def _back_link(body: str) -> tuple[str, str]:
+    (a,) = [a for a in _tags(_content(body), "a") if "back-link" in a.get("class", "").split()]
+    m = re.search(r'<a class="back-link"[^>]*>(.*?)</a>', body, re.S)
+    return a["href"], _text(m.group(1))
+
+
+def test_the_rule_page_is_titled_for_what_a_rule_does_and_leads_back_to_where_it_came_from(
+    cairn_env,
+):
+    with _make_client(cairn_env, _photos(cairn_env, [(NOTES, "modified")])) as client:
+        from_file = _rule_page(client, path=NOTES)
+        typed = _rule_page(client, pattern="NOTES.md")
+        bare = _rule_page(client)
+        illegal = _rule_page(client, path="../x")
+
+    for body in (from_file, typed, bare, illegal):
+        (h1,) = re.findall(r"<h1>(.*?)</h1>", _content(body), re.S)
+        assert _text(h1) == "New rule: don't flag ordinary changes"
+    assert _back_link(from_file) == ("/collection/1/review", "What changed in photos")
+    for body in (typed, bare, illegal):
+        assert _back_link(body) == ("/collection/1/rules", "Rules for photos")
+
+
+def test_the_rule_page_says_when_a_rule_already_covers_the_starting_file(cairn_env):
+    """Section (g): the page that would create a rule for a file says, before any pattern, that
+    one of the collection's rules already covers it — and which."""
+    seed = _with_rules(
+        _photos(cairn_env, [(NOTES, "modified"), ("other/x.txt", "modified")]),
+        "clients/*/NOTES.md", "NOTES.md",
+    )
+
+    def notice(body: str) -> str | None:
+        m = re.search(r'id="rule-covered".*?</div>\s*</div>', body, re.S)
+        return _text(m.group(0).split(">", 1)[1]) if m else None
+
+    with _make_client(cairn_env, seed) as client:
+        covered = _rule_page(client, path=NOTES)
+        other = _rule_page(client, path="other/x.txt")
+        no_start = _rule_page(client, pattern="NOTES.md")
+        _write_rules_json([_rule("NOTES.md", effect="other")])
+        inert = _rule_page(client, path=NOTES)
+
+    said = notice(covered)
+    assert said is not None
+    # The first rule in the list that matches — the one the review row names, too.
+    assert "This file is already covered by the rule clients/*/NOTES.md." in said
+    assert "it only needs its change accepted" in said
+    assert "Another rule for it would add nothing." in said
+    assert covered.index('id="rule-covered"') < covered.index('id="rule-proposal-file"')
+    # Its name-in-any-folder proposal is the second rule: marked as existing, not offered again.
+    assert _cards(covered)["name"]["form"] is None
+    for body in (other, no_start, inert):
+        assert notice(body) is None and "already covered" not in _said(body)
+
+
+@pytest.mark.parametrize(
+    ("patterns", "label"),
+    [((), "Rules"), (("NOTES.md",), "Rules (1)"), (("NOTES.md", "exports/"), "Rules (2)")],
+    ids=["none", "one", "two"],
+)
+def test_the_collection_page_and_the_review_toolbar_link_to_the_rules_with_their_count(
+    cairn_env, patterns, label
+):
+    seed = _with_rules(_photos(cairn_env, LISTED_FILES), *patterns)
+    with _make_client(cairn_env, seed) as client:
+        detail = client.get("/collection/1").text
+        review, _r = _review(client)
+
+    for page, element in ((detail, "collection-rules-btn"), (review, "review-rules-link")):
+        (a,) = [a for a in _tags(page, "a") if a.get("id") == element]
+        assert a["href"] == "/collection/1/rules"
+        m = re.search(rf'<a[^>]*id="{element}"[^>]*>(.*?)</a>', page, re.S)
+        assert _text(m.group(1)) == label
+
+
+def test_the_learn_page_describes_a_rule_without_the_ceiling(cairn_env):
+    with _make_client(cairn_env, _photos(cairn_env, [(NOTES, "modified")])) as client:
+        learn = _text(client.get("/learn").text)
+
+    assert "Don’t flag future changes…" in learn
+    assert (
+        "ordinary changes to them are no longer flagged, while their deletion, possible "
+        "corruption and a file that comes back different still are."
+    ) in learn
+    assert "unusually large changes still are" not in learn

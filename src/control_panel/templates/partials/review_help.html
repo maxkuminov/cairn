@@ -21,12 +21,16 @@
         <dd>Cairn forgets the file: its record, its first-seen date and the link to its timestamp
           proof are removed. Nothing on disk is deleted and the proof file stays in the proof store,
           but the file is no longer listed under Verify.</dd>
+        {# Not under the Working policy, where no row offers it and a rule does nothing. #}
+        {% if rule_help|default(true) %}
         <dt>Don’t flag future changes…</dt>
         <dd>For a file that changes as part of normal work. It opens a page that proposes a
           <em>rule</em> — this file, its folder, or every file of that name — and shows what each
           would match. From the next scan, ordinary changes to matching files are recorded but not
           flagged. A rule accepts nothing already listed, and never covers a deletion, possible
-          corruption, a file that comes back different or an unusually large change.</dd>
+          corruption or a file that comes back different. A row marked <em>Covered by rule</em>
+          only needs its change accepted.</dd>
+        {% endif %}
       </dl>
     </div>
     <div>

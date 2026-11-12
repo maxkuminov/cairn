@@ -13,7 +13,7 @@
       </div>
       <ul class="guide__list">
         <li>Matching files are <strong>still watched</strong>: compared on every scan, re-read in
-          full by the deep verify, and notarized where the collection is.</li>
+          full by the deep verify, and notarized if the collection is.</li>
         <li>A rule <strong>accepts nothing</strong>. Changes already listed for review stay listed
           until you accept them.</li>
         <li>Removing a rule changes nothing about files already recorded; later changes to the
@@ -27,10 +27,18 @@
         <li><strong>Deletions.</strong> There is no rule for a file that disappears.</li>
         <li><strong>Possible corruption</strong> — contents that changed while the size and date did not.</li>
         <li>A file that <strong>comes back different</strong> after going missing.</li>
-        <li>An <strong>unusually large change</strong> in one scan: if the changes a scan would let
-          pass add up to a large share of the collection, all of them are flagged instead.</li>
+        {% if mass|default(none) %}
+        <li>An <strong>unusually large change in one scan</strong> — across the collection, not to
+          one file: when the changes a scan would let pass reach both
+          {{ "{:,}".format(mass.files) }} files and {{ mass.percent }}% of the collection, all of
+          them are flagged instead. It counts one scan's quiet changes together, whichever rule
+          let them pass — a handful of matching files changing never comes near it.</li>
+        {% endif %}
         <li>A further change to a file whose earlier change you have not accepted yet: it stays listed.</li>
       </ul>
+      <div class="guide__text" style="margin-top:9px">Anything else that happens to a matching
+        file's contents — however large the edit — is <strong>not</strong> flagged. That is what
+        the rule is for; match only files where that is what you want.</div>
     </div>
   </div>
 </div>
