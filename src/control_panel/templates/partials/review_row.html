@@ -86,5 +86,16 @@
         {% endif %}
       </form>
     {% endif %}
+    {# Only an ORDINARY change can be covered by a rule: not a deletion, not possible corruption,
+       not a file that came back different — so only that row offers one. A plain link (a GET):
+       the page it opens shows what a rule would match before anything is stored. #}
+    {% if it.covered_by|default(none) %}
+      {# Already covered: this change only needs accepting. Say so instead of offering a rule. #}
+      <a class="review-row__rule review-row__rule--covered" href="/collection/{{ r.collection_id }}/rules"
+         title="A rule already covers this file. Once you accept this change, later ordinary changes to it are not flagged.">Covered by rule <span class="mono">{{ it.covered_by }}</span></a>
+    {% elif it.rule_link|default(false) %}
+      <a class="review-row__rule" href="/collection/{{ r.collection_id }}/rules/new?path={{ it.relpath | urlencode }}"
+         title="This file changes as part of normal work? Create a rule so ordinary changes to it, or to files like it, are not flagged from the next scan. This change stays listed until you accept it, and a deletion or possible corruption is always flagged. You see what the rule matches before it is created.">Don’t flag future changes…</a>
+    {% endif %}
   </div>
 </div>

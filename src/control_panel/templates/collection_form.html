@@ -60,6 +60,7 @@
           </div>
           <div class="field__hint">
             {% for pol in policies %}<div><strong>{{ pol.label }}</strong> — {{ pol.short | lower }}. {{ pol.flags }}</div>{% endfor %}
+            {% if ed and ed.id %}<div>Exceptions by file: <a href="/collection/{{ ed.id }}/rules">this collection's rules</a> name files whose changes are expected under Locked.</div>{% endif %}
           </div>
         </label>
         <label class="field">

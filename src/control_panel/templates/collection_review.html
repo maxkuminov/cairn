@@ -50,16 +50,7 @@
   </div>
 {% endif %}
 
-{# One-shot confirmation that an accept went through (set by the accept route, shown once). #}
-{% if done %}
-  <div class="card notice notice--ok" id="done-banner" role="status">
-    <span class="notice__icon">{{ m.icon("checkCircle", size=16, stroke=2) }}</span>
-    <div class="notice__body">
-      {% if done.kind == "changes" %}Accepted <strong>{{ "{:,}".format(done.count) }}</strong> change{{ "" if done.count == 1 else "s" }}.
-      {% else %}Accepted <strong>{{ "{:,}".format(done.count) }}</strong> deletion{{ "" if done.count == 1 else "s" }} — {{ "its record was" if done.count == 1 else "their records were" }} removed; nothing on disk was touched.{% endif %}
-    </div>
-  </div>
-{% endif %}
+{% include "partials/done_banner.html" %}
 
 {% if not r.scope_is_root %}
   <div class="scope-bar" id="review-scope">
@@ -115,6 +106,7 @@
       <span class="recovery__copied" id="recovery-copied" hidden>Copied ✓</span>
       <button type="button" class="btn btn--sm btn--ghost" data-copy="rel">{{ m.icon("copy", size=14) }} Copy paths</button>
       <button type="button" class="btn btn--sm btn--ghost" data-copy="abs">{{ m.icon("copy", size=14) }} Copy full paths</button>
+      <a class="btn btn--sm btn--ghost" href="/collection/{{ c.id }}/rules" id="review-rules-link">{{ m.icon("stack", size=14) }} Rules{% if c.policy.rules %} ({{ c.policy.rules }}){% endif %}</a>
       <a class="btn btn--sm btn--ghost" href="#review-help">{{ m.icon("info", size=14) }} What do these do?</a>
     </div>
   </div>
@@ -132,6 +124,7 @@
   {% if copy_truncated %}
     {% set copy_note %}The copy buttons take the first {{ "{:,}".format(copy_count) }} of {{ "{:,}".format(r.total) }} paths — open the <a href="/collection/{{ c.id }}?view=list&amp;filter=issues">file browser, filtered to issues</a>, for the full set.{% endset %}
   {% endif %}
+  {% set rule_help = c.policy.value != "churn" %}
   {% include "partials/review_help.html" %}
 {% endif %}
 

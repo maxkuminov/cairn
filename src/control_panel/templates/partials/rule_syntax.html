@@ -1,0 +1,9 @@
+{# How a pattern is read. One statement of the grammar for the operator, in examples. #}
+<dl class="rule-syntax">
+  <div><dt class="mono">NOTES.md</dt><dd>a name with no slash: every file with that name, in any folder</dd></div>
+  <div><dt class="mono">clients/acme/NOTES.md</dt><dd>a path: exactly that file, counted from the collection's folder</dd></div>
+  <div><dt class="mono">exports/</dt><dd>a trailing slash: everything in that folder, at any depth</dd></div>
+  <div><dt class="mono">clients/*/NOTES.md</dt><dd><span class="mono">*</span> is any run of characters within one name, <span class="mono">?</span> exactly one</dd></div>
+  <div><dt class="mono">**/cache/**</dt><dd><span class="mono">**</span> as a folder of its own: any number of folders, including none</dd></div>
+</dl>
+<div class="field__hint">Upper and lower case matter. Everything else matches only itself — there are no character classes and no escapes.</div>

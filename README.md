@@ -32,7 +32,11 @@ running. Honest caveats before you rely on it:
   should change, or **Working**: edits are normal; scan cadence, exclude globs, optional weekly deep
   re-hash for bit-rot). Detects added / changed / **missing** / moved files. A changed or missing
   file is an *issue* that stays open until you accept it (**Accept change** / **Accept deletion**)
-  or put the file back as it was. Neither policy absorbs possible corruption (contents changed,
+  or put the file back as it was. Where only some files in a Locked collection change as part of
+  normal work, a **rule** names them by path pattern (`NOTES.md`, `exports/`,
+  `clients/*/draft-*.docx`): ordinary changes to them are recorded and re-stamped but not
+  flagged — the panel shows what a pattern matches before the rule exists. A rule never covers a
+  deletion, and unlike an exclude glob it keeps the files watched and notarized. Neither policy absorbs possible corruption (contents changed,
   size and date did not) or an unusually large change in one scan, and a folder that is
   unreachable or comes up empty is reported as such — never as every file deleted.
 - **Notarizes** — stamps file hashes to Bitcoin via OpenTimestamps, runs a daily `upgrade`

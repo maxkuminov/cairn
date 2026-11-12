@@ -75,6 +75,11 @@ class Collection(Base):
     # auto-accepts `modified`/`missing` (that stays the explicit `accept`).
     auto_baseline_new: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     exclude_globs_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    # Path rules (add-path-rules): an ordered JSON array of {"pattern","effect","created_at"}
+    # naming files whose ordinary changes are expected. Read through `services/rules.py` only.
+    rules_json: Mapped[str] = mapped_column(
+        Text, default="[]", server_default="[]", nullable=False
+    )
     alert_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False

@@ -45,16 +45,7 @@
   </div>
 {% endif %}
 
-{# One-shot confirmation that an accept went through (set by the accept route, shown once). #}
-{% if done %}
-  <div class="card notice notice--ok" id="done-banner" role="status">
-    <span class="notice__icon">{{ m.icon("checkCircle", size=16, stroke=2) }}</span>
-    <div class="notice__body">
-      {% if done.kind == "changes" %}Accepted <strong>{{ "{:,}".format(done.count) }}</strong> change{{ "" if done.count == 1 else "s" }}.
-      {% else %}Accepted <strong>{{ "{:,}".format(done.count) }}</strong> deletion{{ "" if done.count == 1 else "s" }} — {{ "its record was" if done.count == 1 else "their records were" }} removed; nothing on disk was touched.{% endif %}
-    </div>
-  </div>
-{% endif %}
+{% include "partials/done_banner.html" %}
 
 {% if not has_collections %}
   <div class="card">

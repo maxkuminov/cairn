@@ -35,6 +35,7 @@ from ..models.db import Collection, Event, FileEntry, Run, User
 from ..services import app_settings as app_settings_svc
 from ..services import collections as collections_svc
 from ..services import proofs as proofs_svc
+from ..services import rules as rules_svc
 from ..services import scanner as scanner_svc
 from ..services.panel_url import panel_link
 
@@ -287,8 +288,22 @@ _POLICY = {
 }
 
 
-def _policy_view(mode: str) -> dict[str, str]:
-    return {"value": mode, **_POLICY.get(mode, _POLICY["worm"])}
+def _policy_view(mode: str, rules: int = 0) -> dict[str, Any]:
+    """A policy in the operator's words. ``rules`` is how many path rules the collection carries:
+    with any, "every change is flagged" is no longer true of a Locked collection, so the statement
+    of what the policy flags is qualified rather than left standing beside the rule count."""
+    view: dict[str, Any] = {"value": mode, **_POLICY.get(mode, _POLICY["worm"]), "rules": rules}
+    if rules and view["value"] != "churn":
+        view["flags"] = (
+            "Every deletion is flagged, and every change — except ordinary changes to the files "
+            f"its {rules} rule{'' if rules == 1 else 's'} cover{'s' if rules == 1 else ''}."
+        )
+    return view
+
+
+def _rules_count(collection: Collection) -> int:
+    """How many recognised path rules a collection carries (parsed from its own row, no query)."""
+    return len(rules_svc.load(collection))
 
 # --- live operation status (scan / stamp / upgrade) -----------------------------------------
 
@@ -469,7 +484,7 @@ async def _collection_view(session: AsyncSession, collection: Collection) -> dic
         "op": _op_view(active) if active else None,
         "root": collection.root,
         "mode": collection.mode,
-        "policy": _policy_view(collection.mode),
+        "policy": _policy_view(collection.mode, _rules_count(collection)),
         "ots": collection.ots_mode,
         "cadence": _cadence_label(collection.hash_cadence_seconds),
         "cadence_seconds": collection.hash_cadence_seconds,
@@ -742,7 +757,7 @@ async def _needs_you(
             {
                 "id": c.id,
                 "name": c.name,
-                "policy": _policy_view(c.mode),
+                "policy": _policy_view(c.mode, _rules_count(c)),
                 "missing": missing,
                 "modified": len(pop.files) - missing,
                 "total": len(pop.files),
@@ -1761,7 +1776,7 @@ async def _guarded_accept(
 # The cookie is client-held, so it is parsed against a strict pattern and can only ever produce
 # the sentence "Accepted N change(s)/deletion(s)" — it selects nothing and authorises nothing.
 _DONE_COOKIE = "cairn_done"
-_DONE_RE = re.compile(r"^(changes|deletions):([0-9]{1,7})$")
+_DONE_RE = re.compile(r"^(changes|deletions|rule):([0-9]{1,7})$")
 
 
 def _set_done(response: RedirectResponse, outcome: dict[str, int]) -> None:
@@ -1772,6 +1787,13 @@ def _set_done(response: RedirectResponse, outcome: dict[str, int]) -> None:
         value = f"changes:{accepted}"
     else:
         return
+    response.set_cookie(_DONE_COOKIE, value, max_age=60, httponly=True, samesite="lax", path="/")
+
+
+def _set_rule_done(response: RedirectResponse, listed: int) -> None:
+    """A rule was added; ``listed`` is how many changed files on the review page it matches (and
+    which therefore stay listed). Same one-shot cookie, same strict shape."""
+    value = f"rule:{min(max(int(listed), 0), 9_999_999)}"
     response.set_cookie(_DONE_COOKIE, value, max_age=60, httponly=True, samesite="lax", path="/")
 
 
@@ -2189,6 +2211,7 @@ async def collection_review(
     pop = await _read_population(session, collection)
     model = _review_model(collection, pop, scope, REVIEW_ROW_LIMIT)
     await _attach_facts(session, collection.id, model["rows"])
+    _attach_rule_state(collection, model["rows"])
 
     # The page's own claims about the collection come from the snapshot too, not from
     # `_collection_view`'s earlier, separate count queries: "nothing to review" only means
@@ -2252,7 +2275,8 @@ async def fleet_review(
         model = _review_model(c, pop, _ROOT_SCOPE, min(FLEET_COLLECTION_ROW_LIMIT, max(budget, 0)))
         budget -= model["shown"]
         await _attach_facts(session, c.id, model["rows"])
-        model["policy"] = _policy_view(c.mode)
+        _attach_rule_state(c, model["rows"])
+        model["policy"] = _policy_view(c.mode, _rules_count(c))
         sections.append(model)
 
     ctx = await _base_context(request, session, user, "review")
@@ -2415,6 +2439,346 @@ async def collection_file_accept(
     response = RedirectResponse(_review_return(collection_id, origin, return_scope), status_code=303)
     _set_done(response, outcome)
     return response
+
+
+# --- path rules ---------------------------------------------------------------------------------
+# A rule says that ordinary changes to the files a pattern matches are expected (add-path-rules).
+# These routes only ever store or remove a pattern: they accept nothing, acknowledge nothing and
+# remove no record, which is why they carry no population fingerprint. What keeps a rule honest is
+# that its reach is on the page before it exists, and that the grammar refuses a rule for
+# everything. The grammar itself lives in `services/rules.py`; nothing here re-states it.
+
+RULE_START_PATH_MAX = 4096
+RULE_TYPED_MAX = 2048
+
+# Why a pattern was refused, in the operator's words. Keyed by `RuleError.reason`; an unknown
+# reason falls back to the service's own sentence.
+_RULE_REFUSALS = {
+    "empty": "Type a pattern first.",
+    "absolute": "A pattern is read from the collection's own folder, so it cannot start with a slash.",
+    "segment": "A pattern cannot contain an empty folder name, “.” or “..”.",
+    "control": "A pattern cannot contain a line break.",
+    "too_long": f"That pattern is too long — {rules_svc.MAX_PATTERN_BYTES} bytes at most.",
+    "double_star": (
+        "“**” stands for whole folders, so it has to be a folder on its own, as in a/**/b. "
+        "It cannot be part of a name."
+    ),
+    "match_all": (
+        "A rule cannot cover every file. If changes anywhere in this collection are normal, that "
+        "is what its policy says: set the collection's policy to Working."
+    ),
+    "duplicate": "This collection already has that rule.",
+    # A stored entry with this pattern that the scanner ignores (an effect this version does not
+    # know): not "already a rule" — nothing is being silenced — but it does occupy the pattern.
+    "duplicate_ignored": (
+        "This collection has a stored entry with that pattern that is not recognised and is "
+        "ignored. Remove it on the rules page, then add the rule."
+    ),
+    "too_many": (
+        f"This collection already has {rules_svc.MAX_RULES} rules, the most it can hold. "
+        "Remove one first."
+    ),
+}
+
+
+RULE_SAMPLE = 20
+
+
+def _covering_rule(collection: Collection, relpath: str) -> str | None:
+    """The first of the collection's rules that matches ``relpath``, or ``None``."""
+    for pattern in rules_svc.load(collection).patterns:
+        try:
+            if rules_svc.compile_pattern(pattern).fullmatch(relpath):
+                return pattern
+        except (rules_svc.RuleError, re.error):
+            continue
+    return None
+
+
+def _attach_rule_state(collection: Collection, rows: list[dict[str, Any]]) -> None:
+    """What each ordinary-change row says about rules: ``rule_link`` (offer "Don't flag future
+    changes…") or ``covered_by`` (the rule that already covers it — so the row says the change
+    only needs accepting, instead of inviting a second, redundant rule). Neither under the
+    Working policy, where ordinary edits are quiet anyway and a rule does nothing."""
+    compiled: list[tuple[str, re.Pattern[str]]] = []
+    if collection.mode != "churn":
+        for pattern in rules_svc.load(collection).patterns:
+            try:
+                compiled.append((pattern, rules_svc.compile_pattern(pattern)))
+            except (rules_svc.RuleError, re.error):
+                continue
+    for row in rows:
+        row["rule_link"], row["covered_by"] = False, None
+        if row["kind"] != "changed" or collection.mode == "churn":
+            continue
+        row["covered_by"] = next(
+            (pattern for pattern, rx in compiled if rx.fullmatch(row["relpath"])), None
+        )
+        row["rule_link"] = row["covered_by"] is None
+
+
+def _mass_rule(settings: Any) -> dict[str, int] | None:
+    """The mass-change ceiling's two thresholds, for the sentence that explains it; ``None`` when
+    it is switched off (a share of 0), so the pages do not describe a safety net that is not on."""
+    if settings.mass_change_percent <= 0:
+        return None
+    return {"files": settings.mass_change_min_files, "percent": settings.mass_change_percent}
+
+
+def _rule_refusal(reason: str, fallback: str = "") -> dict[str, str]:
+    return {"reason": reason, "text": _RULE_REFUSALS.get(reason) or fallback or "That pattern cannot be used."}
+
+
+def _legal_relpath(path: str) -> bool:
+    """Whether a query value can be a file's collection-relative path. The value is untrusted text:
+    anything else is dropped, never shown and never split into proposals."""
+    if not path or len(path.encode("utf-8", "replace")) > RULE_START_PATH_MAX:
+        return False
+    # A line break is legal in a file name (macOS writes `Icon\r` into folders), so it is legal
+    # here: such a name cannot be a pattern, but its folder can, and the page still starts from it.
+    if path.startswith("/") or "\x00" in path:
+        return False
+    return all(segment not in ("", ".", "..") for segment in path.split("/"))
+
+
+def _rule_proposals(path: str) -> list[dict[str, Any]]:
+    """The patterns offered for a flagged file, narrowest first: the file alone, its folder, its
+    name in any folder. A proposal is kept only if the grammar stores it **unchanged** and the
+    compiled pattern **matches the file it was derived from** — the page never offers a pattern it
+    has not just checked against the path it is describing. A file directly in the collection root
+    has one proposal: a bare name is, by the grammar, that name in any folder."""
+    if not _legal_relpath(path):
+        return []
+    folder, _, name = path.rpartition("/")
+    candidates = [("file", path), ("folder", folder + "/")] if folder else []
+    candidates.append(("name", name))
+    proposals: list[dict[str, Any]] = []
+    for kind, pattern in candidates:
+        try:
+            stored = rules_svc.validate_pattern(pattern)
+            if stored != pattern or not rules_svc.compile_pattern(stored).fullmatch(path):
+                continue
+        except (rules_svc.RuleError, re.error):
+            continue
+        if any(p["pattern"] == stored for p in proposals):
+            continue
+        proposals.append(
+            {
+                "kind": kind,
+                "pattern": stored,
+                "name": name,
+                "folder": folder,
+                # `*` and `?` in a real file name are wildcards to the grammar (there is no
+                # escape), so such a proposal can reach further than its label; the page says so.
+                "wild": "*" in stored or "?" in stored,
+            }
+        )
+    return proposals
+
+
+def _rule_check(collection: Collection, raw: str) -> tuple[str | None, dict[str, str] | None]:
+    """``(pattern to store, None)`` or ``(None, refusal)`` for a typed pattern — every refusal
+    `add_rule` would make, so the page can state it before anything is submitted."""
+    try:
+        pattern = rules_svc.validate_pattern(raw)
+    except rules_svc.RuleError as exc:
+        return None, _rule_refusal(exc.reason, str(exc))
+    existing = rules_svc.list_rules(collection)
+    for entry in existing:
+        if entry["pattern"] == pattern:
+            return None, _rule_refusal("duplicate" if entry["recognised"] else "duplicate_ignored")
+    if len(existing) >= rules_svc.MAX_RULES:
+        return None, _rule_refusal("too_many")
+    return pattern, None
+
+
+def _rule_collection(collection: Collection) -> dict[str, Any]:
+    """What the two rule pages say about the collection they belong to."""
+    return {
+        "id": collection.id,
+        "name": collection.name,
+        "policy": _policy_view(collection.mode, _rules_count(collection)),
+        "ots": collection.ots_mode,
+        # Under Working, ordinary edits are quiet everywhere; a rule adds nothing there. The pages
+        # say so instead of letting a rule look like it did something.
+        "rules_have_effect": collection.mode != "churn",
+    }
+
+
+@router.get("/collection/{collection_id}/rules/new", response_class=HTMLResponse)
+async def rule_new(
+    collection_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(current_user),
+    path: str = Query(""),
+    pattern: str | None = Query(None),
+):
+    """Say that changes to some files are expected — with each pattern's reach shown first.
+
+    ``path`` is the flagged file the operator came from (untrusted: used only to derive proposals
+    and shown escaped). ``pattern`` is a pattern of their own to check: it is validated and its
+    reach — or the reason it is refused — is rendered, and nothing is stored by a GET.
+    """
+    collection = await _get_owned_collection(session, collection_id, user)
+    start = path if _legal_relpath(path) else ""
+    proposals = _rule_proposals(start)
+    stored_entries = rules_svc.list_rules(collection)
+    existing = {entry["pattern"] for entry in stored_entries if entry["recognised"]}
+    ignored = {entry["pattern"] for entry in stored_entries if not entry["recognised"]}
+
+    custom: dict[str, Any] | None = None
+    if pattern is not None:
+        # Present but blank is a submission too: it is refused, with the reason, like any other.
+        typed = pattern[:RULE_TYPED_MAX]
+        stored, refusal = _rule_check(collection, typed)
+        # `typed` is what the operator typed, kept verbatim for the field and for a refusal;
+        # `pattern` is what would be stored. The card of an accepted pattern shows `pattern` —
+        # never `typed` — so the text beside "Add this rule" is exactly what that button stores.
+        custom = {"typed": typed, "pattern": stored, "refusal": refusal}
+        # The operator's own pattern is shown once, as theirs.
+        proposals = [p for p in proposals if p["pattern"] != stored]
+
+    wanted = [p["pattern"] for p in proposals]
+    as_folder: str | None = None
+    if custom and custom["pattern"]:
+        wanted.append(custom["pattern"])
+        # The commonest way to match nothing is a folder typed without its trailing slash (which
+        # reads as a file NAME). Checked in the same pass, and offered only if it matches.
+        if not custom["pattern"].endswith("/"):
+            try:
+                as_folder = rules_svc.validate_pattern(custom["pattern"] + "/")
+                wanted.append(as_folder)
+            except rules_svc.RuleError:
+                as_folder = None
+    reach = await rules_svc.reach_many(session, collection, wanted, sample=RULE_SAMPLE)
+    for p in proposals:
+        p["reach"] = reach[p["pattern"]]
+        p["exists"] = p["pattern"] in existing
+        p["ignored"] = p["pattern"] in ignored
+    if custom and custom["pattern"]:
+        custom["reach"] = reach[custom["pattern"]]
+        if custom["reach"]["tracked"] == 0 and as_folder and reach[as_folder]["tracked"]:
+            custom["as_folder"] = {"pattern": as_folder, "tracked": reach[as_folder]["tracked"]}
+
+    ctx = await _base_context(request, session, user, "collection")
+    ctx.update(
+        {
+            "c": _rule_collection(collection),
+            "start": start,
+            # The rule that already covers the starting file, if any: said up front, so the page
+            # is not an invitation to stack a second rule on a file that only needs accepting.
+            # Not under Working: a rule has no effect there, so nothing is "covered".
+            "covered_by": (
+                _covering_rule(collection, start) if start and collection.mode != "churn" else None
+            ),
+            "proposals": proposals,
+            "custom": custom,
+            "window_days": rules_svc.ALARM_WINDOW_DAYS,
+            "mass": _mass_rule(get_settings()),
+        }
+    )
+    return templates.TemplateResponse(request, "rule_new.html", ctx)
+
+
+@router.post("/collection/{collection_id}/rules", dependencies=[Depends(verify_csrf)])
+async def rule_create(
+    collection_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(current_user),
+    pattern: str = Form(""),
+    path: str = Form(""),
+):
+    """Store a rule. It changes no file record and no event: what is listed stays listed.
+
+    A refused pattern goes back to the page it came from, which states the reason and keeps what
+    was typed (the GET derives the same refusal — one statement of the grammar, not two).
+    """
+    collection = await _get_owned_collection(session, collection_id, user)
+    try:
+        stored = await rules_svc.add_rule(session, collection, pattern[:RULE_TYPED_MAX])
+    except rules_svc.RuleError:
+        back = {"pattern": pattern[:RULE_TYPED_MAX]}
+        if _legal_relpath(path):
+            back["path"] = path
+        return RedirectResponse(
+            f"/collection/{collection_id}/rules/new?{urlencode(back)}", status_code=303
+        )
+    listed = (await rules_svc.reach(session, collection, stored))["open_changed"]
+    # Back to where the operator started: the review page when they came from a flagged file,
+    # the rules page when they typed a pattern there. Both show the same one-shot confirmation.
+    target = "review" if _legal_relpath(path) else "rules"
+    response = RedirectResponse(f"/collection/{collection_id}/{target}", status_code=303)
+    _set_rule_done(response, listed)
+    return response
+
+
+@router.get("/collection/{collection_id}/rules", response_class=HTMLResponse)
+async def collection_rules(
+    collection_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(current_user),
+    gone: str = Query(""),
+):
+    """A collection's rules, each with what it matches now, and the control that removes it."""
+    collection = await _get_owned_collection(session, collection_id, user)
+    entries = rules_svc.list_rules(collection)
+    reach = await rules_svc.reach_many(
+        session, collection, [e["pattern"] for e in entries if e["recognised"]], sample=RULE_SAMPLE
+    )
+    rows = []
+    for entry in entries:
+        created = None
+        try:
+            created = humanize_date(datetime.fromisoformat(entry["created_at"] or ""))
+        except (TypeError, ValueError):
+            pass
+        rows.append(
+            {
+                "pattern": entry["pattern"],
+                "recognised": entry["recognised"],
+                "created": created,
+                "tracked": reach[entry["pattern"]]["tracked"] if entry["recognised"] else None,
+                "sample": reach[entry["pattern"]]["sample"] if entry["recognised"] else [],
+            }
+        )
+    total = next(iter(reach.values()))["total"] if reach else None
+    ctx = await _base_context(request, session, user, "collection")
+    ctx.update(
+        {
+            "c": _rule_collection(collection),
+            "rules": rows,
+            "total": total,
+            "max_rules": rules_svc.MAX_RULES,
+            # `?gone=1` a rule was removed; `?gone=0` the rule named was no longer there.
+            "gone": gone if gone in ("0", "1") else "",
+            "mass": _mass_rule(get_settings()),
+        }
+    )
+    # The one-shot "Rule added" confirmation, when the rule was typed on this page.
+    done = _take_done(request)
+    ctx["done"] = done if done and done["kind"] == "rule" else None
+    response = templates.TemplateResponse(request, "collection_rules.html", ctx)
+    if ctx["done"] is not None:
+        response.delete_cookie(_DONE_COOKIE, path="/")
+    return response
+
+
+@router.post("/collection/{collection_id}/rules/delete", dependencies=[Depends(verify_csrf)])
+async def rule_delete(
+    collection_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: User = Depends(current_user),
+    pattern: str = Form(""),
+):
+    """Remove the rule with exactly this pattern — named, never positional, so a list that changed
+    since the page was rendered cannot lose a different rule. Changes no file record."""
+    collection = await _get_owned_collection(session, collection_id, user)
+    removed = await rules_svc.remove_rule(session, collection, pattern)
+    return RedirectResponse(
+        f"/collection/{collection_id}/rules?gone={'1' if removed else '0'}", status_code=303
+    )
 
 
 @router.post("/collection/{collection_id}/stamp-all", response_class=HTMLResponse, dependencies=[Depends(verify_csrf)])

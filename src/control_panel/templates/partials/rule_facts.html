@@ -1,0 +1,44 @@
+{% import "_macros.html" as m %}
+{# What a rule does and what it never does — the same statement on the page that creates a rule
+   and the page that lists them. Nothing here may promise more than the scanner does: a rule
+   covers an ORDINARY change to a matching file and nothing else, and it resolves nothing. #}
+<div class="card guide" id="rule-facts">
+  <div class="guide__grid">
+    <div>
+      <div class="guide__title">{{ m.icon("checkCircle", size=15, stroke=1.9) }} What a rule does</div>
+      <div class="guide__text">
+        From the next scan, an ordinary change to a matching file is recorded{% if c.ots != "none" %} and re-stamped{% endif %} but
+        <strong>not flagged</strong> and not alerted on — the way every file behaves in a Working
+        collection, for these files only.
+      </div>
+      <ul class="guide__list">
+        <li>Matching files are <strong>still watched</strong>: compared on every scan, re-read in
+          full by the deep verify, and notarized if the collection is.</li>
+        <li>A rule <strong>accepts nothing</strong>. Changes already listed for review stay listed
+          until you accept them.</li>
+        <li>Removing a rule changes nothing about files already recorded; later changes to the
+          files it matched follow the collection's policy.</li>
+      </ul>
+    </div>
+    <div>
+      <div class="guide__title">{{ m.icon("alert", size=15, stroke=1.9) }} What a rule never covers</div>
+      <div class="guide__text">These are flagged for a matching file exactly as for any other:</div>
+      <ul class="guide__list">
+        <li><strong>Deletions.</strong> There is no rule for a file that disappears.</li>
+        <li><strong>Possible corruption</strong> — contents that changed while the size and date did not.</li>
+        <li>A file that <strong>comes back different</strong> after going missing.</li>
+        {% if mass|default(none) %}
+        <li>An <strong>unusually large change in one scan</strong> — across the collection, not to
+          one file: when the changes a scan would let pass reach both
+          {{ "{:,}".format(mass.files) }} files and {{ mass.percent }}% of the collection, all of
+          them are flagged instead. It counts one scan's quiet changes together, whichever rule
+          let them pass; short of either threshold, rule-covered changes are not flagged.</li>
+        {% endif %}
+        <li>A further change to a file whose earlier change you have not accepted yet: it stays listed.</li>
+      </ul>
+      <div class="guide__text" style="margin-top:9px">Anything else that happens to a matching
+        file's contents — however large the edit — is <strong>not</strong> flagged. That is what
+        the rule is for; match only files where that is what you want.</div>
+    </div>
+  </div>
+</div>

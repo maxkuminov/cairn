@@ -596,6 +596,58 @@ file hashes to Bitcoin via OpenTimestamps for trustless "existed-by-date" proofs
 > fixed, incl. the alert limit and the whole-collection shielding), migration and refusal
 > exercised on a copy of production data.
 
+> Path rules (add-path-rules, #67): a collection's policy is now a default with exceptions by
+> path. `collections.rules_json` (migration **0014**, plain `ADD COLUMN`, default `[]`) holds a
+> list of `{pattern, effect: "edits", created_at}`; **an ordinary change to a file a rule matches
+> is re-recorded and re-stamped quietly under `worm` too** — the code path a `churn` re-baseline
+> takes, nothing new. The scanner consults rules in exactly ONE place: the hash-compare branch
+> (`quiet = mode == "churn" or rule_set.matches(relpath)`), after the return-to-prior and
+> corruption checks. `rule_set` is loaded once at the start of the pass, so a rule added mid-scan
+> applies from the next one. **A rule covers nothing else and resolves nothing**: not a deletion,
+> not possible corruption, not a changed reappearance, not a file with an open change alert (it
+> stays `modified` via `_healthy_status`), and a rule-covered edit never takes a row already
+> recorded `modified` off the review list, open alert or not; adding or removing a rule changes no file row and no
+> event. The mass-change ceiling now counts every quiet re-baseline of the pass, so it applies in
+> a `worm` collection over its rule-covered changes. **Grammar** (`src/services/rules.py`, the
+> only statement of it): no `/` = a file name in any folder; otherwise anchored at the collection
+> root, segment by segment; trailing `/` or a final `**` = everything beneath; `*`/`?` never cross
+> `/`; `**` only as a whole segment; everything else literal, no escapes. Refused: empty, leading
+> `/`, empty/`.`/`..` segments, control characters (checked on the raw input; only spaces and
+> tabs are stripped), > 512 bytes, `**` inside a name, and any pattern with no literal character
+> (a rule for everything is the policy's job). `compile_pattern` emits **atomic-group** regexes —
+> each segment and each run of segments after a `**` is placed leftmost and never retried — so a
+> match is bounded; `tests/test_rules.py` checks it against an independent reference matcher over
+> 6,000 generated pairs. `load()` never raises and treats an unknown `effect` as inert.
+> **Panel**: `GET /collection/{id}/rules/new?path=…[&pattern=…]` (reached from "Don't flag future
+> changes…" on an *ordinary* changed row in a Locked collection — never a missing,
+> possibly-corrupted or came-back-different one; a row a rule already matches reads "Covered by
+> rule …" instead, via `_attach_rule_state`) proposes the file, its folder and its name anywhere, each with its
+> reach from `rules.reach_many` (tracked matches / total, listed changes matched, ordinary change
+> alarms of the last 90 days by the path the event recorded) — two SELECTs whatever the pattern
+> count, and with `sample=N` the first N matching paths, so each card can list WHICH files it
+> reaches; a typed pattern is checked by GET and nothing is stored (one that matches nothing says
+> so and is addable only through a secondary control). `POST /collection/{id}/rules`
+> stores and redirects to where the operator started (the review page from a listed file, the
+> rules page otherwise) with the one-shot `cairn_done=rule:N` confirmation
+> ("Rule added… N listed changes match it and are still listed"); `GET /collection/{id}/rules`
+> lists rules with what each matches now; `POST …/rules/delete` removes by pattern, never
+> position. `_policy_view(mode, rules)` qualifies the Locked sentence when rules exist, and a
+> Working collection is told a rule changes nothing there. A proposal is offered only if the
+> grammar stores it unchanged and it matches the file it came from; one containing `*`/`?` is
+> labelled as a pattern, not "only this file". **Cut in spec review, on purpose**: a second
+> effect for deletions ("comes and goes" — retiring a record at scan time discards the digest a
+> reappearance must be compared with, and a temporarily unmounted subfolder would lose its
+> records) and resolving open issues when a rule is created (it mutated a population the operator
+> had not been shown, outside the accept guard). Accepted limitations are in the archived design
+> (a root-level file cannot be named alone; no escape for `*`/`?`; an inert stored entry occupies
+> its pattern). Gates: 2-round Codex spec review, 2-round adversarial implementation review
+> (bounded matching and validation order fixed; matcher verified over ~106k comparisons),
+> a verification round, independent panel tests (181; several defects found and fixed), verifier
+> (one blocking gap, fixed), and a browser usability pass on a copy of production data — which is
+> why every surface says a change to a matching file is not flagged *however large*: the
+> mass-change ceiling is collection-wide and a small rule never reaches it. Next: history views (quiet changes recorded and browsable, per-file versions
+> and proofs).
+
 - `make init|build|deploy|up|down|logs|shell|db-backup|status|clean|audit` — **implemented** (add-foundation).
   `make deploy` = build → trivy → push → SQLite online backup → `compose up -d --force-recreate`.
   Host paths in gitignored `Makefile.local` (`DEPLOY_DIR=/srv/cairn`). This is the **compose** path,

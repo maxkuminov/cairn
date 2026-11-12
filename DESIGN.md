@@ -188,12 +188,12 @@ The panel's endpoints live in `control_panel/routes.py`, not in `api/` — the p
 server-rendered htmx, so there was never a separate JSON API to mount. `api/`, `auth/` and
 `witness/` are reserved namespaces, empty today.
 
-### SQLite schema (as built; `src/models/db.py`, migrations `0001`–`0011`)
+### SQLite schema (as built; `src/models/db.py`, migrations `0001`–`0014`)
 - `users(id, username, password_hash, is_admin, is_active, created_at, last_login_at)`
   — single-user mode uses one implicit row.
 - `collections(id, user_id, name, root, mode[worm|churn], hash_cadence_seconds,
   verify_cadence_seconds, ots_mode[none|perfile], auto_baseline_new, exclude_globs_json,
-  alert_json, created_at, last_full_scan_at)`
+  rules_json, alert_json, created_at, last_full_scan_at)`
   — `root` must resolve under the owning user's mounted base. `verify_cadence_seconds` drives the
   deep re-hash pass (`0` = off) and `last_full_scan_at` records the last one; `auto_baseline_new`
   lets that deep pass graduate intact `new` files to `ok`.
@@ -243,9 +243,14 @@ One sentence of *shape* per step; the behavioural contract is
 4. **Deep verify** — on a deep pass, re-hash *every* tracked file instead of fast-pathing; that is
    the only way silent bit-rot (bytes change, size + mtime do not) is ever seen.
 5. **Classify** — added / modified / unchanged, writing `events` and per-batch progress; WORM and
-   churn differ in what nags, not in what is detected. Two findings are never absorbed by a
+   churn differ in what nags, not in what is detected. The policy is a default with exceptions by
+   path: a collection's **rules** (`collections.rules_json`, grammar in `services/rules.py`) name
+   files whose ordinary changes are quiet under WORM too — consulted in exactly one place, the
+   hash-compare branch, after the two checks below. A rule covers nothing else (not a deletion,
+   not a changed reappearance), resolves nothing, and its quiet changes count toward the mass
+   change ceiling. Two findings are never absorbed by a
    policy: **possible corruption** (the digest changed while size and mtime did not — a `corrupted`
-   event under both policies) and a **mass change** (when the changes a churn pass would accept
+   event under both policies) and a **mass change** (when the changes a pass would accept
    silently reach both `CAIRN_MASS_CHANGE_MIN_FILES` and `CAIRN_MASS_CHANGE_PERCENT` of the
    collection, they all become issues). A change keeps the contents it replaced (`files.prior_*`)
    until it is accepted; a file found back at those contents closes its own issue.
@@ -319,6 +324,11 @@ mechanism.) `CAIRN_SCHEDULER_ENABLED=0` gives a cron-only deployment driven by `
 - **add / edit collection** — root (validated live, within the allowed base), change policy
   (**Locked** / **Working** — stored as `worm` / `churn`), OTS mode, exclude globs, scan +
   deep-verify cadences, alert routing
+- **rules** (`/collection/{id}/rules`, `/collection/{id}/rules/new`) — files whose changes are
+  expected. A changed file's review row links to a page that proposes patterns for it (the file,
+  its folder, its name anywhere) and states each one's reach — tracked files matched, listed
+  changes matched, change alarms of the last ninety days — before anything is stored. Adding a
+  rule accepts nothing; the rules page lists each rule with what it matches now and removes it
 - **verify** — **no upload**: search the tracked files that hold proofs, and Cairn re-hashes the
   file it already watches and checks the stored `.ots` against the configured block source. The
   result card names *which* outcome occurred — anchored, not yet anchored, digest disagreement,

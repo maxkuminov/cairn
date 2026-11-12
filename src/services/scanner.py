@@ -27,6 +27,7 @@ from sqlalchemy import case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.db import Collection, Event, FileEntry, Run
+from . import rules as path_rules
 
 CHUNK = 1 << 20  # 1 MiB streamed-hash chunk
 BATCH = 500  # files per DB commit
@@ -507,6 +508,10 @@ async def scan_collection(
     collection_name = collection.name
     summary = RunSummary(collection_id=collection_id)
     perfile = collection.ots_mode == "perfile"
+    # The collection's path rules, compiled once for the whole pass (add-path-rules D3) and read
+    # here, before any rollback can expire `collection`: a rule stored while this pass runs
+    # applies from the next one. Consulted in ONE place — the hash-compare branch below.
+    rule_set = path_rules.load(collection)
 
     # Progress estimate: the last completed scan's processed count is the best guess of how many
     # files this walk will cover. A first scan (or the first after the 0006 migration, where older
@@ -599,7 +604,8 @@ async def scan_collection(
         # `_drain` system-acknowledges their open change alerts in the same transaction that commits
         # the `ok` status, exactly as `restored_ids` does for `missing` alerts.
         returned_ids: list[int] = []
-        # Silent churn re-baselines of this pass: (row, sha, size, mtime) it replaced (design D4).
+        # Silent re-baselines of this pass — churn policy or a path rule: (row, sha, size, mtime)
+        # it replaced (design D4; add-path-rules D3).
         churn_rebaselines: list[tuple[FileEntry, str | None, int, float | None]] = []
         added_buffer: list[FileEntry] = []
         # Ids of files restored in this batch (missing → ok). `_drain` system-acknowledges their open
@@ -964,7 +970,11 @@ async def scan_collection(
                             # state gets its own proof). Applies to both worm and churn collections.
                             if perfile:
                                 row.ots_state = "pending"
-                            if is_corruption or collection.mode != "churn":
+                            # Quiet: an ordinary change the policy (`churn`) or a path rule says
+                            # is expected (add-path-rules D3). Decided only after the return
+                            # and corruption checks above; neither of those consults the rules.
+                            quiet = collection.mode == "churn" or rule_set.matches(relpath)
+                            if is_corruption or not quiet:
                                 kind = "corrupted" if is_corruption else "modified"
                                 if was_healthy:
                                     _keep_prior(row, *before)
@@ -983,9 +993,18 @@ async def scan_collection(
                                     summary.corrupted += 1
                                 _record_alarm(kind, relpath)
                             else:
-                                # Change is expected: silently re-baseline, no nag — unless an
-                                # earlier alarm on this file is still open (design D12).
-                                row.status = _healthy_status(row, unresolved_ids, reflagged_ids)
+                                # Change is expected (churn policy or a path rule): silently
+                                # re-baseline, no nag — unless an earlier alarm on this file is
+                                # still open (design D12).
+                                # ...and, where the change is quiet only because a RULE says so
+                                # (a `worm` collection), unless the file is already an issue at
+                                # all: a row recorded `modified` with NO open alert (an alert
+                                # closed by the retired "mark reviewed" verb) is still listed for
+                                # review, and a rule resolves nothing — only an accept or an exact
+                                # return takes it off that list. Its kept contents stay as they
+                                # are. Under `churn` the long-standing behaviour is unchanged.
+                                if collection.mode == "churn" or row.status != "modified":
+                                    row.status = _healthy_status(row, unresolved_ids, reflagged_ids)
                                 summary.ok += 1
                                 if row.status == "ok" and was_healthy:
                                     # Remembered for the mass-change ceiling (design D4).
@@ -1152,11 +1171,13 @@ async def scan_collection(
                         summary.baselined,
                     )
 
-            # Design D4, the mass-change ceiling (churn only — worm already reports every change).
-            # Evaluated once, on this pass's own silent re-baselines, before the D12 sweep so the
-            # events it writes are part of the set that sweep re-reads.
+            # Design D4, the mass-change ceiling, over EVERY quiet re-baseline of this pass — churn
+            # policy or path rule, so in a worm collection too (add-path-rules D3); changes a worm
+            # collection reports anyway never enter `churn_rebaselines`. Evaluated once, on this
+            # pass's own silent re-baselines, before the D12 sweep so the events it writes are part
+            # of the set that sweep re-reads.
             q = len(churn_rebaselines)
-            if q and collection.mode == "churn":
+            if q:
                 from ..config import get_settings
 
                 _settings = get_settings()
